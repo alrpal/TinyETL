@@ -14,6 +14,7 @@ pub struct MysqlTarget {
     database_url: String,
     table_name: String,
     pool: Option<MySqlPool>,
+    max_batch_size: usize,
 }
 
 impl MysqlTarget {
@@ -25,7 +26,13 @@ impl MysqlTarget {
             database_url: db_url,
             table_name,
             pool: None,
+            max_batch_size: 1000, // Default to 1000 rows per batch
         })
+    }
+
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.max_batch_size = batch_size.max(1); // Ensure at least 1
+        self
     }
 
     fn parse_connection_string(connection_string: &str) -> Result<(String, String)> {
@@ -48,6 +55,50 @@ impl MysqlTarget {
         })
     }
 
+    async fn verify_database_exists(&self) -> Result<()> {
+        // Extract database name from the URL
+        let url = Url::parse(&self.database_url).map_err(|e| {
+            TinyEtlError::Configuration(format!("Invalid MySQL URL: {}", e))
+        })?;
+        
+        let db_name = url.path().trim_start_matches('/');
+        if db_name.is_empty() {
+            return Err(TinyEtlError::Configuration(
+                "No database name specified in MySQL connection URL".to_string()
+            ));
+        }
+
+        // Create a connection to MySQL without specifying a database
+        let mut base_url = url.clone();
+        base_url.set_path("");
+        
+        let base_connection_string = base_url.as_str();
+        let pool = MySqlPool::connect(base_connection_string)
+            .await
+            .map_err(|e| TinyEtlError::Connection(format!(
+                "Failed to connect to MySQL server: {}", e
+            )))?;
+
+        // Check if the database exists
+        let result = sqlx::query("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?")
+            .bind(db_name)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| TinyEtlError::Connection(format!(
+                "Failed to check database existence: {}", e
+            )))?;
+
+        let count: i64 = result.get(0);
+        if count == 0 {
+            return Err(TinyEtlError::Connection(format!(
+                "Database '{}' does not exist", db_name
+            )));
+        }
+
+        pool.close().await;
+        Ok(())
+    }
+
     fn map_data_type_to_mysql(&self, data_type: &DataType) -> &'static str {
         match data_type {
             DataType::Integer => "BIGINT",
@@ -59,11 +110,75 @@ impl MysqlTarget {
             DataType::Null => "TEXT",
         }
     }
+
+    async fn write_chunk(&self, pool: &MySqlPool, rows: &[Row]) -> Result<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        // Get column names from the first row
+        let columns: Vec<String> = rows[0].keys().cloned().collect();
+        let num_columns = columns.len();
+        
+        // Build the base INSERT statement with multiple VALUES clauses
+        let column_names = columns.iter()
+            .map(|c| format!("`{}`", c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        // Create placeholders for all rows: (?, ?, ?), (?, ?, ?), ...
+        let values_placeholders = rows.iter()
+            .map(|_| {
+                let row_placeholders = (0..num_columns)
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({})", row_placeholders)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        let insert_sql = format!(
+            "INSERT INTO `{}` ({}) VALUES {}",
+            self.table_name,
+            column_names,
+            values_placeholders
+        );
+
+        // Build the query with all parameter bindings
+        let mut query = sqlx::query(&insert_sql);
+        let default_value = Value::String("".to_string());
+        
+        // Bind all values for all rows in the correct order
+        for row in rows {
+            for column in &columns {
+                let value = row.get(column).unwrap_or(&default_value);
+                query = match value {
+                    Value::Integer(i) => query.bind(i),
+                    Value::Float(f) => query.bind(f),
+                    Value::String(s) => query.bind(s),
+                    Value::Boolean(b) => query.bind(b),
+                    Value::Date(d) => query.bind(d.to_rfc3339()),
+                    Value::Null => query.bind(None::<String>),
+                };
+            }
+        }
+        
+        // Execute the batch insert
+        let result = query.execute(pool).await.map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to batch insert {} rows into MySQL: {}", rows.len(), e))
+        })?;
+        
+        Ok(result.rows_affected() as usize)
+    }
 }
 
 #[async_trait]
 impl Target for MysqlTarget {
     async fn connect(&mut self) -> Result<()> {
+        // First verify that the database exists
+        self.verify_database_exists().await?;
+        
         let pool = MySqlPool::connect(&self.database_url)
             .await
             .map_err(|e| TinyEtlError::Connection(format!(
@@ -117,43 +232,14 @@ impl Target for MysqlTarget {
         }
 
         let pool = self.get_pool().await?;
+        let mut total_affected = 0;
         
-        // Build INSERT statement
-        let columns: Vec<String> = rows[0].keys().cloned().collect();
-        let placeholders = (0..columns.len()).map(|_| "?").collect::<Vec<_>>().join(", ");
-        
-        let insert_sql = format!(
-            "INSERT INTO `{}` ({}) VALUES ({})",
-            self.table_name,
-            columns.iter().map(|c| format!("`{}`", c)).collect::<Vec<_>>().join(", "),
-            placeholders
-        );
-
-        let mut affected_rows = 0;
-        let default_value = Value::String("".to_string());
-        
-        for row in rows {
-            let mut query = sqlx::query(&insert_sql);
-            
-            for column in &columns {
-                let value = row.get(column).unwrap_or(&default_value);
-                query = match value {
-                    Value::Integer(i) => query.bind(i),
-                    Value::Float(f) => query.bind(f),
-                    Value::String(s) => query.bind(s),
-                    Value::Boolean(b) => query.bind(b),
-                    Value::Date(d) => query.bind(d.to_rfc3339()),
-                    Value::Null => query.bind(None::<String>),
-                };
-            }
-            
-            query.execute(pool).await.map_err(|e| {
-                TinyEtlError::Connection(format!("Failed to insert row into MySQL: {}", e))
-            })?;
-            affected_rows += 1;
+        // Process rows in chunks to avoid hitting MySQL limits
+        for chunk in rows.chunks(self.max_batch_size) {
+            total_affected += self.write_chunk(pool, chunk).await?;
         }
         
-        Ok(affected_rows)
+        Ok(total_affected)
     }
 
     async fn finalize(&mut self) -> Result<()> {
@@ -209,5 +295,69 @@ mod tests {
     fn test_invalid_connection_string() {
         let target = MysqlTarget::new("invalid-url");
         assert!(target.is_err());
+    }
+
+    #[test]
+    fn test_database_name_extraction() {
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/mydb#table").unwrap();
+        let url = url::Url::parse(&target.database_url).unwrap();
+        let db_name = url.path().trim_start_matches('/');
+        assert_eq!(db_name, "mydb");
+    }
+
+    #[test]
+    fn test_empty_database_name() {
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/").unwrap();
+        let url = url::Url::parse(&target.database_url).unwrap();
+        let db_name = url.path().trim_start_matches('/');
+        assert_eq!(db_name, "");
+    }
+
+    #[test]
+    fn test_batch_insert_sql_generation() {
+        // Test that we can generate proper batch INSERT SQL
+        let columns = vec!["id".to_string(), "name".to_string(), "age".to_string()];
+        let num_rows = 3;
+        let num_columns = columns.len();
+        
+        let column_names = columns.iter()
+            .map(|c| format!("`{}`", c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        let values_placeholders = (0..num_rows)
+            .map(|_| {
+                let row_placeholders = (0..num_columns)
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({})", row_placeholders)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        let insert_sql = format!(
+            "INSERT INTO `{}` ({}) VALUES {}",
+            "test_table",
+            column_names,
+            values_placeholders
+        );
+        
+        let expected = "INSERT INTO `test_table` (`id`, `name`, `age`) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)";
+        assert_eq!(insert_sql, expected);
+    }
+
+    #[test]
+    fn test_batch_size_configuration() {
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb")
+            .unwrap()
+            .with_batch_size(500);
+        assert_eq!(target.max_batch_size, 500);
+        
+        // Test minimum batch size of 1
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb")
+            .unwrap()
+            .with_batch_size(0);
+        assert_eq!(target.max_batch_size, 1);
     }
 }

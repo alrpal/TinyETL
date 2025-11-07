@@ -13,7 +13,7 @@ echo "Input: customers.csv -> Output: mysql://user:password@localhost:3306/testd
 echo "Testing MySQL protocol connection string parsing..."
 
 # Run tinyetl command in dry-run mode (validates connections and schema without transferring data)
-../../target/release/tinyetl customers.csv "mysql://testuser:testpass@localhost:3306/testdb#customers" --dry-run
+../../target/release/tinyetl customers.csv "mysql://testuser:testpass@localhost:3306/testdb#customers"
 
 if [ $? -eq 0 ]; then
     echo "✅ PASS: MySQL protocol connection string parsed successfully"
