@@ -1,0 +1,7 @@
+employee_id,first_name,last_name,department,salary,hire_date
+100,John,Smith,Engineering,85000,2023-01-15
+101,Jane,Doe,Marketing,72000,2023-02-20
+102,Bob,Johnson,Engineering,78000,2023-03-10
+103,Alice,Williams,Sales,65000,2023-04-05
+104,Charlie,Brown,Engineering,92000,2023-05-12
+105,Diana,Davis,Marketing,68000,2023-06-18

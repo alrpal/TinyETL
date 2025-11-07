@@ -76,13 +76,13 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
         Ok(Box::new(json::JsonTarget::new(connection_string)?))
     } else if connection_string.ends_with(".parquet") {
         Ok(Box::new(parquet::ParquetTarget::new(connection_string)?))
-    } else if connection_string.ends_with(".db") || connection_string.starts_with("sqlite:") {
+    } else if (connection_string.contains(".db#") || connection_string.ends_with(".db")) || connection_string.starts_with("sqlite:") {
         Ok(Box::new(sqlite::SqliteTarget::new(connection_string)?))
     } else if connection_string.starts_with("postgres://") || connection_string.starts_with("postgresql://") {
         Ok(Box::new(postgres::PostgresTarget::new(connection_string)?))
     } else {
         Err(crate::TinyEtlError::Configuration(
-            format!("Unsupported target type: {}. Supported formats: file.csv, file.json, file.parquet, file.db, postgres://user:pass@host:port/db", connection_string)
+            format!("Unsupported target type: {}. Supported formats: file.csv, file.json, file.parquet, file.db, file.db#table, postgres://user:pass@host:port/db", connection_string)
         ))
     }
 }
@@ -204,6 +204,12 @@ mod tests {
     #[test]
     fn test_create_sqlite_target() {
         let target = create_target("output.db");
+        assert!(target.is_ok());
+    }
+    
+    #[test]
+    fn test_create_sqlite_target_with_table() {
+        let target = create_target("output.db#mytable");
         assert!(target.is_ok());
     }
     

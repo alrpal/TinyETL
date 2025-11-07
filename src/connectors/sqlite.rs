@@ -245,7 +245,11 @@ impl Target for SqliteTarget {
         
         // SQLite will automatically create the database file if it doesn't exist
         // when we connect to it, so we don't need to create it manually
-        match SqlitePool::connect(&self.connection_string).await {
+        let connect_options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+            
+        match SqlitePool::connect_with(connect_options).await {
             Ok(pool) => {
                 self.pool = Some(pool);
                 Ok(())

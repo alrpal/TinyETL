@@ -1,0 +1,6 @@
+product_code,name,unit_price,category_id,weight_kg
+SKU001,Laptop Pro,1299.99,1,2.5
+SKU002,Office Chair,249.50,2,15.0
+SKU003,Coffee Maker,89.99,3,3.2
+SKU004,Wireless Mouse,39.99,1,0.15
+SKU005,Standing Desk,599.00,2,25.8
