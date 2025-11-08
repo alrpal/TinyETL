@@ -66,12 +66,7 @@ jobs:
         
         # Install cross-compilation dependencies for ARM64
         if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-          sudo apt-get install -y gcc-aarch64-linux-gnu libssl-dev:arm64
-          # Add ARM64 architecture
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          # Install ARM64 OpenSSL development libraries
-          sudo apt-get install -y libssl-dev:arm64 libcrypto++8:arm64 || true
+          sudo apt-get install -y gcc-aarch64-linux-gnu
         fi
 
     - name: Install system dependencies (macOS)
@@ -94,10 +89,9 @@ jobs:
         CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
         AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-        # OpenSSL cross-compilation for ARM64
-        OPENSSL_DIR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/lib/aarch64-linux-gnu' || '' }}
-        OPENSSL_LIB_DIR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/lib/aarch64-linux-gnu' || '' }}
-        OPENSSL_INCLUDE_DIR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '/usr/include/aarch64-linux-gnu' || '' }}
+        # Use vendored OpenSSL for ARM64 cross-compilation
+        OPENSSL_STATIC: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '1' || '' }}
+        OPENSSL_NO_VENDOR: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '' || '1' }}
       run: cargo build --release --target ${{ matrix.target }}
 
     - name: Check build success
