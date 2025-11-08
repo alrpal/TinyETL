@@ -1,60 +1,92 @@
 # TinyETL
+**Fast, zero-config ETL in a single binary**
 
-![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/alrpal/tinyetl/actions)
+[![Coverage](https://img.shields.io/badge/coverage-60%25-brightgreen)](https://github.com/alrpal/tinyetl/actions)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/alrpal/tinyetl/releases)
+[![Rust Edition](https://img.shields.io/badge/rust-2021-orange)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
+[![Binary Size](https://img.shields.io/badge/binary-21MB-green)](https://github.com/alrpal/tinyetl/releases)
 
-A tiny ETL tool for moving data between sources with automatic schema inference and minimal configuration.
+<!-- TODO: Add demo GIF here showing MySQL → Parquet or CSV → SQLite -->
 
-## Overview
+Transform and move data between any format or database — **instantly**. No dependencies, no config files, just one command.
 
-TinyETL is designed to make data movement simple and efficient. Point it at a source and target, and it will automatically detect the schema, create necessary tables, and translate data from source to desination. TinyELT is fast sub 20mb binary that will run on Linux, MaxOS, and Windows.
+```bash
+# MySQL → Parquet with inline transformation 
+tinyetl "mysql://user:pass@host/db#orders" orders.parquet \
+  --transform "total_usd=row.amount * row.exchange_rate"
 
-### Key Features
+# Stream 100k+ rows/sec from CSV → SQLite
+tinyetl large_dataset.csv results.db --batch-size 50000
 
-- **Automatic Schema Inference**: Detects column names and data types automatically
-- **Data Transformations**: Transform data during transfer using Lua scripting
-- **Multiple Connectors**: Support for CSV, JSON, Parquet, AVRO, SQLite, PostgreSQL, MySQL, HTTP, SSH (with more coming soon)
-- **Batch Processing**: Efficient streaming with configurable batch sizes
-- **Progress Monitoring**: Real-time progress bars and transfer statistics
-- **Preview Mode**: Inspect data and schema without transferring
-- **Cross-Platform**: Works on Linux, macOS, and Windows
+# Download & convert web data
+tinyetl "https://api.data.gov/export.json" analysis.parquet
+```
 
-## For Users
+## Why TinyETL?
 
-### Installation
+✅ **Single 21MB binary** — no dependencies, no installation headaches  
+✅ **40-145k+ rows/sec streaming** — handles massive datasets efficiently  
+✅ **Zero configuration** — automatic schema detection and table creation  
+✅ **Lua transformations** — powerful data transformations  
+✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite  
+✅ **Cross-platform** — Linux, macOS, Windows ready
 
-Download the latest release for your platform:
+## Quick Install
 
-- [Latest Release](https://github.com/yourusername/tinyetl/releases/latest)
+**Download the binary** (recommended):
+```bash
+# Download latest release for your platform
+curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-linux -o tinyetl
+chmod +x tinyetl
+```
 
-Or install from source with Rust:
-
+**Or install with Cargo**:
 ```bash
 cargo install tinyetl
 ```
 
-### Quick Start
-
+**Verify installation**:
+```bash
+tinyetl --version  # Should show: tinyetl 0.1.0
 ```
-A tiny ETL tool for moving data between sources
 
-Usage: tinyetl [OPTIONS] <SOURCE> <TARGET>
+## Get Started in 30 Seconds
+
+```bash
+# File format conversion (auto-detects schemas)
+tinyetl data.csv output.parquet
+tinyetl data.json analysis.db
+
+# Database to database 
+tinyetl "postgresql://user:pass@host/db#users" "mysql://user:pass@host/db#users"
+
+# Transform while transferring
+tinyetl sales.csv results.db --transform "profit=row.revenue - row.costs; margin=profit/revenue"
+
+# Process large datasets efficiently  
+tinyetl huge_dataset.csv output.parquet --batch-size 100000
+
+# Download and convert web data
+tinyetl "https://example.com/api/export" local_data.json --source-type=csv
+```
+
+## Usage
+```
+tinyetl [OPTIONS] <SOURCE> <TARGET>
 
 Arguments:
-  <SOURCE>  Source connection string (file path or connection string)
-  <TARGET>  Target connection string (file path or connection string)
+  <SOURCE>  Source: file path, URL, or database connection string
+  <TARGET>  Target: file path or database connection string
 
-Options:
-      --infer-schema             Auto-detect columns and types
-      --batch-size <BATCH_SIZE>  Number of rows per batch [default: 10000]
-      --preview <N>              Show first N rows and inferred schema without copying
-      --dry-run                  Validate source/target without transferring data
-      --log-level <LOG_LEVEL>    Log level: info, warn, error [default: info]
-      --skip-existing            Skip rows already in target if primary key detected
-      --source-type <TYPE>       Force source file type (csv, json, parquet, avro) - useful for HTTP URLs
-      --transform-file <FILE>    Path to Lua file containing a 'transform' function
-      --transform <EXPRESSIONS>  Inline transformation expressions (semicolon-separated)
-  -h, --help                     Print help
-  -V, --version                  Print version
+Key Options:
+      --batch-size <N>           Rows per batch [default: 10000]
+      --transform "<expressions>" Inline Lua transformations  
+      --transform-file <file>    Lua transformation script
+      --preview <N>              Preview N rows without transferring
+      --dry-run                  Validate without transferring
+      --source-type <type>       Force source type: csv, json, parquet, avro
+  -h, --help                     Show all options
 ```
 
 Basic usage examples:
@@ -177,7 +209,7 @@ tinyetl "ssh://user@server.com/data/export_20241107" output.parquet --source-typ
 tinyetl data.csv output.json  # No --source-type needed
 ```
 
-**Supported source types:** `csv`, `json`, `parquet`
+**Supported source types:** `csv`, `json`, `parquet`, `avro`
 
 ### Database Connection Strings
 
@@ -221,21 +253,6 @@ tinyetl data.csv "sqlite:///path/to/database.db#custom_table"
 - For MySQL, the database must exist before running TinyETL
 - Connection strings should be quoted to prevent shell interpretation
 - Default ports: PostgreSQL (5432), MySQL (3306)
-
-**MySQL Setup Example:**
-```bash
-# Install MySQL (macOS with Homebrew)
-brew install mysql
-brew services start mysql
-
-# Create database and user
-mysql -u root -e "CREATE DATABASE mydb;"
-mysql -u root -e "CREATE USER 'myuser'@'localhost' IDENTIFIED BY 'mypass';"
-mysql -u root -e "GRANT ALL PRIVILEGES ON mydb.* TO 'myuser'@'localhost';"
-
-# Use with TinyETL
-tinyetl data.csv "mysql://myuser:mypass@localhost:3306/mydb#customers"
-```
 
 ### Data Transformations
 

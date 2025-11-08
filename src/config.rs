@@ -16,7 +16,7 @@ pub struct Config {
     pub source_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LogLevel {
     Info,
     Warn,

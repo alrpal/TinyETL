@@ -215,6 +215,8 @@ impl Protocol for SshProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
     
     #[test]
     fn test_validate_ssh_url() {
@@ -264,5 +266,255 @@ mod tests {
             let result = protocol.create_target(&url).await;
             assert!(result.is_err());
         });
+    }
+    
+    #[test]
+    fn test_ssh_protocol_name() {
+        let protocol = SshProtocol::new();
+        assert_eq!(protocol.name(), "ssh");
+    }
+    
+    #[test]
+    fn test_url_validation_error_messages() {
+        let protocol = SshProtocol::new();
+        
+        // Test wrong scheme
+        let url = Url::parse("ftp://user@example.com/file.csv").unwrap();
+        let result = protocol.validate_url(&url);
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("SSH protocol requires ssh:// scheme"));
+            assert!(msg.contains("ftp"));
+        } else {
+            panic!("Expected Configuration error");
+        }
+        
+        // Test missing username
+        let url = Url::parse("ssh://example.com/file.csv").unwrap();
+        let result = protocol.validate_url(&url);
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("requires a username"));
+        } else {
+            panic!("Expected Configuration error");
+        }
+        
+        // Test missing path
+        let url = Url::parse("ssh://user@example.com").unwrap();
+        let result = protocol.validate_url(&url);
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("requires a file path"));
+        } else {
+            panic!("Expected Configuration error");
+        }
+        
+        // Test empty path
+        let url = Url::parse("ssh://user@example.com/").unwrap();
+        let result = protocol.validate_url(&url);
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("requires a file path"));
+        } else {
+            panic!("Expected Configuration error");
+        }
+    }
+    
+    #[test]
+    fn test_extract_extension_edge_cases() {
+        let protocol = SshProtocol::new();
+        
+        // Test various edge cases for extension extraction
+        assert_eq!(protocol.extract_extension_from_path(""), None);
+        assert_eq!(protocol.extract_extension_from_path("/"), None);
+        assert_eq!(protocol.extract_extension_from_path("/.hidden"), Some("hidden".to_string())); // Current implementation treats this as extension
+        assert_eq!(protocol.extract_extension_from_path("/path/to/."), None);
+        assert_eq!(protocol.extract_extension_from_path("/path/to/.."), None);
+        
+        // Test file names with dots but no extension
+        assert_eq!(protocol.extract_extension_from_path("/path/to/file."), None);
+        assert_eq!(protocol.extract_extension_from_path("/path/file.toolongextension"), None);
+        
+        // Test various valid extensions
+        assert_eq!(protocol.extract_extension_from_path("/data.CSV"), Some("csv".to_string()));
+        assert_eq!(protocol.extract_extension_from_path("/file.JSON"), Some("json".to_string()));
+        assert_eq!(protocol.extract_extension_from_path("/archive.tar.gz"), Some("gz".to_string()));
+        
+        // Test nested paths
+        assert_eq!(protocol.extract_extension_from_path("/home/user/documents/data.xlsx"), Some("xlsx".to_string()));
+        assert_eq!(protocol.extract_extension_from_path("./relative/path/file.txt"), Some("txt".to_string()));
+        
+        // Test Windows-style paths (shouldn't matter for SSH but good to test)
+        assert_eq!(protocol.extract_extension_from_path("C:\\data\\file.csv"), Some("csv".to_string()));
+    }
+    
+    #[test]
+    fn test_url_parsing_components() {
+        // Test URL component extraction logic that would be used in SCP operations
+        
+        // Basic URL
+        let url = Url::parse("ssh://user@example.com/path/to/file.csv").unwrap();
+        assert_eq!(url.host_str(), Some("example.com"));
+        assert_eq!(url.username(), "user");
+        assert_eq!(url.port(), None); // Should default to 22
+        assert_eq!(url.path(), "/path/to/file.csv");
+        
+        // URL with port
+        let url = Url::parse("ssh://admin@server.local:2222/data/export.json").unwrap();
+        assert_eq!(url.host_str(), Some("server.local"));
+        assert_eq!(url.username(), "admin");
+        assert_eq!(url.port(), Some(2222));
+        assert_eq!(url.path(), "/data/export.json");
+        
+        // URL with special characters in username
+        let url = Url::parse("ssh://user%2Bname@example.com/file.csv").unwrap();
+        assert_eq!(url.username(), "user%2Bname"); // URL encoded
+        
+        // URL with IP address
+        let url = Url::parse("ssh://root@192.168.1.100:22/tmp/data.parquet").unwrap();
+        assert_eq!(url.host_str(), Some("192.168.1.100"));
+        assert_eq!(url.port(), Some(22));
+    }
+    
+    #[test]
+    fn test_scp_command_building() {
+        // Test the logic for building SCP commands (without actually executing them)
+        let url = Url::parse("ssh://user@example.com:2222/path/to/file.csv").unwrap();
+        
+        let host = url.host_str().unwrap();
+        let username = url.username();
+        let port = url.port().unwrap_or(22);
+        let remote_path = url.path();
+        
+        // Test source construction for download
+        let scp_source = format!("{}@{}:{}", username, host, remote_path);
+        assert_eq!(scp_source, "user@example.com:/path/to/file.csv");
+        
+        // Test port handling
+        assert_eq!(port, 2222);
+        
+        // Test destination construction for upload
+        let scp_dest = format!("{}@{}:{}", username, host, "/upload/target.csv");
+        assert_eq!(scp_dest, "user@example.com:/upload/target.csv");
+    }
+    
+    #[test]
+    fn test_default_port_handling() {
+        let url = Url::parse("ssh://user@example.com/file.csv").unwrap();
+        let port = url.port().unwrap_or(22);
+        assert_eq!(port, 22);
+        
+        let url_with_port = Url::parse("ssh://user@example.com:443/file.csv").unwrap();
+        let port_explicit = url_with_port.port().unwrap_or(22);
+        assert_eq!(port_explicit, 443);
+    }
+    
+    #[test]
+    fn test_path_validation_edge_cases() {
+        let protocol = SshProtocol::new();
+        
+        // Test various path scenarios that should be invalid
+        let invalid_paths = vec![
+            "ssh://user@host",      // No path
+            "ssh://user@host/",     // Root path only
+        ];
+        
+        for url_str in invalid_paths {
+            let url = Url::parse(url_str).unwrap();
+            assert!(protocol.validate_url(&url).is_err(), "Should reject URL: {}", url_str);
+        }
+        
+        // Test valid paths
+        let valid_paths = vec![
+            "ssh://user@host/file",
+            "ssh://user@host/path/to/file.csv",
+            "ssh://user@host/data/export.json",
+            "ssh://user@host/home/user/.bashrc",
+        ];
+        
+        for url_str in valid_paths {
+            let url = Url::parse(url_str).unwrap();
+            assert!(protocol.validate_url(&url).is_ok(), "Should accept URL: {}", url_str);
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_create_source_url_validation() {
+        let protocol = SshProtocol::new();
+        
+        // Test that create_source validates the URL before attempting download
+        let invalid_url = Url::parse("ssh://example.com/file.csv").unwrap(); // Missing username
+        let result = protocol.create_source(&invalid_url).await;
+        
+        // Should fail at validation stage, not at SCP execution
+        assert!(result.is_err());
+    }
+    
+    #[tokio::test]
+    async fn test_create_target_error_handling() {
+        let protocol = SshProtocol::new();
+        
+        let url = Url::parse("ssh://user@example.com/upload/file.csv").unwrap();
+        let result = protocol.create_target(&url).await;
+        
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("SSH target implementation requires additional coordination"));
+        } else {
+            panic!("Expected specific Configuration error message");
+        }
+    }
+    
+    #[test]
+    fn test_error_types_and_messages() {
+        // Test that appropriate error types are returned for different failure modes
+        let protocol = SshProtocol::new();
+        
+        // Configuration errors
+        let url = Url::parse("http://example.com/file.csv").unwrap();
+        match protocol.validate_url(&url) {
+            Err(TinyEtlError::Configuration(_)) => {}, // Expected
+            _ => panic!("Expected Configuration error"),
+        }
+        
+        // Test error message content
+        let url = Url::parse("ssh://host/file.csv").unwrap(); // Missing username
+        if let Err(TinyEtlError::Configuration(msg)) = protocol.validate_url(&url) {
+            assert!(msg.contains("username"));
+            assert!(msg.contains("ssh://user@host/path"));
+        } else {
+            panic!("Expected Configuration error with helpful message");
+        }
+    }
+    
+    #[test]
+    fn test_temp_file_extension_preservation() {
+        let protocol = SshProtocol::new();
+        
+        // Test that extensions are preserved for temporary files
+        let paths_and_extensions = vec![
+            ("/data/file.csv", Some("csv".to_string())),
+            ("/exports/data.json", Some("json".to_string())),
+            ("/files/archive.parquet", Some("parquet".to_string())),
+            ("/backup/dump.sql", Some("sql".to_string())),
+            ("/logs/access.log", Some("log".to_string())),
+            ("/data/noextension", None),
+        ];
+        
+        for (path, expected_ext) in paths_and_extensions {
+            let actual_ext = protocol.extract_extension_from_path(path);
+            assert_eq!(actual_ext, expected_ext, "Failed for path: {}", path);
+        }
+    }
+    
+    #[test]
+    fn test_ssh_protocol_instantiation() {
+        let protocol = SshProtocol::new();
+        
+        // Test that the protocol can be created and has expected properties
+        assert_eq!(protocol.name(), "ssh");
+        
+        // Test that it implements the expected traits
+        let _: &dyn Protocol = &protocol;
     }
 }
