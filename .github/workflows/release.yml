@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: # Allow manual trigger for testing
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS builds (native)
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: tinyetl-macos-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: tinyetl-macos-apple-silicon
+          # Linux build
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: tinyetl-linux-x64
+          # Windows build
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: tinyetl-windows-x64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    - name: Cache Cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ matrix.target }}-
+          ${{ runner.os }}-cargo-
+
+    - name: Install system dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libssl-dev liblua5.4-dev lua5.4
+
+    - name: Install system dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        # Install Lua 5.4 if not already present
+        brew install lua@5.4 || true
+        # Make sure pkg-config can find lua
+        export PKG_CONFIG_PATH="/opt/homebrew/opt/lua@5.4/lib/pkgconfig:$PKG_CONFIG_PATH"
+        echo "PKG_CONFIG_PATH=/opt/homebrew/opt/lua@5.4/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+    - name: Install system dependencies (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        # Install vcpkg and lua
+        git clone https://github.com/Microsoft/vcpkg.git
+        .\vcpkg\bootstrap-vcpkg.bat
+        .\vcpkg\vcpkg.exe install lua:x64-windows
+        echo "VCPKG_ROOT=$PWD\vcpkg" >> $env:GITHUB_ENV
+        echo "CMAKE_TOOLCHAIN_FILE=$PWD\vcpkg\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+
+    - name: Build release binary
+      id: build
+      env:
+        # Help mlua find Lua on different platforms
+        PKG_CONFIG_PATH: ${{ env.PKG_CONFIG_PATH }}
+        VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+        CMAKE_TOOLCHAIN_FILE: ${{ env.CMAKE_TOOLCHAIN_FILE }}
+      run: cargo build --release --target ${{ matrix.target }}
+
+    - name: Check build success
+      if: failure() && steps.build.outcome == 'failure'
+      run: |
+        echo "::error::Build failed for ${{ matrix.target }}"
+        echo "::notice::This platform will be skipped in the release"
+        exit 1
+
+    - name: Prepare binary (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        mkdir -p dist
+        cp target/${{ matrix.target }}/release/tinyetl dist/
+        chmod +x dist/tinyetl
+
+    - name: Prepare binary (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        mkdir dist
+        cp target/${{ matrix.target }}/release/tinyetl.exe dist/
+
+    - name: Create archive (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        tar -czf ${{ matrix.name }}.tar.gz -C dist .
+
+    - name: Create archive (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        Compress-Archive -Path dist/* -DestinationPath ${{ matrix.name }}.zip
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.name }}
+        path: |
+          ${{ matrix.name }}.tar.gz
+          ${{ matrix.name }}.zip
+        if-no-files-found: ignore
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !cancelled()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check build results
+      id: check-builds
+      run: |
+        echo "Checking which builds succeeded..."
+        # The workflow will continue even if some builds failed
+        # We'll upload whatever artifacts are available
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+      continue-on-error: true
+
+    - name: Prepare release assets
+      run: |
+        mkdir -p release-assets
+        if [ -d "artifacts" ]; then
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-assets/ \;
+          echo "Available release assets:"
+          ls -la release-assets/ || echo "No artifacts found"
+          
+          # Count successful builds
+          ASSET_COUNT=$(find release-assets -type f | wc -l)
+          echo "::notice::Found $ASSET_COUNT platform builds for release"
+          
+          if [ "$ASSET_COUNT" -eq 0 ]; then
+            echo "::error::No build artifacts found - all builds may have failed"
+            exit 1
+          fi
+        else
+          echo "::error::No artifacts directory found"
+          exit 1
+        fi
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: release-assets/*
+        draft: false
+        prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
