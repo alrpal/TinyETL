@@ -294,6 +294,7 @@ impl Source for AvroSource {
         let mut rows = Vec::new();
         let mut count = 0;
         let mut current_index = 0;
+        let mut reached_end = false;
 
         for value_result in reader {
             // Skip records we've already read
@@ -326,7 +327,12 @@ impl Source for AvroSource {
             }
         }
 
-        if rows.is_empty() {
+        // Check if we've reached the end by seeing if we can read more
+        if count < batch_size {
+            reached_end = true;
+        }
+
+        if rows.is_empty() || reached_end {
             self.has_more = false;
         }
 
@@ -547,5 +553,614 @@ impl Target for AvroTarget {
 
     async fn exists(&self, _table_name: &str) -> Result<bool> {
         Ok(self.file_path.exists())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+    use std::io::Write;
+    use chrono::{DateTime, Utc};
+    
+    fn create_test_avro_file() -> Result<NamedTempFile> {
+        let temp_file = NamedTempFile::new()?;
+        
+        // Create a simple schema
+        let schema_json = json!({
+            "type": "record",
+            "name": "TestRecord",
+            "fields": [
+                {"name": "id", "type": "long"},
+                {"name": "name", "type": "string"},
+                {"name": "email", "type": ["null", "string"]},
+                {"name": "age", "type": "int"},
+                {"name": "salary", "type": "double"},
+                {"name": "active", "type": "boolean"},
+                {"name": "created_at", "type": {"type": "long", "logicalType": "timestamp-millis"}}
+            ]
+        });
+        
+        let schema = AvroSchema::parse(&schema_json)
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to create test schema: {}", e)))?;
+        let file = temp_file.reopen()?;
+        let mut writer = Writer::new(&schema, file);
+        
+        // Write test records
+        let test_records = vec![
+            AvroValue::Record(vec![
+                ("id".to_string(), AvroValue::Long(1)),
+                ("name".to_string(), AvroValue::String("John Doe".to_string())),
+                ("email".to_string(), AvroValue::Union(1, Box::new(AvroValue::String("john@example.com".to_string())))),
+                ("age".to_string(), AvroValue::Int(30)),
+                ("salary".to_string(), AvroValue::Double(50000.0)),
+                ("active".to_string(), AvroValue::Boolean(true)),
+                ("created_at".to_string(), AvroValue::TimestampMillis(1609459200000)), // 2021-01-01
+            ]),
+            AvroValue::Record(vec![
+                ("id".to_string(), AvroValue::Long(2)),
+                ("name".to_string(), AvroValue::String("Jane Smith".to_string())),
+                ("email".to_string(), AvroValue::Union(0, Box::new(AvroValue::Null))),
+                ("age".to_string(), AvroValue::Int(25)),
+                ("salary".to_string(), AvroValue::Double(60000.0)),
+                ("active".to_string(), AvroValue::Boolean(false)),
+                ("created_at".to_string(), AvroValue::TimestampMillis(1609545600000)), // 2021-01-02
+            ]),
+        ];
+        
+        for record in test_records {
+            writer.append(record)
+                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to write test record: {}", e)))?;
+        }
+        
+        writer.flush()
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to flush test writer: {}", e)))?;
+        Ok(temp_file)
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_new() {
+        let source = AvroSource::new("test.avro");
+        assert!(source.is_ok());
+        
+        let source = source.unwrap();
+        assert_eq!(source.file_path.to_string_lossy(), "test.avro");
+        assert_eq!(source.current_position, 0);
+        assert_eq!(source.total_records, None);
+        assert!(source.has_more);
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_connect_file_not_found() {
+        let mut source = AvroSource::new("nonexistent.avro").unwrap();
+        let result = source.connect().await;
+        
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Connection(msg)) = result {
+            assert!(msg.contains("Avro file not found"));
+        } else {
+            panic!("Expected Connection error");
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_connect_success() {
+        let temp_file = create_test_avro_file().unwrap();
+        let mut source = AvroSource::new(temp_file.path().to_str().unwrap()).unwrap();
+        
+        let result = source.connect().await;
+        assert!(result.is_ok());
+        assert_eq!(source.current_position, 0);
+        assert!(source.has_more);
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_infer_schema() {
+        let temp_file = create_test_avro_file().unwrap();
+        let mut source = AvroSource::new(temp_file.path().to_str().unwrap()).unwrap();
+        
+        let schema = source.infer_schema(100).await.unwrap();
+        
+        assert_eq!(schema.columns.len(), 7);
+        
+        // Check specific columns
+        let id_col = &schema.columns[0];
+        assert_eq!(id_col.name, "id");
+        assert_eq!(id_col.data_type, DataType::Integer);
+        assert!(!id_col.nullable);
+        
+        let name_col = &schema.columns[1];
+        assert_eq!(name_col.name, "name");
+        assert_eq!(name_col.data_type, DataType::String);
+        
+        let email_col = &schema.columns[2];
+        assert_eq!(email_col.name, "email");
+        assert_eq!(email_col.data_type, DataType::String);
+        assert!(email_col.nullable);
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_read_batch() {
+        let temp_file = create_test_avro_file().unwrap();
+        let mut source = AvroSource::new(temp_file.path().to_str().unwrap()).unwrap();
+        source.connect().await.unwrap();
+        
+        let rows = source.read_batch(10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        
+        // Check first row
+        let first_row = &rows[0];
+        assert_eq!(first_row.get("id"), Some(&Value::Integer(1)));
+        assert_eq!(first_row.get("name"), Some(&Value::String("John Doe".to_string())));
+        assert_eq!(first_row.get("age"), Some(&Value::Integer(30)));
+        assert_eq!(first_row.get("salary"), Some(&Value::Float(50000.0)));
+        assert_eq!(first_row.get("active"), Some(&Value::Boolean(true)));
+        
+        // Check second row
+        let second_row = &rows[1];
+        assert_eq!(second_row.get("id"), Some(&Value::Integer(2)));
+        assert_eq!(second_row.get("name"), Some(&Value::String("Jane Smith".to_string())));
+        assert_eq!(second_row.get("email"), Some(&Value::Null));
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_read_batch_pagination() {
+        let temp_file = create_test_avro_file().unwrap();
+        let mut source = AvroSource::new(temp_file.path().to_str().unwrap()).unwrap();
+        source.connect().await.unwrap();
+        
+        // Read first batch with size 1
+        let rows1 = source.read_batch(1).await.unwrap();
+        assert_eq!(rows1.len(), 1);
+        assert_eq!(rows1[0].get("id"), Some(&Value::Integer(1)));
+        
+        // Read second batch
+        let rows2 = source.read_batch(1).await.unwrap();
+        assert_eq!(rows2.len(), 1);
+        assert_eq!(rows2[0].get("id"), Some(&Value::Integer(2)));
+        
+        // Try to read more - should be empty
+        let rows3 = source.read_batch(1).await.unwrap();
+        assert!(rows3.is_empty());
+        assert!(!source.has_more());
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_reset() {
+        let temp_file = create_test_avro_file().unwrap();
+        let mut source = AvroSource::new(temp_file.path().to_str().unwrap()).unwrap();
+        source.connect().await.unwrap();
+        
+        // Read all data
+        source.read_batch(10).await.unwrap();
+        assert!(!source.has_more());
+        
+        // Reset and read again
+        source.reset().await.unwrap();
+        assert!(source.has_more());
+        assert_eq!(source.current_position, 0);
+        
+        let rows = source.read_batch(10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+    
+    #[tokio::test]
+    async fn test_avro_type_to_schema_type() {
+        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("string")), DataType::String);
+        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("int")), DataType::Integer);
+        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("long")), DataType::Integer);
+        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("float")), DataType::Float);
+        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("double")), DataType::Float);
+        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("boolean")), DataType::Boolean);
+        
+        // Test logical types
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!({"type": "int", "logicalType": "date"})),
+            DataType::Date
+        );
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!({"type": "long", "logicalType": "timestamp-millis"})),
+            DataType::DateTime
+        );
+        
+        // Test union types
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!(["null", "string"])),
+            DataType::String
+        );
+    }
+    
+    #[tokio::test]
+    async fn test_is_nullable() {
+        assert!(!AvroSource::is_nullable(&json!("string")));
+        assert!(AvroSource::is_nullable(&json!(["null", "string"])));
+        assert!(AvroSource::is_nullable(&json!(["string", "null"])));
+        assert!(!AvroSource::is_nullable(&json!(["string", "int"])));
+    }
+    
+    #[tokio::test]
+    async fn test_avro_value_to_value() {
+        // Test basic types
+        assert_eq!(
+            AvroSource::avro_value_to_value(&AvroValue::Null).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            AvroSource::avro_value_to_value(&AvroValue::Boolean(true)).unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            AvroSource::avro_value_to_value(&AvroValue::Int(42)).unwrap(),
+            Value::Integer(42)
+        );
+        assert_eq!(
+            AvroSource::avro_value_to_value(&AvroValue::Long(100)).unwrap(),
+            Value::Integer(100)
+        );
+        assert_eq!(
+            AvroSource::avro_value_to_value(&AvroValue::Float(3.14)).unwrap(),
+            Value::Float(3.140000104904175) // Account for f32 to f64 conversion precision
+        );
+        assert_eq!(
+            AvroSource::avro_value_to_value(&AvroValue::Double(2.718)).unwrap(),
+            Value::Float(2.718)
+        );
+        assert_eq!(
+            AvroSource::avro_value_to_value(&AvroValue::String("test".to_string())).unwrap(),
+            Value::String("test".to_string())
+        );
+        
+        // Test date/time types
+        let date_result = AvroSource::avro_value_to_value(&AvroValue::Date(0)).unwrap();
+        if let Value::Date(_) = date_result {
+            // Success - date conversion worked
+        } else {
+            panic!("Expected Date value");
+        }
+        
+        let timestamp_result = AvroSource::avro_value_to_value(&AvroValue::TimestampMillis(1609459200000)).unwrap();
+        if let Value::Date(_) = timestamp_result {
+            // Success - timestamp conversion worked
+        } else {
+            panic!("Expected Date value");
+        }
+        
+        // Test union
+        let union_value = AvroValue::Union(1, Box::new(AvroValue::String("test".to_string())));
+        assert_eq!(
+            AvroSource::avro_value_to_value(&union_value).unwrap(),
+            Value::String("test".to_string())
+        );
+    }
+    
+    #[tokio::test]
+    async fn test_avro_target_new() {
+        let target = AvroTarget::new("output.avro");
+        assert!(target.is_ok());
+        
+        let target = target.unwrap();
+        assert_eq!(target.file_path.to_string_lossy(), "output.avro");
+        assert!(target.schema.is_none());
+        assert!(target.buffer.is_empty());
+    }
+    
+    #[tokio::test]
+    async fn test_avro_target_connect() {
+        let mut target = AvroTarget::new("output.avro").unwrap();
+        let result = target.connect().await;
+        assert!(result.is_ok());
+    }
+    
+    #[tokio::test]
+    async fn test_avro_target_create_table() {
+        let mut target = AvroTarget::new("output.avro").unwrap();
+        
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: DataType::String,
+                    nullable: true,
+                },
+                Column {
+                    name: "active".to_string(),
+                    data_type: DataType::Boolean,
+                    nullable: false,
+                },
+                Column {
+                    name: "score".to_string(),
+                    data_type: DataType::Float,
+                    nullable: true,
+                },
+                Column {
+                    name: "created".to_string(),
+                    data_type: DataType::DateTime,
+                    nullable: false,
+                },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        
+        let result = target.create_table("test_table", &schema).await;
+        assert!(result.is_ok());
+        assert!(target.schema.is_some());
+    }
+    
+    #[tokio::test]
+    async fn test_schema_to_avro_schema() {
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: DataType::String,
+                    nullable: true,
+                },
+                Column {
+                    name: "active".to_string(),
+                    data_type: DataType::Boolean,
+                    nullable: false,
+                },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        
+        let avro_schema = AvroTarget::schema_to_avro_schema(&schema);
+        assert!(avro_schema.is_ok());
+        
+        let schema_json: JsonValue = serde_json::from_str(&avro_schema.unwrap().canonical_form()).unwrap();
+        
+        if let JsonValue::Object(obj) = schema_json {
+            if let Some(JsonValue::Array(fields)) = obj.get("fields") {
+                assert_eq!(fields.len(), 3);
+                
+                // Check field types
+                let id_field = &fields[0];
+                if let JsonValue::Object(field_obj) = id_field {
+                    assert_eq!(field_obj.get("name").unwrap(), "id");
+                    assert_eq!(field_obj.get("type").unwrap(), "long");
+                }
+                
+                let name_field = &fields[1];
+                if let JsonValue::Object(field_obj) = name_field {
+                    assert_eq!(field_obj.get("name").unwrap(), "name");
+                    assert_eq!(field_obj.get("type").unwrap(), &json!(["null", "string"]));
+                }
+            }
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_value_to_avro_value() {
+        // Test basic conversions
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::Null, &DataType::String).unwrap(),
+            AvroValue::Union(0, Box::new(AvroValue::Null))
+        );
+        
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::String("test".to_string()), &DataType::String).unwrap(),
+            AvroValue::String("test".to_string())
+        );
+        
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::Integer(42), &DataType::Integer).unwrap(),
+            AvroValue::Long(42)
+        );
+        
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::Float(3.14), &DataType::Float).unwrap(),
+            AvroValue::Double(3.14)
+        );
+        
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::Boolean).unwrap(),
+            AvroValue::Boolean(true)
+        );
+        
+        // Test type conversions
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::String("42".to_string()), &DataType::Integer).unwrap(),
+            AvroValue::Long(42)
+        );
+        
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::String("3.14".to_string()), &DataType::Float).unwrap(),
+            AvroValue::Double(3.14)
+        );
+        
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::String("true".to_string()), &DataType::Boolean).unwrap(),
+            AvroValue::Boolean(true)
+        );
+        
+        // Test date/time
+        let datetime = DateTime::from_timestamp(1609459200, 0).unwrap();
+        let date_value = Value::Date(datetime);
+        
+        let result = AvroTarget::value_to_avro_value(&date_value, &DataType::Date).unwrap();
+        if let AvroValue::Date(_) = result {
+            // Success
+        } else {
+            panic!("Expected Date value");
+        }
+        
+        let result = AvroTarget::value_to_avro_value(&date_value, &DataType::DateTime).unwrap();
+        if let AvroValue::TimestampMillis(_) = result {
+            // Success
+        } else {
+            panic!("Expected TimestampMillis value");
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_value_to_avro_value_invalid_conversions() {
+        // Test invalid string to int conversion
+        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_number".to_string()), &DataType::Integer);
+        assert!(result.is_err());
+        
+        // Test invalid string to float conversion
+        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_float".to_string()), &DataType::Float);
+        assert!(result.is_err());
+        
+        // Test invalid string to bool conversion
+        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_bool".to_string()), &DataType::Boolean);
+        assert!(result.is_err());
+    }
+    
+    #[tokio::test]
+    async fn test_avro_target_write_batch_without_schema() {
+        let mut target = AvroTarget::new("output.avro").unwrap();
+        
+        let row = std::collections::HashMap::from([
+            ("id".to_string(), Value::Integer(1)),
+            ("name".to_string(), Value::String("test".to_string())),
+        ]);
+        
+        let result = target.write_batch(&[row]).await;
+        assert!(result.is_err());
+        
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("Schema not initialized"));
+        } else {
+            panic!("Expected Configuration error");
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_avro_target_full_workflow() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut target = AvroTarget::new(temp_file.path().to_str().unwrap()).unwrap();
+        
+        // Create schema
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: DataType::String,
+                    nullable: false,
+                },
+                Column {
+                    name: "active".to_string(),
+                    data_type: DataType::Boolean,
+                    nullable: false,
+                },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        
+        // Connect and create table
+        target.connect().await.unwrap();
+        target.create_table("test_table", &schema).await.unwrap();
+        
+        // Write some data
+        let rows = vec![
+            std::collections::HashMap::from([
+                ("id".to_string(), Value::Integer(1)),
+                ("name".to_string(), Value::String("John".to_string())),
+                ("active".to_string(), Value::Boolean(true)),
+            ]),
+            std::collections::HashMap::from([
+                ("id".to_string(), Value::Integer(2)),
+                ("name".to_string(), Value::String("Jane".to_string())),
+                ("active".to_string(), Value::Boolean(false)),
+            ]),
+        ];
+        
+        let write_result = target.write_batch(&rows).await.unwrap();
+        assert_eq!(write_result, 2);
+        
+        // Finalize
+        target.finalize().await.unwrap();
+        
+        // Verify file was created and can be read
+        let mut source = AvroSource::new(temp_file.path().to_str().unwrap()).unwrap();
+        source.connect().await.unwrap();
+        
+        let read_rows = source.read_batch(10).await.unwrap();
+        assert_eq!(read_rows.len(), 2);
+        
+        assert_eq!(read_rows[0].get("id"), Some(&Value::Integer(1)));
+        assert_eq!(read_rows[0].get("name"), Some(&Value::String("John".to_string())));
+        assert_eq!(read_rows[0].get("active"), Some(&Value::Boolean(true)));
+        
+        assert_eq!(read_rows[1].get("id"), Some(&Value::Integer(2)));
+        assert_eq!(read_rows[1].get("name"), Some(&Value::String("Jane".to_string())));
+        assert_eq!(read_rows[1].get("active"), Some(&Value::Boolean(false)));
+    }
+    
+    #[tokio::test]
+    async fn test_avro_target_exists() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let target = AvroTarget::new(temp_file.path().to_str().unwrap()).unwrap();
+        
+        assert!(target.exists("test_table").await.unwrap());
+        
+        let target_nonexistent = AvroTarget::new("nonexistent.avro").unwrap();
+        assert!(!target_nonexistent.exists("test_table").await.unwrap());
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_invalid_file_content() {
+        let temp_file = NamedTempFile::new().unwrap();
+        std::fs::write(temp_file.path(), "invalid avro content").unwrap();
+        
+        let mut source = AvroSource::new(temp_file.path().to_str().unwrap()).unwrap();
+        let result = source.connect().await;
+        
+        assert!(result.is_err());
+        if let Err(TinyEtlError::DataTransfer(msg)) = result {
+            assert!(msg.contains("Invalid Avro file"));
+        } else {
+            panic!("Expected DataTransfer error");
+        }
+    }
+    
+    #[test]
+    fn test_avro_value_to_json_value() {
+        // Test basic types
+        assert_eq!(
+            AvroSource::avro_value_to_json_value(&AvroValue::Null).unwrap(),
+            JsonValue::Null
+        );
+        
+        assert_eq!(
+            AvroSource::avro_value_to_json_value(&AvroValue::Boolean(true)).unwrap(),
+            JsonValue::Bool(true)
+        );
+        
+        assert_eq!(
+            AvroSource::avro_value_to_json_value(&AvroValue::Int(42)).unwrap(),
+            JsonValue::Number(serde_json::Number::from(42))
+        );
+        
+        assert_eq!(
+            AvroSource::avro_value_to_json_value(&AvroValue::String("test".to_string())).unwrap(),
+            JsonValue::String("test".to_string())
+        );
+        
+        // Test union
+        let union_value = AvroValue::Union(1, Box::new(AvroValue::String("test".to_string())));
+        assert_eq!(
+            AvroSource::avro_value_to_json_value(&union_value).unwrap(),
+            JsonValue::String("test".to_string())
+        );
     }
 }
