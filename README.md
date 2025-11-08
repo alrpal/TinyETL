@@ -7,7 +7,7 @@
 [![Rust Edition](https://img.shields.io/badge/rust-2021-orange)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
 [![Binary Size](https://img.shields.io/badge/binary-21MB-green)](https://github.com/alrpal/tinyetl/releases)
 
-![TinyETL Demo](examples/tinyetl_preview2.gif)
+![TinyETL Demo](examples/tinyetl_preview2-normal-framerate.gif)
 
 Transform and move data between any format or database — **instantly**. No dependencies, no config files, just one command.
 
