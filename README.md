@@ -35,13 +35,59 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 ## Quick Install
 
 **Download the binary** (recommended):
+
+Visit the [releases page](https://github.com/alrpal/tinyetl/releases/latest) and download the appropriate binary for your platform:
+- Linux x64, Linux ARM64
+- macOS Intel, macOS Apple Silicon  
+- Windows x64, Windows ARM64
+
+<!--
+**Linux x64:**
 ```bash
-# Download latest release for your platform
-curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-linux -o tinyetl
+curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-linux-x64.tar.gz | tar xz
 chmod +x tinyetl
+sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
 ```
 
-**Or install with Cargo**:
+**Linux ARM64:**
+```bash
+curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-linux-arm64.tar.gz | tar xz
+chmod +x tinyetl
+sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
+```
+
+**macOS Intel:**
+```bash
+curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-macos-intel.tar.gz | tar xz
+chmod +x tinyetl
+sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
+```
+
+**macOS Apple Silicon:**
+```bash
+curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-macos-apple-silicon.tar.gz | tar xz
+chmod +x tinyetl
+sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
+```
+
+**Windows x64:**
+```powershell
+# Download and extract using PowerShell
+Invoke-WebRequest -Uri "https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-windows-x64.zip" -OutFile "tinyetl.zip"
+Expand-Archive -Path "tinyetl.zip" -DestinationPath "."
+# Move tinyetl.exe to a directory in your PATH
+```
+
+**Windows ARM64:**
+```powershell
+# Download and extract using PowerShell  
+Invoke-WebRequest -Uri "https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-windows-arm64.zip" -OutFile "tinyetl.zip"
+Expand-Archive -Path "tinyetl.zip" -DestinationPath "."
+# Move tinyetl.exe to a directory in your PATH
+```
+-->
+
+**Or install with Cargo** (builds from source):
 ```bash
 cargo install tinyetl
 ```
