@@ -456,12 +456,6 @@ tinyetl raw_events.json analytics.parquet --transform "event_date=row.timestamp:
 - Achieve transfer speeds of 40k+ rows per second for typical datasets
 - Cross-platform compatibility (Linux, macOS, Windows)
 
-### License
-
-```
-“You may use this software under the terms of the Apache 2.0 License.
-If you wish to include TinyETL in a commercial SaaS or hosted product, please contact licensing@tinyetl.com"
-```
 ### Roadmap
 
 **MVP (Current Focus):**
