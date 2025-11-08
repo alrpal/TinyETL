@@ -8,12 +8,6 @@ A tiny ETL tool for moving data between sources with automatic schema inference 
 
 TinyETL is designed to make data movement simple and efficient. Point it at a source and target, and it will automatically detect the schema, create necessary tables, and translate data from source to desination. TinyELT is fast sub 20mb binary that will run on Linux, MaxOS, and Windows.
 
-### License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-For commercial SaaS or hosted product usage, please contact licensing@tinyetl.com for additional commercial licensing terms.
-
 ### Key Features
 
 - **Automatic Schema Inference**: Detects column names and data types automatically
@@ -484,6 +478,14 @@ If you wish to include TinyETL in a commercial SaaS or hosted product, please co
 - Configuration file support
 - Advanced schema mapping
 - Data validation and quality checks
+
+
+### License
+
+This project is licensed under a modified Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+Commercial use is explicitly allowed with the exception of reselling TinyETL in a cloud SaaS format, please contact licensing@tinyetl.com for additional commercial licensing terms.
+
 
 ---
 
