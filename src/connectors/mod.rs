@@ -112,6 +112,11 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
 
 /// Create a source using the new protocol abstraction
 pub async fn create_source_from_url(connection_string: &str) -> Result<Box<dyn Source>> {
+    create_source_from_url_with_type(connection_string, None).await
+}
+
+/// Create a source using the new protocol abstraction with optional type hint
+pub async fn create_source_from_url_with_type(connection_string: &str, source_type: Option<&str>) -> Result<Box<dyn Source>> {
     // Check if this looks like a protocol URL
     if connection_string.contains("://") {
         // Try database connectors first for database protocols
@@ -119,7 +124,7 @@ pub async fn create_source_from_url(connection_string: &str) -> Result<Box<dyn S
             create_source(connection_string)
         } else {
             // Fall back to protocol abstraction for other protocols (file://, snowflake://, etc.)
-            crate::protocols::create_source_from_url(connection_string).await
+            crate::protocols::create_source_from_url_with_type(connection_string, source_type).await
         }
     } else {
         // Fallback to legacy connector system for backward compatibility

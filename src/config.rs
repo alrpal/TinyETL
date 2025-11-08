@@ -13,6 +13,7 @@ pub struct Config {
     pub skip_existing: bool,
     #[serde(skip)]  // Skip serialization as TransformConfig doesn't implement Serialize
     pub transform: TransformConfig,
+    pub source_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +35,7 @@ impl Default for Config {
             log_level: LogLevel::Info,
             skip_existing: false,
             transform: TransformConfig::None,
+            source_type: None,
         }
     }
 }

@@ -1,5 +1,7 @@
 pub mod file;
 pub mod snowflake;
+pub mod http;
+pub mod ssh;
 
 use async_trait::async_trait;
 use url::Url;
@@ -12,6 +14,12 @@ use crate::{Result, TinyEtlError, connectors::{Source, Target}};
 pub trait Protocol: Send + Sync {
     /// Create a source connector for reading data from this protocol
     async fn create_source(&self, url: &Url) -> Result<Box<dyn Source>>;
+    
+    /// Create a source connector with a type hint (useful for HTTP/remote sources)
+    async fn create_source_with_type(&self, url: &Url, source_type: Option<&str>) -> Result<Box<dyn Source>> {
+        // Default implementation ignores the type hint
+        self.create_source(url).await
+    }
     
     /// Create a target connector for writing data to this protocol  
     async fn create_target(&self, url: &Url) -> Result<Box<dyn Target>>;
@@ -37,9 +45,11 @@ pub fn create_protocol(url: &str) -> Result<Box<dyn Protocol>> {
     match parsed_url.scheme() {
         "file" => Ok(Box::new(file::FileProtocol::new())),
         "snowflake" => Ok(Box::new(snowflake::SnowflakeProtocol::new())),
+        "http" | "https" => Ok(Box::new(http::HttpProtocol::new())),
+        "ssh" => Ok(Box::new(ssh::SshProtocol::new())),
         scheme => {
             Err(TinyEtlError::Configuration(
-                format!("Unsupported protocol: {}. Supported protocols: file://, snowflake://", scheme)
+                format!("Unsupported protocol: {}. Supported protocols: file://, snowflake://, http://, https://, ssh://", scheme)
             ))
         }
     }
@@ -47,6 +57,11 @@ pub fn create_protocol(url: &str) -> Result<Box<dyn Protocol>> {
 
 /// Helper function to create source using protocol abstraction
 pub async fn create_source_from_url(url: &str) -> Result<Box<dyn Source>> {
+    create_source_from_url_with_type(url, None).await
+}
+
+/// Helper function to create source using protocol abstraction with optional type hint
+pub async fn create_source_from_url_with_type(url: &str, source_type: Option<&str>) -> Result<Box<dyn Source>> {
     let protocol = create_protocol(url)?;
     let parsed_url = if url.contains("://") {
         Url::parse(url).map_err(|e| {
@@ -60,7 +75,7 @@ pub async fn create_source_from_url(url: &str) -> Result<Box<dyn Source>> {
     };
     
     protocol.validate_url(&parsed_url)?;
-    protocol.create_source(&parsed_url).await
+    protocol.create_source_with_type(&parsed_url, source_type).await
 }
 
 /// Helper function to create target using protocol abstraction
@@ -100,6 +115,27 @@ mod tests {
     }
     
     #[test]
+    fn test_create_http_protocol() {
+        let protocol = create_protocol("http://example.com/data.csv");
+        assert!(protocol.is_ok());
+        assert_eq!(protocol.unwrap().name(), "http");
+    }
+    
+    #[test]
+    fn test_create_https_protocol() {
+        let protocol = create_protocol("https://example.com/data.csv");
+        assert!(protocol.is_ok());
+        assert_eq!(protocol.unwrap().name(), "http");
+    }
+    
+    #[test]
+    fn test_create_ssh_protocol() {
+        let protocol = create_protocol("ssh://user@example.com/path/to/data.csv");
+        assert!(protocol.is_ok());
+        assert_eq!(protocol.unwrap().name(), "ssh");
+    }
+    
+    #[test]
     fn test_backward_compatibility() {
         // Test that old file paths still work
         let protocol = create_protocol("test.csv");
@@ -110,6 +146,9 @@ mod tests {
     #[test]
     fn test_unsupported_protocol() {
         let result = create_protocol("ftp://example.com/file.csv");
+        assert!(result.is_err());
+        
+        let result = create_protocol("unknown://example.com/file.csv");
         assert!(result.is_err());
     }
 }

@@ -6,17 +6,19 @@ A tiny ETL tool for moving data between sources with automatic schema inference 
 
 ## Overview
 
-TinyETL is designed to make data movement simple and efficient. Point it at a source and target, and it will automatically detect the schema, create necessary tables, and trans### License
+TinyETL is designed to make data movement simple and efficient. Point it at a source and target, and it will automatically detect the schema, create necessary tables, and translate data from source to desination. TinyELT is fast sub 20mb binary that will run on Linux, MaxOS, and Windows.
+
+### License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
-For commercial SaaS or hosted product usage, please contact licensing@tinyetl.com for additional commercial licensing terms.ur data in optimized batches.
+For commercial SaaS or hosted product usage, please contact licensing@tinyetl.com for additional commercial licensing terms.
 
 ### Key Features
 
 - **Automatic Schema Inference**: Detects column names and data types automatically
 - **Data Transformations**: Transform data during transfer using Lua scripting
-- **Multiple Connectors**: Support for CSV, JSON, Parquet, SQLite, PostgreSQL, MySQL (with more coming soon)
+- **Multiple Connectors**: Support for CSV, JSON, Parquet, SQLite, PostgreSQL, MySQL, http, ssh (with more coming soon)
 - **Batch Processing**: Efficient streaming with configurable batch sizes
 - **Progress Monitoring**: Real-time progress bars and transfer statistics
 - **Preview Mode**: Inspect data and schema without transferring
@@ -54,6 +56,7 @@ Options:
       --dry-run                  Validate source/target without transferring data
       --log-level <LOG_LEVEL>    Log level: info, warn, error [default: info]
       --skip-existing            Skip rows already in target if primary key detected
+      --source-type <TYPE>       Force source file type (csv, json, parquet) - useful for HTTP URLs
       --transform-file <FILE>    Path to Lua file containing a 'transform' function
       --transform <EXPRESSIONS>  Inline transformation expressions (semicolon-separated)
   -h, --help                     Print help
@@ -63,19 +66,29 @@ Options:
 Basic usage examples:
 
 ```bash
-# Transfer CSV to SQLite database
+# Local file operations
 tinyetl data.csv output.db
-
-# Convert CSV to Parquet
 tinyetl data.csv output.parquet
+tinyetl data.json output.csv
 
-# Load CSV into PostgreSQL
+# Download from web
+tinyetl "https://example.com/data.csv" output.json
+tinyetl "https://api.example.com/export" data.csv --source-type=csv
+
+# Secure file transfer via SSH
+tinyetl "ssh://user@server.com/data.csv" output.parquet
+
+# Database operations
 tinyetl data.csv "postgresql://user:pass@localhost/mydb#customers"
-
-# Load CSV into MySQL
 tinyetl data.csv "mysql://user:pass@localhost:3306/mydb#customers"
+tinyetl "sqlite:///source.db#users" output.csv
 
-# Preview first 10 rows and inferred schema
+# Data inspection and validation
+tinyetl data.csv output.db --preview 10
+tinyetl data.csv output.db --dry-run
+
+# Advanced options
+tinyetl data.csv output.db --batch-size 5000
 tinyetl data.csv output.db --preview 10
 
 # Transfer with custom batch size
@@ -91,23 +104,81 @@ tinyetl data.csv output.db --transform "full_name=row.first_name .. ' ' .. row.l
 tinyetl data.csv output.db --transform-file transform.lua
 ```
 
-### Supported Data Sources
+### Supported Data Sources and Targets
 
-**Sources:**
-- CSV files
-- JSON files (array of objects)
-- Parquet files
-- SQLite databases
-- PostgreSQL databases
-- MySQL databases
+TinyETL supports two main categories of data sources and targets:
 
-**Targets:**
-- CSV files
-- JSON files
-- Parquet files
-- SQLite databases
-- PostgreSQL databases
-- MySQL databases
+#### File-Based Sources (Multiple Protocols)
+
+**File Formats:**
+- **CSV** - Comma-separated values
+- **JSON** - JavaScript Object Notation (array of objects)
+- **Parquet** - Columnar storage format
+
+**Access Protocols:**
+- **Local Files** - Direct file system access
+  ```bash
+  tinyetl data.csv output.json
+  tinyetl /path/to/file.parquet data.csv
+  ```
+- **HTTP/HTTPS** - Download from web servers
+  ```bash
+  tinyetl "https://example.com/data.csv" output.parquet
+  tinyetl "https://api.example.com/export" data.csv --source-type=csv
+  ```
+- **SSH/SCP** - Secure file transfer
+  ```bash
+  tinyetl "ssh://user@server.com/data/file.csv" output.json
+  tinyetl "ssh://user@server.com:2222/remote/data.parquet" local.csv
+  ```
+
+**Protocol Features:**
+- **file://** - Local file system (default for simple paths)
+- **http://** and **https://** - Web downloads with progress tracking
+- **ssh://** - Secure shell file transfer using SCP
+- **--source-type** parameter for format override (useful for URLs without clear extensions)
+
+#### Database Sources
+
+**Supported Databases:**
+- **SQLite** - Embedded database
+- **PostgreSQL** - Advanced open-source database
+- **MySQL** - Popular relational database
+
+**Connection Examples:**
+```bash
+# SQLite
+tinyetl "sqlite:///path/to/db.sqlite#table" output.csv
+tinyetl data.csv "sqlite:///output.db#customers"
+
+# PostgreSQL  
+tinyetl "postgresql://user:pass@localhost/mydb#orders" output.parquet
+tinyetl data.csv "postgresql://user:pass@localhost/mydb#customers"
+
+# MySQL
+tinyetl "mysql://user:pass@localhost:3306/mydb#products" output.json
+tinyetl data.csv "mysql://user:pass@localhost:3306/mydb#sales"
+```
+
+#### Source Type Override
+
+When using HTTP/HTTPS or SSH protocols, URLs may not always indicate the file format clearly (e.g., API endpoints, URLs with query parameters). Use the `--source-type` parameter to explicitly specify the format:
+
+```bash
+# API endpoint that returns CSV data
+tinyetl "https://api.example.com/export?format=csv&limit=1000" output.json --source-type=csv
+
+# Google Drive download (no file extension in URL)
+tinyetl "https://drive.google.com/uc?id=FILE_ID&export=download" data.csv --source-type=csv
+
+# SSH file without clear extension
+tinyetl "ssh://user@server.com/data/export_20241107" output.parquet --source-type=json
+
+# Local files usually don't need source-type (auto-detected from extension)
+tinyetl data.csv output.json  # No --source-type needed
+```
+
+**Supported source types:** `csv`, `json`, `parquet`
 
 ### Database Connection Strings
 

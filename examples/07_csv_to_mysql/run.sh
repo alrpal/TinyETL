@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")"
 
 echo "Running Example 7: CSV to MySQL"
-echo "Input: customers.csv -> Output: mysql://user:password@localhost:3306/testdb#customers"
+echo "Input: customers.csv -> Output: mysql://user:password@localhost:3306/testdb#customers1"
 
 # Note: This example demonstrates the MySQL protocol format and runs in dry-run mode
 # since it requires a real MySQL server to be running
@@ -13,7 +13,7 @@ echo "Input: customers.csv -> Output: mysql://user:password@localhost:3306/testd
 echo "Testing MySQL protocol connection string parsing..."
 
 # Run tinyetl command in dry-run mode (validates connections and schema without transferring data)
-../../target/release/tinyetl customers.csv "mysql://testuser:testpass@localhost:3306/testdb#customers"
+../../target/release/tinyetl customers.csv "mysql://testuser:testpass@localhost:3306/testdb#customers1"
 
 if [ $? -eq 0 ]; then
     echo "✅ PASS: MySQL protocol connection string parsed successfully"

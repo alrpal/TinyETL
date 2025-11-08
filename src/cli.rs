@@ -44,6 +44,10 @@ pub struct Cli {
     /// Inline transformation expressions (semicolon-separated, e.g., "new_col=row.old_col * 2; name=row.first .. ' ' .. row.last")
     #[arg(long, value_name = "EXPRESSIONS")]
     pub transform: Option<String>,
+
+    /// Force source file type (csv, json, parquet) - useful for HTTP URLs without clear extensions
+    #[arg(long, value_name = "TYPE")]
+    pub source_type: Option<String>,
 }
 
 impl From<Cli> for Config {
@@ -69,6 +73,7 @@ impl From<Cli> for Config {
             log_level: cli.log_level,
             skip_existing: cli.skip_existing,
             transform: transform_config,
+            source_type: cli.source_type,
         }
     }
 }
@@ -104,7 +109,8 @@ mod tests {
             "--preview", "10",
             "--dry-run",
             "--log-level", "warn",
-            "--skip-existing"
+            "--skip-existing",
+            "--source-type", "json"
         ]).unwrap();
 
         assert_eq!(cli.source, "source.json");
@@ -114,6 +120,7 @@ mod tests {
         assert!(cli.dry_run);
         assert!(cli.skip_existing);
         assert!(matches!(cli.log_level, LogLevel::Warn));
+        assert_eq!(cli.source_type, Some("json".to_string()));
     }
 
     #[test]
@@ -151,5 +158,22 @@ mod tests {
             "--log-level", "invalid"
         ]);
         assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_http_source_with_type() {
+        let cli = Cli::try_parse_from(&[
+            "tinyetl",
+            "https://example.com/api/data",
+            "output.csv",
+            "--source-type", "json"
+        ]).unwrap();
+
+        assert_eq!(cli.source, "https://example.com/api/data");
+        assert_eq!(cli.target, "output.csv");
+        assert_eq!(cli.source_type, Some("json".to_string()));
+
+        let config: Config = cli.into();
+        assert_eq!(config.source_type, Some("json".to_string()));
     }
 }
