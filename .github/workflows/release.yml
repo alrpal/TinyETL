@@ -64,18 +64,24 @@ jobs:
         # Install Lua 5.4 if not already present
         brew install lua@5.4 || true
         # Make sure pkg-config can find lua
-        export PKG_CONFIG_PATH="/opt/homebrew/opt/lua@5.4/lib/pkgconfig:$PKG_CONFIG_PATH"
-        echo "PKG_CONFIG_PATH=/opt/homebrew/opt/lua@5.4/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+        if [[ $(uname -m) == 'arm64' ]]; then
+          export PKG_CONFIG_PATH="/opt/homebrew/opt/lua@5.4/lib/pkgconfig:$PKG_CONFIG_PATH"
+        else
+          export PKG_CONFIG_PATH="/usr/local/opt/lua@5.4/lib/pkgconfig:$PKG_CONFIG_PATH"
+        fi
+        echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
 
     - name: Install system dependencies (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        # Install vcpkg and lua
         git clone https://github.com/Microsoft/vcpkg.git
         .\vcpkg\bootstrap-vcpkg.bat
         .\vcpkg\vcpkg.exe install lua:x64-windows
-        echo "VCPKG_ROOT=$PWD\vcpkg" >> $env:GITHUB_ENV
-        echo "CMAKE_TOOLCHAIN_FILE=$PWD\vcpkg\scripts\buildsystems\vcpkg.cmake" >> $env:GITHUB_ENV
+
+        # Set env variables for this step
+        $env:VCPKG_ROOT="$PWD\vcpkg"
+        $env:CMAKE_TOOLCHAIN_FILE="$PWD\vcpkg\scripts\buildsystems\vcpkg.cmake"
 
     - name: Build release binary
       id: build
