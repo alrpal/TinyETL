@@ -1,0 +1,5 @@
+id,name,email,age,balance,created_at
+1,John Smith,john@example.com,30,1500.50,2023-01-15T10:30:00Z
+2,Jane Doe,jane@test.com,,250.00,2023-02-20T14:15:30Z
+3,Bob Johnson,bob@company.org,45,,2023-03-10T09:45:00Z
+4,Alice Brown,alice@domain.net,28,3000.75,2023-04-05T16:20:15Z

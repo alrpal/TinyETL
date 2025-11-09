@@ -1,0 +1,4 @@
+id,name,email,age,balance,created_at
+1,John123,john@example.com,30,1500.50,2023-01-15T10:30:00Z
+2,Jane Doe,invalid-email,25,250.00,2023-02-20T14:15:30Z
+3,Bob Johnson,bob@company.org,not_a_number,100.00,2023-03-10T09:45:00Z

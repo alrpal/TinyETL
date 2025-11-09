@@ -20,6 +20,9 @@ pub enum TinyEtlError {
     #[error("Transform error: {0}")]
     Transform(String),
     
+    #[error("Data validation error: {0}")]
+    DataValidation(String),
+    
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     

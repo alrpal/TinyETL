@@ -127,6 +127,7 @@ Arguments:
 
 Key Options:
       --batch-size <N>           Rows per batch [default: 10000]
+      --schema-file <file>       YAML schema file for validation
       --transform "<expressions>" Inline Lua transformations  
       --transform-file <file>    Lua transformation script
       --preview <N>              Preview N rows without transferring
@@ -439,6 +440,7 @@ tinyetl data.csv output.db --transform "total=row.qty * row.price" --preview 5
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--infer-schema` | Auto-detect columns and types | enabled |
+| `--schema-file <FILE>` | YAML schema file for validation (overrides auto-detection) | - |
 | `--batch-size <BATCH_SIZE>` | Number of rows per batch | 10000 |
 | `--preview <N>` | Show first N rows and inferred schema without copying | - |
 | `--dry-run` | Validate source/target without transferring data | disabled |
@@ -471,7 +473,223 @@ tinyetl remote_data.csv local.db --dry-run
 tinyetl raw_sales.csv processed.db --transform "revenue=row.quantity * row.price; profit_margin=revenue * 0.3"
 
 # Complex data cleaning with Lua file
+# Complex data cleaning with Lua file
 tinyetl messy_data.csv clean.db --transform-file cleanup.lua --preview 3
+```
+
+### Schema Validation
+
+TinyETL supports optional schema validation using YAML schema files. When provided, schema validation **overrides automatic schema detection** and enforces strict data validation, type checking, and pattern matching.
+
+#### Using Schema Files
+
+Use the `--schema-file` option to specify a YAML schema that defines expected columns, types, patterns, and defaults:
+
+```bash
+# Validate CSV data against schema
+tinyetl input.csv output.db --schema-file schema.yaml
+
+# Schema validation with transformations  
+tinyetl data.csv results.db --schema-file validation.yaml --transform "total=row.quantity * row.price"
+
+# Preview with schema validation
+tinyetl large_dataset.csv output.parquet --schema-file schema.yaml --preview 10
+```
+
+#### Schema File Format
+
+Create a YAML file defining your expected schema. Here's the complete format:
+
+**schema.yaml:**
+```yaml
+fields:
+  - name: "id"
+    type: "Integer"
+    nullable: false
+    
+  - name: "email"
+    type: "Text"
+    nullable: false
+    pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    
+  - name: "age"
+    type: "Integer" 
+    nullable: true
+    default: 0
+    
+  - name: "salary"
+    type: "Decimal"
+    nullable: true
+    
+  - name: "is_active"
+    type: "Boolean"
+    nullable: false
+    default: true
+    
+  - name: "created_at"
+    type: "DateTime"
+    nullable: true
+    pattern: "^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+```
+
+#### Supported Data Types
+
+- **Text** - String values, supports regex pattern validation
+- **Integer** - Whole numbers (32-bit signed integers)  
+- **Decimal** - High-precision decimal numbers using `rust_decimal`
+- **Boolean** - True/false values (accepts: true, false, 1, 0, yes, no)
+- **DateTime** - ISO 8601 date-time strings, supports pattern validation
+
+#### Schema Field Properties
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `name` | String | ✅ | Column name (must match source data) |
+| `type` | String | ✅ | Data type: Text, Integer, Decimal, Boolean, DateTime |
+| `nullable` | Boolean | ❌ | Allow null/empty values (default: true) |
+| `pattern` | String | ❌ | Regex pattern for validation (Text/DateTime types) |
+| `default` | Any | ❌ | Default value when field is missing or null |
+
+#### Validation Behavior
+
+**Type Conversion:**
+- Automatic conversion from string representations to target types
+- Boolean parsing: `"true"`, `"1"`, `"yes"` → `true`; `"false"`, `"0"`, `"no"` → `false`
+- Integer parsing: `"123"` → `123`
+- Decimal parsing: `"123.45"` → `123.45` (high precision)
+
+**Null Handling:**
+- Missing fields use `default` value if specified
+- Null/empty values use `default` value if specified  
+- If `nullable: false`, null values without defaults cause validation errors
+
+**Pattern Validation:**
+- Regex patterns applied to Text and DateTime fields
+- Validation failures stop processing with clear error messages
+- Use double backslashes `` for regex escapes in YAML
+
+**Error Handling:**
+- Schema validation errors halt processing immediately
+- Clear error messages indicate field name, expected type, and actual value
+- Pattern validation failures show the expected regex pattern
+
+#### Schema Examples
+
+**Customer Data Schema:**
+```yaml
+fields:
+  - name: "customer_id"
+    type: "Integer"
+    nullable: false
+    
+  - name: "full_name"
+    type: "Text"
+    nullable: false
+    
+  - name: "email"
+    type: "Text"
+    nullable: false
+    pattern: "^[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}$"
+    
+  - name: "phone"
+    type: "Text"
+    nullable: true
+    pattern: "^\+?[1-9]\d{1,14}$"  # E.164 format
+    
+  - name: "registration_date"
+    type: "DateTime"
+    nullable: false
+    pattern: "^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    
+  - name: "is_premium"
+    type: "Boolean"
+    nullable: false
+    default: false
+    
+  - name: "credit_limit"
+    type: "Decimal"
+    nullable: true
+    default: "0.00"
+```
+
+**Sales Data Schema:**
+```yaml
+fields:
+  - name: "order_id"
+    type: "Text"
+    nullable: false
+    pattern: "^ORD-\d{8}$"  # Format: ORD-12345678
+    
+  - name: "quantity"
+    type: "Integer"
+    nullable: false
+    default: 1
+    
+  - name: "unit_price"
+    type: "Decimal" 
+    nullable: false
+    
+  - name: "discount_rate"
+    type: "Decimal"
+    nullable: true
+    default: "0.0"
+    
+  - name: "total_amount"
+    type: "Decimal"
+    nullable: false
+    
+  - name: "order_date"
+    type: "DateTime"
+    nullable: false
+```
+
+#### Integration with Transformations
+
+Schema validation occurs **before** transformations, ensuring input data quality:
+
+```bash
+# Validate input, then transform 
+tinyetl raw_sales.csv processed.db 
+  --schema-file sales_schema.yaml 
+  --transform "profit=row.total_amount * 0.3; order_year=tonumber(row.order_date:match('^(%d%d%d%d)'))"
+```
+
+**Validation Flow:**
+1. **Load schema** from YAML file
+2. **Validate each row** against schema (type checking, patterns, nullability)
+3. **Apply defaults** for missing/null fields
+4. **Apply transformations** to validated data
+5. **Transfer** to target
+
+#### Use Cases
+
+- **Data Quality Assurance**: Ensure incoming data meets quality standards
+- **API Integration**: Validate data from external APIs before processing
+- **ETL Pipelines**: Enforce consistent schemas across pipeline stages
+- **Data Contracts**: Define and enforce data format agreements
+- **Migration Validation**: Ensure data integrity during system migrations
+
+#### Command Examples
+
+```bash
+# Basic schema validation
+tinyetl customer_data.csv clean_customers.db --schema-file customer_schema.yaml
+
+# Schema validation with preview
+tinyetl large_import.csv target.db --schema-file validation.yaml --preview 5
+
+# Combined schema validation and transformations
+tinyetl sales_export.csv analytics.db 
+  --schema-file sales_schema.yaml 
+  --transform "profit_margin=(row.total_amount - row.cost) / row.total_amount"
+
+# Validate API data before processing
+tinyetl "https://api.example.com/export" local_data.db 
+  --source-type=csv 
+  --schema-file api_schema.yaml
+```
+
+### Command Line Options
 
 # Load Parquet files to PostgreSQL
 tinyetl large_dataset.parquet "postgresql://user:pass@localhost/db#table"

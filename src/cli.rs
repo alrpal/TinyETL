@@ -17,6 +17,10 @@ pub struct Cli {
     #[arg(long, default_value = "true")]
     pub infer_schema: bool,
 
+    /// Path to schema file (YAML) to override auto-detection
+    #[arg(long, value_name = "FILE")]
+    pub schema_file: Option<String>,
+
     /// Number of rows per batch
     #[arg(long, default_value = "10000")]
     pub batch_size: usize,
@@ -67,6 +71,7 @@ impl From<Cli> for Config {
             source: cli.source,
             target: cli.target,
             infer_schema: cli.infer_schema,
+            schema_file: cli.schema_file,
             batch_size: cli.batch_size,
             preview: cli.preview,
             dry_run: cli.dry_run,

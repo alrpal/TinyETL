@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use rust_decimal::Decimal;
+use regex::Regex;
 use crate::Result;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -13,6 +15,189 @@ pub enum DataType {
     Date,
     DateTime,
     Null,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaFileColumn {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub data_type: String,
+    pub nullable: bool,
+    pub pattern: Option<String>,
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaFile {
+    pub columns: Vec<SchemaFileColumn>,
+}
+
+impl SchemaFile {
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let schema_file: SchemaFile = serde_yaml::from_str(&content)
+            .map_err(|e| crate::TinyEtlError::Configuration(format!("Invalid schema file: {}", e)))?;
+        
+        // Validate the schema file
+        schema_file.validate()?;
+        
+        Ok(schema_file)
+    }
+    
+    pub fn validate(&self) -> Result<()> {
+        for column in &self.columns {
+            // Validate data type
+            match column.data_type.to_lowercase().as_str() {
+                "string" | "integer" | "decimal" | "boolean" | "date" | "datetime" => {},
+                _ => return Err(crate::TinyEtlError::Configuration(
+                    format!("Invalid data type '{}' for column '{}'", column.data_type, column.name)
+                )),
+            }
+            
+            // Validate regex pattern if provided
+            if let Some(pattern) = &column.pattern {
+                Regex::new(pattern).map_err(|e| 
+                    crate::TinyEtlError::Configuration(
+                        format!("Invalid regex pattern '{}' for column '{}': {}", pattern, column.name, e)
+                    )
+                )?;
+            }
+        }
+        Ok(())
+    }
+    
+    pub fn to_schema(&self) -> Result<Schema> {
+        let columns = self.columns.iter().map(|col| {
+            let data_type = match col.data_type.to_lowercase().as_str() {
+                "string" => DataType::String,
+                "integer" => DataType::Integer,
+                "decimal" => DataType::Decimal,
+                "boolean" => DataType::Boolean,
+                "date" => DataType::Date,
+                "datetime" => DataType::DateTime,
+                _ => DataType::String, // Already validated, so this shouldn't happen
+            };
+            
+            Column {
+                name: col.name.clone(),
+                data_type,
+                nullable: col.nullable,
+            }
+        }).collect();
+        
+        Ok(Schema {
+            columns,
+            estimated_rows: None,
+            primary_key_candidate: None,
+        })
+    }
+    
+    pub fn validate_and_transform_row(&self, row: &mut Row) -> Result<()> {
+        for schema_col in &self.columns {
+            let value = row.get(&schema_col.name);
+            
+            // Check for required columns
+            if !schema_col.nullable && (value.is_none() || matches!(value, Some(Value::Null))) {
+                // Apply default if available
+                if let Some(default_str) = &schema_col.default {
+                    let default_value = self.parse_default_value(default_str, &schema_col.data_type)?;
+                    row.insert(schema_col.name.clone(), default_value);
+                } else {
+                    return Err(crate::TinyEtlError::DataValidation(
+                        format!("Required column '{}' is missing or null", schema_col.name)
+                    ));
+                }
+            }
+            
+            // Validate existing values
+            if let Some(val) = row.get(&schema_col.name) {
+                self.validate_column_value(val, schema_col)?;
+            }
+        }
+        Ok(())
+    }
+    
+    fn validate_column_value(&self, value: &Value, schema_col: &SchemaFileColumn) -> Result<()> {
+        // Skip null values if column is nullable
+        if matches!(value, Value::Null) && schema_col.nullable {
+            return Ok(());
+        }
+        
+        // Validate data type
+        let expected_type = match schema_col.data_type.to_lowercase().as_str() {
+            "string" => DataType::String,
+            "integer" => DataType::Integer,
+            "decimal" => DataType::Decimal,
+            "boolean" => DataType::Boolean,
+            "date" => DataType::Date,
+            "datetime" => DataType::DateTime,
+            _ => return Err(crate::TinyEtlError::DataValidation(
+                format!("Unknown data type '{}' for column '{}'", schema_col.data_type, schema_col.name)
+            )),
+        };
+        
+        let actual_type = SchemaInferer::infer_type(value);
+        if actual_type != expected_type && actual_type != DataType::Null {
+            return Err(crate::TinyEtlError::DataValidation(
+                format!("Column '{}' expected type {:?}, got {:?}", schema_col.name, expected_type, actual_type)
+            ));
+        }
+        
+        // Validate pattern for string values
+        if let (Some(pattern), Value::String(s)) = (&schema_col.pattern, value) {
+            let regex = Regex::new(pattern).unwrap(); // Already validated in validate()
+            if !regex.is_match(s) {
+                return Err(crate::TinyEtlError::DataValidation(
+                    format!("Column '{}' value '{}' does not match pattern '{}'", schema_col.name, s, pattern)
+                ));
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn parse_default_value(&self, default_str: &str, data_type: &str) -> Result<Value> {
+        match data_type.to_lowercase().as_str() {
+            "string" => Ok(Value::String(default_str.to_string())),
+            "integer" => {
+                let parsed = default_str.parse::<i64>()
+                    .map_err(|_| crate::TinyEtlError::Configuration(
+                        format!("Invalid default integer value: '{}'", default_str)
+                    ))?;
+                Ok(Value::Integer(parsed))
+            },
+            "decimal" => {
+                let parsed = default_str.parse::<Decimal>()
+                    .map_err(|_| crate::TinyEtlError::Configuration(
+                        format!("Invalid default decimal value: '{}'", default_str)
+                    ))?;
+                Ok(Value::Decimal(parsed))
+            },
+            "boolean" => {
+                let parsed = default_str.parse::<bool>()
+                    .map_err(|_| crate::TinyEtlError::Configuration(
+                        format!("Invalid default boolean value: '{}'", default_str)
+                    ))?;
+                Ok(Value::Boolean(parsed))
+            },
+            "date" | "datetime" => {
+                // Try to parse as RFC3339 first, then as date
+                let parsed = chrono::DateTime::parse_from_rfc3339(default_str)
+                    .or_else(|_| {
+                        // Try parsing as date only
+                        chrono::NaiveDate::parse_from_str(default_str, "%Y-%m-%d")
+                            .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().fixed_offset())
+                    })
+                    .map_err(|_| crate::TinyEtlError::Configuration(
+                        format!("Invalid default date/datetime value: '{}'", default_str)
+                    ))?;
+                Ok(Value::Date(parsed.with_timezone(&Utc)))
+            },
+            _ => Err(crate::TinyEtlError::Configuration(
+                format!("Unsupported data type for default value: '{}'", data_type)
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

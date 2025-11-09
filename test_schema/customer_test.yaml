@@ -1,0 +1,23 @@
+fields:
+  - name: "id"
+    type: "Integer"
+    nullable: false
+  - name: "name"
+    type: "Text"
+    nullable: false
+    pattern: "^[A-Za-z\\s]+$"
+  - name: "email"
+    type: "Text"
+    nullable: false
+    pattern: "^[\\w\\.-]+@[\\w\\.-]+\\.[A-Za-z]{2,}$"
+  - name: "age"
+    type: "Integer"
+    nullable: true
+    default: 25
+  - name: "balance"
+    type: "Decimal"
+    nullable: false
+    default: "0.00"
+  - name: "created_at"
+    type: "Timestamp"
+    nullable: false

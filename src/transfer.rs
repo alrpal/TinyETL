@@ -6,7 +6,7 @@ use crate::{
     Result, TinyEtlError,
     config::Config,
     connectors::{Source, Target},
-    schema::Schema,
+    schema::{Schema, SchemaFile},
     transformer::Transformer,
 };
 
@@ -34,9 +34,15 @@ impl TransferEngine {
         info!("→ Connecting to target: {}", config.target);
         target.connect().await?;
 
-        // Step 2: Infer schema from source
-        info!("→ Inferring schema...");
-        let schema = source.infer_schema(1000).await?;
+        // Step 2: Infer or load schema
+        let schema = if let Some(schema_file_path) = &config.schema_file {
+            info!("→ Loading schema from file: {}", schema_file_path);
+            let schema_file = SchemaFile::from_file(schema_file_path)?;
+            schema_file.to_schema()?
+        } else {
+            info!("→ Inferring schema from source...");
+            source.infer_schema(1000).await?
+        };
         info!("→ {} columns detected", schema.columns.len());
 
         // Step 3: Handle preview mode
@@ -95,15 +101,29 @@ impl TransferEngine {
             None
         };
 
+        // Load schema file for validation if provided
+        let schema_file = if let Some(schema_file_path) = &config.schema_file {
+            Some(SchemaFile::from_file(schema_file_path)?)
+        } else {
+            None
+        };
+
         let mut total_rows = 0;
         let mut batches_processed = 0;
         
         source.reset().await?;
 
         while source.has_more() {
-            let batch = source.read_batch(config.batch_size).await?;
+            let mut batch = source.read_batch(config.batch_size).await?;
             if batch.is_empty() {
                 break;
+            }
+
+            // Apply schema validation and defaults if schema file is provided
+            if let Some(ref schema_file) = schema_file {
+                for row in &mut batch {
+                    schema_file.validate_and_transform_row(row)?;
+                }
             }
 
             // Apply transformations
