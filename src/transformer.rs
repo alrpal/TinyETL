@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use mlua::{Lua, Table, Value as LuaValue, Function};
 use tracing::{debug, warn};
+use rust_decimal::Decimal;
 
 use crate::{
     Result, TinyEtlError,
@@ -222,7 +223,11 @@ impl Transformer {
             let lua_value = match value {
                 Value::String(s) => LuaValue::String(self.lua.create_string(s)?),
                 Value::Integer(i) => LuaValue::Integer(*i),
-                Value::Float(f) => LuaValue::Number(*f),
+                Value::Decimal(d) => {
+                    // Convert Decimal to f64 for Lua
+                    let f: f64 = (*d).try_into().unwrap_or(0.0);
+                    LuaValue::Number(f)
+                },
                 Value::Boolean(b) => LuaValue::Boolean(*b),
                 Value::Date(dt) => LuaValue::String(self.lua.create_string(&dt.to_rfc3339())?),
                 Value::Null => LuaValue::Nil,
@@ -248,7 +253,13 @@ impl Transformer {
                     Value::String(str_val.to_string())
                 }
                 LuaValue::Integer(i) => Value::Integer(i),
-                LuaValue::Number(f) => Value::Float(f),
+                LuaValue::Number(f) => {
+                    // Convert f64 to Decimal
+                    match Decimal::try_from(f) {
+                        Ok(d) => Value::Decimal(d),
+                        Err(_) => Value::String(f.to_string()),
+                    }
+                },
                 LuaValue::Boolean(b) => Value::Boolean(b),
                 LuaValue::Nil => Value::Null,
                 _ => {
@@ -457,7 +468,7 @@ mod tests {
         
         let transformed = &result[0];
         assert_eq!(transformed.get("int_col"), Some(&Value::Integer(42)));
-        assert_eq!(transformed.get("float_col"), Some(&Value::Float(3.14)));
+        assert_eq!(transformed.get("float_col"), Some(&Value::Decimal(Decimal::new(314, 2))));
         assert_eq!(transformed.get("bool_col"), Some(&Value::Boolean(true)));
         assert_eq!(transformed.get("str_col"), Some(&Value::String("hello".to_string())));
         // Note: nil values in Lua don't create table entries, so we don't test null_col here
@@ -793,7 +804,7 @@ end
         let mut row = HashMap::new();
         row.insert("test".to_string(), Value::String("value".to_string()));
         row.insert("int_val".to_string(), Value::Integer(42));
-        row.insert("float_val".to_string(), Value::Float(3.14));
+        row.insert("float_val".to_string(), Value::Decimal(Decimal::new(314, 2)));
         row.insert("bool_val".to_string(), Value::Boolean(true));
         row.insert("null_val".to_string(), Value::Null);
         
@@ -803,7 +814,7 @@ end
         // Verify all value types are handled correctly
         assert_eq!(converted_row.get("test"), Some(&Value::String("value".to_string())));
         assert_eq!(converted_row.get("int_val"), Some(&Value::Integer(42)));
-        assert_eq!(converted_row.get("float_val"), Some(&Value::Float(3.14)));
+        assert_eq!(converted_row.get("float_val"), Some(&Value::Decimal(Decimal::new(314, 2))));
         assert_eq!(converted_row.get("bool_val"), Some(&Value::Boolean(true)));
         
         // Note: In Lua, nil values don't create table entries, so null_val won't be preserved

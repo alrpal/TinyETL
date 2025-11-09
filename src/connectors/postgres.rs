@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Row as SqlxRow, Column, postgres::PgConnectOptions, Postgres};
 use std::str::FromStr;
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 
 use crate::{
     Result, TinyEtlError,
@@ -227,12 +228,24 @@ impl PostgresSource {
             }
         } else if let Ok(val) = row.try_get::<Option<f64>, _>(col_name) {
             match val {
-                Some(f) => Ok(Value::Float(f)),
+                Some(f) => {
+                    // Convert f64 to Decimal
+                    match Decimal::try_from(f) {
+                        Ok(d) => Ok(Value::Decimal(d)),
+                        Err(_) => Ok(Value::String(f.to_string())),
+                    }
+                },
                 None => Ok(Value::Null),
             }
         } else if let Ok(val) = row.try_get::<Option<f32>, _>(col_name) {
             match val {
-                Some(f) => Ok(Value::Float(f as f64)),
+                Some(f) => {
+                    // Convert f32 to Decimal via f64
+                    match Decimal::try_from(f as f64) {
+                        Ok(d) => Ok(Value::Decimal(d)),
+                        Err(_) => Ok(Value::String(f.to_string())),
+                    }
+                },
                 None => Ok(Value::Null),
             }
         } else if let Ok(val) = row.try_get::<Option<bool>, _>(col_name) {
@@ -330,7 +343,7 @@ impl Target for PostgresTarget {
             let pg_type = match col.data_type {
                 DataType::String => "TEXT",
                 DataType::Integer => "BIGINT",
-                DataType::Float => "DOUBLE PRECISION",
+                DataType::Decimal => "DECIMAL",
                 DataType::Boolean => "BOOLEAN",
                 DataType::Date | DataType::DateTime => "TIMESTAMP WITH TIME ZONE",
                 DataType::Null => "TEXT", // Default to TEXT for null columns
@@ -388,7 +401,7 @@ impl Target for PostgresTarget {
                 query = match value {
                     Value::String(s) => query.bind(s),
                     Value::Integer(i) => query.bind(i),
-                    Value::Float(f) => query.bind(f),
+                    Value::Decimal(d) => query.bind(d.to_string()),
                     Value::Boolean(b) => query.bind(b),
                     Value::Date(d) => query.bind(d),
                     Value::Null => query.bind::<Option<String>>(None),

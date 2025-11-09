@@ -8,6 +8,7 @@ use apache_avro::{
     types::Value as AvroValue, to_avro_datum,
 };
 use serde_json::{Value as JsonValue, json};
+use rust_decimal::Decimal;
 
 use crate::{
     Result, TinyEtlError,
@@ -37,7 +38,7 @@ impl AvroSource {
             JsonValue::String(type_name) => match type_name.as_str() {
                 "string" => DataType::String,
                 "int" | "long" => DataType::Integer,
-                "float" | "double" => DataType::Float,
+                "float" | "double" => DataType::Decimal,
                 "boolean" => DataType::Boolean,
                 "date" => DataType::Date,
                 "timestamp-millis" | "timestamp-micros" => DataType::DateTime,
@@ -92,8 +93,20 @@ impl AvroSource {
             AvroValue::Boolean(b) => Ok(Value::Boolean(*b)),
             AvroValue::Int(i) => Ok(Value::Integer(*i as i64)),
             AvroValue::Long(l) => Ok(Value::Integer(*l)),
-            AvroValue::Float(f) => Ok(Value::Float(*f as f64)),
-            AvroValue::Double(d) => Ok(Value::Float(*d)),
+            AvroValue::Float(f) => {
+                // Convert f32 to Decimal
+                match Decimal::try_from(*f as f64) {
+                    Ok(d) => Ok(Value::Decimal(d)),
+                    Err(_) => Ok(Value::String(f.to_string())),
+                }
+            },
+            AvroValue::Double(d) => {
+                // Convert f64 to Decimal
+                match Decimal::try_from(*d) {
+                    Ok(decimal) => Ok(Value::Decimal(decimal)),
+                    Err(_) => Ok(Value::String(d.to_string())),
+                }
+            },
             AvroValue::Bytes(b) => Ok(Value::String(format!("{:?}", b))),
             AvroValue::String(s) => Ok(Value::String(s.clone())),
             AvroValue::Fixed(_, bytes) => Ok(Value::String(format!("{:?}", bytes))),
@@ -388,7 +401,7 @@ impl AvroTarget {
                         json!("long")
                     }
                 },
-                DataType::Float => {
+                DataType::Decimal => {
                     if column.nullable {
                         json!(["null", "double"])
                     } else {
@@ -440,7 +453,11 @@ impl AvroTarget {
             (Value::Null, _) => Ok(AvroValue::Union(0, Box::new(AvroValue::Null))),
             (Value::String(s), DataType::String) => Ok(AvroValue::String(s.clone())),
             (Value::Integer(i), DataType::Integer) => Ok(AvroValue::Long(*i)),
-            (Value::Float(f), DataType::Float) => Ok(AvroValue::Double(*f)),
+            (Value::Decimal(d), DataType::Decimal) => {
+                // Convert Decimal to f64 for Avro
+                let f: f64 = (*d).try_into().unwrap_or(0.0);
+                Ok(AvroValue::Double(f))
+            },
             (Value::Boolean(b), DataType::Boolean) => Ok(AvroValue::Boolean(*b)),
             (Value::Date(dt), DataType::Date) => {
                 let days_since_epoch = (dt.timestamp() / 86400) as i32;
@@ -455,10 +472,11 @@ impl AvroTarget {
                     .map_err(|_| TinyEtlError::DataTransfer(format!("Cannot convert '{}' to integer", s)))?;
                 Ok(AvroValue::Long(parsed))
             },
-            (Value::String(s), DataType::Float) => {
-                let parsed = s.parse::<f64>()
-                    .map_err(|_| TinyEtlError::DataTransfer(format!("Cannot convert '{}' to float", s)))?;
-                Ok(AvroValue::Double(parsed))
+            (Value::String(s), DataType::Decimal) => {
+                let parsed = s.parse::<Decimal>()
+                    .map_err(|_| TinyEtlError::DataTransfer(format!("Cannot convert '{}' to decimal", s)))?;
+                let f: f64 = parsed.try_into().unwrap_or(0.0);
+                Ok(AvroValue::Double(f))
             },
             (Value::String(s), DataType::Boolean) => {
                 let parsed = s.parse::<bool>()
@@ -466,7 +484,7 @@ impl AvroTarget {
                 Ok(AvroValue::Boolean(parsed))
             },
             (Value::Integer(i), DataType::String) => Ok(AvroValue::String(i.to_string())),
-            (Value::Float(f), DataType::String) => Ok(AvroValue::String(f.to_string())),
+            (Value::Decimal(d), DataType::String) => Ok(AvroValue::String(d.to_string())),
             (Value::Boolean(b), DataType::String) => Ok(AvroValue::String(b.to_string())),
             _ => Err(TinyEtlError::DataTransfer(format!(
                 "Cannot convert value {:?} to Avro type {:?}", value, data_type
@@ -693,7 +711,7 @@ mod tests {
         assert_eq!(first_row.get("id"), Some(&Value::Integer(1)));
         assert_eq!(first_row.get("name"), Some(&Value::String("John Doe".to_string())));
         assert_eq!(first_row.get("age"), Some(&Value::Integer(30)));
-        assert_eq!(first_row.get("salary"), Some(&Value::Float(50000.0)));
+        assert_eq!(first_row.get("salary"), Some(&Value::Decimal(Decimal::new(50000, 0))));
         assert_eq!(first_row.get("active"), Some(&Value::Boolean(true)));
         
         // Check second row
@@ -749,8 +767,8 @@ mod tests {
         assert_eq!(AvroSource::avro_type_to_schema_type(&json!("string")), DataType::String);
         assert_eq!(AvroSource::avro_type_to_schema_type(&json!("int")), DataType::Integer);
         assert_eq!(AvroSource::avro_type_to_schema_type(&json!("long")), DataType::Integer);
-        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("float")), DataType::Float);
-        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("double")), DataType::Float);
+        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("float")), DataType::Decimal);
+        assert_eq!(AvroSource::avro_type_to_schema_type(&json!("double")), DataType::Decimal);
         assert_eq!(AvroSource::avro_type_to_schema_type(&json!("boolean")), DataType::Boolean);
         
         // Test logical types
@@ -797,13 +815,19 @@ mod tests {
             AvroSource::avro_value_to_value(&AvroValue::Long(100)).unwrap(),
             Value::Integer(100)
         );
-        assert_eq!(
-            AvroSource::avro_value_to_value(&AvroValue::Float(3.14)).unwrap(),
-            Value::Float(3.140000104904175) // Account for f32 to f64 conversion precision
-        );
+        // Test f32 to decimal conversion (with precision limitations)
+        let float_result = AvroSource::avro_value_to_value(&AvroValue::Float(3.14)).unwrap();
+        if let Value::Decimal(d) = float_result {
+            // Just check that it's approximately 3.14 (f32 precision limitations)
+            let f: f64 = d.try_into().unwrap();
+            assert!((f - 3.14).abs() < 0.01, "Expected ~3.14, got {}", f);
+        } else {
+            panic!("Expected Decimal value");
+        }
+        
         assert_eq!(
             AvroSource::avro_value_to_value(&AvroValue::Double(2.718)).unwrap(),
-            Value::Float(2.718)
+            Value::Decimal(Decimal::new(2718, 3))
         );
         assert_eq!(
             AvroSource::avro_value_to_value(&AvroValue::String("test".to_string())).unwrap(),
@@ -874,7 +898,7 @@ mod tests {
                 },
                 Column {
                     name: "score".to_string(),
-                    data_type: DataType::Float,
+                    data_type: DataType::Decimal,
                     nullable: true,
                 },
                 Column {
@@ -960,7 +984,7 @@ mod tests {
         );
         
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::Float(3.14), &DataType::Float).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::Decimal(Decimal::new(314, 2)), &DataType::Decimal).unwrap(),
             AvroValue::Double(3.14)
         );
         
@@ -976,7 +1000,7 @@ mod tests {
         );
         
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::String("3.14".to_string()), &DataType::Float).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::String("3.14".to_string()), &DataType::Decimal).unwrap(),
             AvroValue::Double(3.14)
         );
         
@@ -1011,7 +1035,7 @@ mod tests {
         assert!(result.is_err());
         
         // Test invalid string to float conversion
-        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_float".to_string()), &DataType::Float);
+        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_float".to_string()), &DataType::Decimal);
         assert!(result.is_err());
         
         // Test invalid string to bool conversion

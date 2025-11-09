@@ -403,7 +403,7 @@ impl Target for SnowflakeTarget {
             
             let snowflake_type = match column.data_type {
                 DataType::Integer => "INTEGER",
-                DataType::Float => "FLOAT",
+                DataType::Decimal => "NUMBER(38,18)", // Snowflake high precision decimal
                 DataType::String => "VARCHAR(16777216)", // Snowflake max VARCHAR size
                 DataType::Boolean => "BOOLEAN",
                 DataType::DateTime => "TIMESTAMP",

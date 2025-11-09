@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use csv::{ReaderBuilder, WriterBuilder};
 use serde_json;
+use rust_decimal::Decimal;
 
 use crate::{
     Result, TinyEtlError,
@@ -84,9 +85,9 @@ impl CsvSource {
             return Value::Integer(int_val);
         }
         
-        // Try float
-        if let Ok(float_val) = value.parse::<f64>() {
-            return Value::Float(float_val);
+        // Try decimal
+        if let Ok(decimal_val) = value.parse::<Decimal>() {
+            return Value::Decimal(decimal_val);
         }
         
         // Try boolean
@@ -253,7 +254,7 @@ impl CsvTarget {
         match value {
             Value::String(s) => s.clone(),
             Value::Integer(i) => i.to_string(),
-            Value::Float(f) => f.to_string(),
+            Value::Decimal(d) => d.to_string(),
             Value::Boolean(b) => b.to_string(),
             Value::Date(dt) => dt.to_rfc3339(),
             Value::Null => String::new(),
@@ -303,7 +304,7 @@ impl Target for CsvTarget {
             match value {
                 Value::String(s) => s.clone(),
                 Value::Integer(i) => i.to_string(),
-                Value::Float(f) => f.to_string(),
+                Value::Decimal(d) => d.to_string(),
                 Value::Boolean(b) => b.to_string(),
                 Value::Date(dt) => dt.to_rfc3339(),
                 Value::Null => String::new(),
@@ -424,17 +425,18 @@ mod tests {
         // Test integer parsing
         assert!(matches!(CsvSource::parse_value("42"), Value::Integer(42)));
         
-        // Test float parsing (line 39)
-        assert!(matches!(CsvSource::parse_value("3.14"), Value::Float(f) if (f - 3.14).abs() < f64::EPSILON));
+        // Test decimal parsing
+        let decimal_result = CsvSource::parse_value("3.14");
+        assert!(matches!(decimal_result, Value::Decimal(d) if d == Decimal::new(314, 2)));
         
-        // Test boolean parsing (line 43)  
+        // Test boolean parsing
         assert!(matches!(CsvSource::parse_value("true"), Value::Boolean(true)));
         assert!(matches!(CsvSource::parse_value("false"), Value::Boolean(false)));
         
-        // Test datetime parsing (line 49)
+        // Test datetime parsing
         assert!(matches!(CsvSource::parse_value("2023-01-01T12:00:00Z"), Value::Date(_)));
         
-        // Test empty string to null (line 54)
+        // Test empty string to null
         assert!(matches!(CsvSource::parse_value(""), Value::Null));
         
         // Test string fallback
@@ -526,7 +528,7 @@ mod tests {
         
         assert_eq!(target.value_to_string(&Value::String("test".to_string())), "test");
         assert_eq!(target.value_to_string(&Value::Integer(42)), "42");
-        assert_eq!(target.value_to_string(&Value::Float(3.14)), "3.14");
+        assert_eq!(target.value_to_string(&Value::Decimal(Decimal::new(314, 2))), "3.14");
         assert_eq!(target.value_to_string(&Value::Boolean(true)), "true");
         assert_eq!(target.value_to_string(&Value::Null), "");
         
@@ -552,7 +554,7 @@ mod tests {
         let mut row = std::collections::HashMap::new();
         row.insert("string".to_string(), Value::String("test".to_string()));
         row.insert("integer".to_string(), Value::Integer(42));
-        row.insert("float".to_string(), Value::Float(3.14));
+        row.insert("decimal".to_string(), Value::Decimal(Decimal::new(314, 2)));
         row.insert("boolean".to_string(), Value::Boolean(true));
         row.insert("date".to_string(), Value::Date(chrono::Utc::now()));
         row.insert("null".to_string(), Value::Null);

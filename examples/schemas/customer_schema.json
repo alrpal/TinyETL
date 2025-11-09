@@ -1,0 +1,32 @@
+columns:
+  - name: customer_id
+    type: integer
+    nullable: false
+
+  - name: first_name
+    type: string
+    nullable: false
+
+  - name: last_name
+    type: string
+    nullable: false
+
+  - name: email
+    type: string
+    nullable: false
+    pattern: "^[^@]+@[^@]+\\.[^@]+$"
+
+  - name: phone
+    type: string
+    nullable: true
+
+  - name: date_joined
+    type: date
+    nullable: false
+
+  - name: is_active
+    type: boolean
+    nullable: false
+
+estimated_rows: null
+primary_key_candidate: customer_id

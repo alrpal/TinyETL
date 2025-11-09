@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use sqlx::{MySqlPool, Row as SqlxRow, Column as SqlxColumn};
 use url::Url;
+use rust_decimal::Decimal;
 
 use crate::{
     Result, TinyEtlError,
@@ -102,7 +103,7 @@ impl MysqlTarget {
     fn map_data_type_to_mysql(&self, data_type: &DataType) -> &'static str {
         match data_type {
             DataType::Integer => "BIGINT",
-            DataType::Float => "DOUBLE",
+            DataType::Decimal => "DECIMAL(65,30)",
             DataType::String => "TEXT",
             DataType::Boolean => "BOOLEAN",
             DataType::Date => "DATE",
@@ -155,7 +156,10 @@ impl MysqlTarget {
                 let value = row.get(column).unwrap_or(&default_value);
                 query = match value {
                     Value::Integer(i) => query.bind(i),
-                    Value::Float(f) => query.bind(f),
+                    Value::Decimal(d) => {
+                        // Convert Decimal to string for MySQL binding since it doesn't support direct Decimal binding
+                        query.bind(d.to_string())
+                    },
                     Value::String(s) => query.bind(s),
                     Value::Boolean(b) => query.bind(b),
                     Value::Date(d) => query.bind(d.to_rfc3339()),
@@ -372,7 +376,7 @@ mod tests {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
         
         assert_eq!(target.map_data_type_to_mysql(&DataType::Integer), "BIGINT");
-        assert_eq!(target.map_data_type_to_mysql(&DataType::Float), "DOUBLE");
+        assert_eq!(target.map_data_type_to_mysql(&DataType::Decimal), "DECIMAL(65,30)");
         assert_eq!(target.map_data_type_to_mysql(&DataType::String), "TEXT");
         assert_eq!(target.map_data_type_to_mysql(&DataType::Boolean), "BOOLEAN");
         assert_eq!(target.map_data_type_to_mysql(&DataType::Date), "DATE");
@@ -449,7 +453,7 @@ mod tests {
                 },
                 Column {
                     name: "score".to_string(),
-                    data_type: DataType::Float,
+                    data_type: DataType::Decimal,
                     nullable: false,
                 },
                 Column {
@@ -481,7 +485,7 @@ mod tests {
             columns.join(", ")
         );
         
-        let expected = "CREATE TABLE IF NOT EXISTS `test_table` (`id` BIGINT NOT NULL, `name` TEXT, `score` DOUBLE NOT NULL, `active` BOOLEAN, `created_at` DATETIME NOT NULL)";
+        let expected = "CREATE TABLE IF NOT EXISTS `test_table` (`id` BIGINT NOT NULL, `name` TEXT, `score` DECIMAL(65,30) NOT NULL, `active` BOOLEAN, `created_at` DATETIME NOT NULL)";
         assert_eq!(create_sql, expected);
     }
 
@@ -526,7 +530,7 @@ mod tests {
         // Test the value conversion logic used in write_chunk
         let values = vec![
             Value::Integer(42),
-            Value::Float(3.14),
+            Value::Decimal(Decimal::new(314, 2)),
             Value::String("test".to_string()),
             Value::Boolean(true),
             Value::Null,
@@ -536,7 +540,7 @@ mod tests {
         for value in &values {
             match value {
                 Value::Integer(i) => assert_eq!(*i, 42),
-                Value::Float(f) => assert_eq!(*f, 3.14),
+                Value::Decimal(d) => assert_eq!(*d, Decimal::new(314, 2)),
                 Value::String(s) => assert_eq!(s, "test"),
                 Value::Boolean(b) => assert!(*b),
                 Value::Null => {}, // Null should be handled

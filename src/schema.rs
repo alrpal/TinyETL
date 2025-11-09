@@ -1,13 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use rust_decimal::Decimal;
 use crate::Result;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DataType {
     String,
     Integer,
-    Float,
+    Decimal,
     Boolean,
     Date,
     DateTime,
@@ -33,7 +34,7 @@ pub struct Schema {
 pub enum Value {
     String(String),
     Integer(i64),
-    Float(f64),
+    Decimal(Decimal),
     Boolean(bool),
     Date(DateTime<Utc>),
     Null,
@@ -101,7 +102,7 @@ impl SchemaInferer {
         match value {
             Value::String(_) => DataType::String,
             Value::Integer(_) => DataType::Integer,
-            Value::Float(_) => DataType::Float,
+            Value::Decimal(_) => DataType::Decimal,
             Value::Boolean(_) => DataType::Boolean,
             Value::Date(_) => DataType::DateTime,
             Value::Null => DataType::Null,
@@ -137,7 +138,7 @@ impl std::fmt::Display for DataType {
         match self {
             DataType::String => write!(f, "TEXT"),
             DataType::Integer => write!(f, "INTEGER"),
-            DataType::Float => write!(f, "REAL"),
+            DataType::Decimal => write!(f, "DECIMAL"),
             DataType::Boolean => write!(f, "BOOLEAN"),
             DataType::Date => write!(f, "DATE"),
             DataType::DateTime => write!(f, "TIMESTAMP"),
@@ -205,7 +206,7 @@ mod tests {
     fn test_data_type_display() {
         assert_eq!(DataType::String.to_string(), "TEXT");
         assert_eq!(DataType::Integer.to_string(), "INTEGER");
-        assert_eq!(DataType::Float.to_string(), "REAL");
+        assert_eq!(DataType::Decimal.to_string(), "DECIMAL");
         assert_eq!(DataType::Boolean.to_string(), "BOOLEAN");
         assert_eq!(DataType::Date.to_string(), "DATE");
         assert_eq!(DataType::DateTime.to_string(), "TIMESTAMP");
@@ -216,7 +217,7 @@ mod tests {
     fn test_value_type_inference() {
         assert_eq!(SchemaInferer::infer_type(&Value::String("test".to_string())), DataType::String);
         assert_eq!(SchemaInferer::infer_type(&Value::Integer(42)), DataType::Integer);
-        assert_eq!(SchemaInferer::infer_type(&Value::Float(3.14)), DataType::Float);
+        assert_eq!(SchemaInferer::infer_type(&Value::Decimal(Decimal::new(314, 2))), DataType::Decimal);
         assert_eq!(SchemaInferer::infer_type(&Value::Boolean(true)), DataType::Boolean);
         assert_eq!(SchemaInferer::infer_type(&Value::Date(Utc::now())), DataType::DateTime);
         assert_eq!(SchemaInferer::infer_type(&Value::Null), DataType::Null);

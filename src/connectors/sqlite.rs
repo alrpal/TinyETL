@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use async_trait::async_trait;
 use sqlx::{SqlitePool, Row as SqlxRow, Column, sqlite::SqliteConnectOptions};
+use rust_decimal::Decimal;
 
 use crate::{
     Result, TinyEtlError,
@@ -85,7 +86,7 @@ impl Source for SqliteSource {
             
             let data_type = match sql_type.to_uppercase().as_str() {
                 "INTEGER" | "INT" => DataType::Integer,
-                "REAL" | "FLOAT" | "DOUBLE" => DataType::Float,
+                "REAL" | "FLOAT" | "DOUBLE" | "NUMERIC" | "DECIMAL" => DataType::Decimal,
                 "TEXT" | "VARCHAR" => DataType::String,
                 "BOOLEAN" | "BOOL" => DataType::Boolean,
                 "DATE" => DataType::Date,
@@ -154,7 +155,13 @@ impl Source for SqliteSource {
                     }
                 } else if let Ok(val) = row.try_get::<Option<f64>, _>(i) {
                     match val {
-                        Some(f) => Value::Float(f),
+                        Some(f) => {
+                            // Convert f64 to Decimal
+                            match Decimal::try_from(f) {
+                                Ok(d) => Value::Decimal(d),
+                                Err(_) => Value::String(f.to_string()),
+                            }
+                        },
                         None => Value::Null,
                     }
                 } else {
@@ -356,7 +363,11 @@ impl Target for SqliteTarget {
                     query = match value {
                         Value::String(s) => query.bind(s),
                         Value::Integer(i) => query.bind(*i),
-                        Value::Float(f) => query.bind(*f),
+                        Value::Decimal(d) => {
+                            // Convert Decimal to f64 for SQLite binding
+                            let f: f64 = (*d).try_into().unwrap_or(0.0);
+                            query.bind(f)
+                        },
                         Value::Boolean(b) => query.bind(*b),
                         Value::Date(dt) => query.bind(dt.to_rfc3339()),
                         Value::Null => query.bind(None::<String>),

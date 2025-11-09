@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json;
+use rust_decimal::Decimal;
 
 use crate::{
     Result, TinyEtlError,
@@ -38,7 +39,11 @@ impl JsonSource {
                 if let Some(i) = n.as_i64() {
                     Value::Integer(i)
                 } else if let Some(f) = n.as_f64() {
-                    Value::Float(f)
+                    // Convert f64 to Decimal
+                    match Decimal::try_from(f) {
+                        Ok(d) => Value::Decimal(d),
+                        Err(_) => Value::String(n.to_string()),
+                    }
                 } else {
                     Value::String(n.to_string())
                 }
@@ -153,11 +158,17 @@ impl JsonTarget {
         match value {
             Value::String(s) => serde_json::Value::String(s.clone()),
             Value::Integer(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
-            Value::Float(f) => {
-                if let Some(n) = serde_json::Number::from_f64(*f) {
-                    serde_json::Value::Number(n)
-                } else {
-                    serde_json::Value::String(f.to_string())
+            Value::Decimal(d) => {
+                // Convert Decimal to f64 for JSON representation
+                match (*d).try_into() {
+                    Ok(f) => {
+                        if let Some(n) = serde_json::Number::from_f64(f) {
+                            serde_json::Value::Number(n)
+                        } else {
+                            serde_json::Value::String(d.to_string())
+                        }
+                    }
+                    Err(_) => serde_json::Value::String(d.to_string())
                 }
             }
             Value::Boolean(b) => serde_json::Value::Bool(*b),
@@ -375,9 +386,9 @@ mod tests {
         assert_eq!(target.value_to_json(&Value::Boolean(true)), serde_json::Value::Bool(true));
         assert_eq!(target.value_to_json(&Value::Null), serde_json::Value::Null);
         
-        // Test float conversion
-        let float_val = target.value_to_json(&Value::Float(3.14));
-        assert!(float_val.is_number());
+        // Test decimal conversion
+        let decimal_val = target.value_to_json(&Value::Decimal(Decimal::new(314, 2)));
+        assert!(decimal_val.is_number());
     }
 
     #[tokio::test]

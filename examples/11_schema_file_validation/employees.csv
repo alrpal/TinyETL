@@ -1,0 +1,7 @@
+employee_id,first_name,last_name,department,position,salary,hire_date,manager_id,is_full_time
+1,John,Doe,Engineering,Senior Developer,85000.50,2020-01-15,,true
+2,Jane,Smith,Marketing,Marketing Manager,75000.00,2019-03-20,5,true
+3,Bob,Johnson,Engineering,Junior Developer,55000.00,2022-06-10,1,true
+4,Alice,Brown,HR,HR Specialist,60000.00,2021-08-05,6,false
+5,Charlie,Wilson,Marketing,Director,95000.00,2018-11-12,,true
+6,Diana,Lee,HR,HR Manager,80000.00,2019-05-18,,true

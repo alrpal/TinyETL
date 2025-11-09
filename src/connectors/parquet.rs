@@ -7,6 +7,7 @@ use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 use parquet::file::reader::{FileReader, SerializedFileReader};
+use rust_decimal::Decimal;
 
 use crate::{
     Result, TinyEtlError,
@@ -41,7 +42,7 @@ impl ParquetSource {
                 crate::schema::DataType::Integer
             }
             DataType::Float16 | DataType::Float32 | DataType::Float64 => {
-                crate::schema::DataType::Float
+                crate::schema::DataType::Decimal
             }
             DataType::Boolean => crate::schema::DataType::Boolean,
             DataType::Date32 | DataType::Date64 => crate::schema::DataType::Date,
@@ -93,7 +94,11 @@ impl ParquetSource {
                     let value = if float_array.is_null(i) {
                         Value::Null
                     } else {
-                        Value::Float(float_array.value(i))
+                        // Convert f64 to Decimal
+                        match Decimal::try_from(float_array.value(i)) {
+                            Ok(d) => Value::Decimal(d),
+                            Err(_) => Value::String(float_array.value(i).to_string()),
+                        }
                     };
                     values.push((column_name.to_string(), value));
                 }
@@ -283,7 +288,7 @@ impl ParquetTarget {
             let arrow_type = match col.data_type {
                 crate::schema::DataType::String => DataType::Utf8,
                 crate::schema::DataType::Integer => DataType::Int64,
-                crate::schema::DataType::Float => DataType::Float64,
+                crate::schema::DataType::Decimal => DataType::Float64,
                 crate::schema::DataType::Boolean => DataType::Boolean,
                 crate::schema::DataType::Date => DataType::Date64,
                 crate::schema::DataType::DateTime => DataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -334,7 +339,11 @@ impl ParquetTarget {
                     let mut builder = Float64Builder::new();
                     for row in rows {
                         match row.get(column_name) {
-                            Some(Value::Float(f)) => builder.append_value(*f),
+                            Some(Value::Decimal(d)) => {
+                                // Convert Decimal to f64
+                                let f: f64 = (*d).try_into().unwrap_or(0.0);
+                                builder.append_value(f);
+                            },
                             Some(Value::Null) => builder.append_null(),
                             None => builder.append_null(),
                             _ => builder.append_null(),

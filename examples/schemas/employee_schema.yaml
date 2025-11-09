@@ -1,0 +1,39 @@
+columns:
+  - name: employee_id
+    type: integer
+    nullable: false
+
+  - name: first_name
+    type: string
+    nullable: false
+
+  - name: last_name
+    type: string
+    nullable: false
+
+  - name: department
+    type: string
+    nullable: false
+
+  - name: position
+    type: string
+    nullable: false
+
+  - name: salary
+    type: decimal
+    nullable: false
+
+  - name: hire_date
+    type: date
+    nullable: false
+
+  - name: manager_id
+    type: integer
+    nullable: true
+
+  - name: is_full_time
+    type: boolean
+    nullable: false
+
+estimated_rows: null
+primary_key_candidate: employee_id

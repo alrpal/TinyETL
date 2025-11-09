@@ -1,0 +1,35 @@
+columns:
+  - name: product_id
+    type: integer
+    nullable: false
+
+  - name: name
+    type: string
+    nullable: false
+
+  - name: category
+    type: string
+    nullable: false
+
+  - name: price
+    type: decimal
+    nullable: false
+
+  - name: description
+    type: string
+    nullable: true
+
+  - name: stock_quantity
+    type: integer
+    nullable: false
+
+  - name: created_at
+    type: datetime
+    nullable: false
+
+  - name: updated_at
+    type: datetime
+    nullable: true
+
+estimated_rows: null
+primary_key_candidate: product_id
