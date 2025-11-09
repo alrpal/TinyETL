@@ -572,6 +572,18 @@ impl Target for AvroTarget {
     async fn exists(&self, _table_name: &str) -> Result<bool> {
         Ok(self.file_path.exists())
     }
+
+    async fn truncate(&mut self, _table_name: &str) -> Result<()> {
+        // For Avro files, truncation means clearing buffer
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn supports_append(&self) -> bool {
+        // Avro files don't easily support append - would require reading existing file and merging
+        // For simplicity, we return false to force truncation
+        false
+    }
 }
 
 #[cfg(test)]

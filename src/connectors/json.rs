@@ -176,6 +176,34 @@ impl JsonTarget {
             Value::Null => serde_json::Value::Null,
         }
     }
+
+    fn json_to_value(json_val: &serde_json::Value) -> Value {
+        match json_val {
+            serde_json::Value::String(s) => {
+                // Try to parse as date first
+                if let Some(date_value) = crate::date_parser::DateParser::try_parse(s) {
+                    date_value
+                } else {
+                    Value::String(s.clone())
+                }
+            }
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Integer(i)
+                } else if let Some(f) = n.as_f64() {
+                    match rust_decimal::Decimal::try_from(f) {
+                        Ok(d) => Value::Decimal(d),
+                        Err(_) => Value::String(n.to_string()),
+                    }
+                } else {
+                    Value::String(n.to_string())
+                }
+            }
+            serde_json::Value::Bool(b) => Value::Boolean(*b),
+            serde_json::Value::Null => Value::Null,
+            _ => Value::String(json_val.to_string()), // Fallback for arrays/objects
+        }
+    }
 }
 
 #[async_trait]
@@ -190,6 +218,28 @@ impl Target for JsonTarget {
 
     async fn create_table(&mut self, _table_name: &str, schema: &Schema) -> Result<()> {
         self.schema = Some(schema.clone());
+        
+        // If file exists and we support append, load existing data
+        if self.file_path.exists() && self.supports_append() {
+            if let Ok(content) = std::fs::read_to_string(&self.file_path) {
+                if let Ok(existing_json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(array) = existing_json.as_array() {
+                        // Convert existing JSON objects back to Row format
+                        for json_obj in array {
+                            if let Some(obj) = json_obj.as_object() {
+                                let mut row = Row::new();
+                                for (key, json_val) in obj {
+                                    let value = Self::json_to_value(json_val);
+                                    row.insert(key.clone(), value);
+                                }
+                                self.accumulated_rows.push(row);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
 
@@ -234,6 +284,17 @@ impl Target for JsonTarget {
 
     async fn exists(&self, _table_name: &str) -> Result<bool> {
         Ok(self.file_path.exists())
+    }
+
+    async fn truncate(&mut self, _table_name: &str) -> Result<()> {
+        // For JSON files, truncation means clearing accumulated rows
+        self.accumulated_rows.clear();
+        Ok(())
+    }
+
+    fn supports_append(&self) -> bool {
+        // JSON arrays support append - we can merge existing data with new data
+        true
     }
 }
 

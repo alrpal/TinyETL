@@ -458,6 +458,18 @@ impl Target for ParquetTarget {
     async fn exists(&self, _table_name: &str) -> Result<bool> {
         Ok(self.file_path.exists())
     }
+
+    async fn truncate(&mut self, _table_name: &str) -> Result<()> {
+        // For Parquet files, truncation means clearing buffered rows
+        self.buffered_rows.clear();
+        Ok(())
+    }
+
+    fn supports_append(&self) -> bool {
+        // Parquet files don't easily support append - would require reading existing file and merging
+        // For simplicity, we return false to force truncation
+        false
+    }
 }
 
 #[cfg(test)]

@@ -246,6 +246,18 @@ impl SqliteTarget {
         let path_str = self.connection_string.trim_start_matches("sqlite:");
         Ok(PathBuf::from(path_str))
     }
+
+    fn map_data_type_to_sqlite(&self, data_type: &DataType) -> &'static str {
+        match data_type {
+            DataType::Integer => "INTEGER",
+            DataType::Decimal => "REAL",
+            DataType::String => "TEXT",
+            DataType::Boolean => "INTEGER", // SQLite uses INTEGER for boolean
+            DataType::Date => "TEXT",
+            DataType::DateTime => "TEXT",
+            DataType::Null => "TEXT",
+        }
+    }
 }
 
 #[async_trait]
@@ -295,18 +307,16 @@ impl Target for SqliteTarget {
         // Update our internal table name to match what we're actually creating
         self.table_name = actual_table_name.clone();
 
-        // Build CREATE TABLE statement
+        // Build CREATE TABLE statement with IF NOT EXISTS (append-first philosophy)
         let column_definitions: Vec<String> = schema.columns.iter().map(|col| {
+            let sqlite_type = self.map_data_type_to_sqlite(&col.data_type);
             let nullable = if col.nullable { "" } else { " NOT NULL" };
-            format!("\"{}\" {}{}", col.name, col.data_type, nullable)
+            format!("\"{}\" {}{}", col.name, sqlite_type, nullable)
         }).collect();
 
-        // Drop table if it exists to ensure fresh schema
-        let drop_sql = format!("DROP TABLE IF EXISTS \"{}\"", actual_table_name);
-        sqlx::query(&drop_sql).execute(pool).await?;
-
+        // Use CREATE TABLE IF NOT EXISTS to support append-first philosophy
         let create_sql = format!(
-            "CREATE TABLE \"{}\" ({})",
+            "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
             actual_table_name,
             column_definitions.join(", ")
         );
@@ -406,6 +416,26 @@ impl Target for SqliteTarget {
         } else {
             Ok(false)
         }
+    }
+
+    async fn truncate(&mut self, table_name: &str) -> Result<()> {
+        if let Some(pool) = &self.pool {
+            let actual_table_name = if table_name.is_empty() {
+                &self.table_name
+            } else {
+                table_name
+            };
+
+            sqlx::query(&format!("DELETE FROM \"{}\"", actual_table_name))
+                .execute(pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn supports_append(&self) -> bool {
+        // SQLite databases support appending new rows
+        true
     }
 }
 

@@ -271,6 +271,30 @@ impl Target for MysqlTarget {
             Err(_) => Ok(false),
         }
     }
+
+    async fn truncate(&mut self, table_name: &str) -> Result<()> {
+        let pool = self.pool.as_ref().ok_or_else(|| {
+            TinyEtlError::Connection("MySQL connection not established".to_string())
+        })?;
+        
+        let actual_table_name = if table_name.is_empty() {
+            &self.table_name
+        } else {
+            table_name
+        };
+
+        sqlx::query(&format!("TRUNCATE TABLE `{}`", actual_table_name))
+            .execute(pool)
+            .await
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
+
+        Ok(())
+    }
+
+    fn supports_append(&self) -> bool {
+        // MySQL databases support appending new rows
+        true
+    }
 }
 
 #[cfg(test)]

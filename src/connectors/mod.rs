@@ -46,6 +46,14 @@ pub trait Target: Send + Sync {
     
     /// Check if target already exists
     async fn exists(&self, table_name: &str) -> Result<bool>;
+    
+    /// Truncate the target (remove all existing data)
+    /// This should be called before writing if truncate mode is enabled
+    async fn truncate(&mut self, table_name: &str) -> Result<()>;
+    
+    /// Check if the target supports appending data
+    /// Returns true if data can be appended to existing target, false if it requires truncation
+    fn supports_append(&self) -> bool;
 }
 
 /// Factory function to create a source connector from a connection string

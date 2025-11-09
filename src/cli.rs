@@ -41,6 +41,10 @@ pub struct Cli {
     #[arg(long)]
     pub skip_existing: bool,
 
+    /// Truncate target before writing (overrides append-first behavior)
+    #[arg(long)]
+    pub truncate: bool,
+
     /// Path to Lua file containing a 'transform' function
     #[arg(long, value_name = "FILE")]
     pub transform_file: Option<String>,
@@ -77,6 +81,7 @@ impl From<Cli> for Config {
             dry_run: cli.dry_run,
             log_level: cli.log_level,
             skip_existing: cli.skip_existing,
+            truncate: cli.truncate,
             transform: transform_config,
             source_type: cli.source_type,
         }

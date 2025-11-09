@@ -437,6 +437,25 @@ impl Target for PostgresTarget {
 
         Ok(exists)
     }
+
+    async fn truncate(&mut self, table_name: &str) -> Result<()> {
+        let pool = self.pool.as_ref()
+            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
+
+        let truncate_query = format!("TRUNCATE TABLE \"{}\"", table_name);
+        
+        sqlx::query(&truncate_query)
+            .execute(pool)
+            .await
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
+
+        Ok(())
+    }
+
+    fn supports_append(&self) -> bool {
+        // PostgreSQL databases support appending new rows
+        true
+    }
 }
 
 #[cfg(test)]

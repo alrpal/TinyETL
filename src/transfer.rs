@@ -82,11 +82,28 @@ impl TransferEngine {
         // Step 6: Extract table name from target
         let table_name = Self::extract_table_name(&config.target);
 
-        // Step 7: Create target table with final schema
-        info!("→ Creating target table: {}", table_name);
-        target.create_table(&table_name, &final_schema).await?;
+        // Step 7: Handle append-first logic or truncate mode
+        let table_exists = target.exists(&table_name).await?;
+        
+        if table_exists {
+            if config.truncate {
+                info!("→ Truncating existing target: {}", table_name);
+                target.truncate(&table_name).await?;
+            } else if target.supports_append() {
+                info!("→ Appending to existing target: {}", table_name);
+                // Target exists and supports append - no need to create table
+            } else {
+                // Target exists but doesn't support append - must truncate
+                info!("→ Target exists but doesn't support append, truncating: {}", table_name);
+                target.truncate(&table_name).await?;
+            }
+        } else {
+            // Step 8: Create target table with final schema if it doesn't exist
+            info!("→ Creating target table: {}", table_name);
+            target.create_table(&table_name, &final_schema).await?;
+        }
 
-        // Step 8: Transfer data
+        // Step 9: Transfer data
         let estimated_rows = source.estimated_row_count().await?.unwrap_or(0);
         info!("→ Copying {} rows", estimated_rows);
 
@@ -148,7 +165,7 @@ impl TransferEngine {
             pb.finish_with_message("Complete");
         }
 
-        // Step 8: Finalize
+        // Step 10: Finalize
         target.finalize().await?;
         
         let total_time = start_time.elapsed();
@@ -443,6 +460,15 @@ mod tests {
 
         async fn exists(&self, _table_name: &str) -> Result<bool> {
             Ok(false)
+        }
+
+        async fn truncate(&mut self, _table_name: &str) -> Result<()> {
+            self.written_rows.clear();
+            Ok(())
+        }
+
+        fn supports_append(&self) -> bool {
+            true
         }
     }
 

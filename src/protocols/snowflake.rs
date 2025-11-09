@@ -453,6 +453,25 @@ impl Target for SnowflakeTarget {
         warn!("Mock implementation: Assuming table does not exist");
         Ok(false)
     }
+
+    async fn truncate(&mut self, table_name: &str) -> Result<()> {
+        // Mock implementation
+        // In production, you would execute TRUNCATE TABLE statement
+        warn!("Mock implementation: Simulating table truncation in Snowflake");
+        info!("Simulating Snowflake table truncation: TRUNCATE TABLE {}", table_name);
+        
+        // Also truncate the temporary Parquet target
+        if let Some(ref mut target) = self.parquet_target {
+            target.truncate(table_name).await?;
+        }
+        
+        Ok(())
+    }
+
+    fn supports_append(&self) -> bool {
+        // Snowflake supports appending data to existing tables
+        true
+    }
 }
 
 #[cfg(test)]

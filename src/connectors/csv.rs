@@ -353,6 +353,20 @@ impl Target for CsvTarget {
     async fn exists(&self, _table_name: &str) -> Result<bool> {
         Ok(self.file_path.exists())
     }
+
+    async fn truncate(&mut self, _table_name: &str) -> Result<()> {
+        // For CSV files, truncation means recreating the file
+        let file = std::fs::File::create(&self.file_path)?;
+        self.writer = Some(WriterBuilder::new().from_writer(file));
+        self.headers_written = false;
+        Ok(())
+    }
+
+    fn supports_append(&self) -> bool {
+        // CSV files don't support true append (would need to skip headers)
+        // So we return false to force truncation for existing files
+        false
+    }
 }
 
 #[cfg(test)]
