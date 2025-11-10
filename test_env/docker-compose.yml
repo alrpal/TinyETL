@@ -57,10 +57,33 @@ services:
       timeout: 10s
       retries: 3
 
+  mssql:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    container_name: tinyetl-mssql
+    platform: linux/arm64
+    environment:
+      ACCEPT_EULA: "1"
+      MSSQL_SA_PASSWORD: "TestPass123!"
+      SA_PASSWORD: "TestPass123!"
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+      - ./init-scripts/mssql:/docker-entrypoint-initdb.d
+      - ./init-scripts/mssql/entrypoint.sh:/entrypoint.sh
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'SELECT 1' | dd of=/tmp/check.sql && /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P TestPass123! -i /tmp/check.sql || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
 volumes:
   postgres_data:
   mysql_data:
   mongodb_data:
+  mssql_data:
 
 networks:
   default:
