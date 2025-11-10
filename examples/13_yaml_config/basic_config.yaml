@@ -7,7 +7,7 @@ source:
   uri: "employees.csv"
 
 target:
-  uri: "employees_output.csv"
+  uri: "employees_output.json"
 
 options:
   batch_size: 1000

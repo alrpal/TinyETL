@@ -5,7 +5,7 @@
 [![Coverage](https://img.shields.io/badge/coverage-60%25-brightgreen)](https://github.com/alrpal/tinyetl/actions)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/alrpal/tinyetl/releases)
 [![Rust Edition](https://img.shields.io/badge/rust-2021-orange)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
-[![Binary Size](https://img.shields.io/badge/binary-21MB-green)](https://github.com/alrpal/tinyetl/releases)
+[![Binary Size](https://img.shields.io/badge/binary-15MB-green)](https://github.com/alrpal/tinyetl/releases)
 
 ![TinyETL Demo](examples/tinyetl_preview2-normal-framerate.gif)
 
@@ -115,6 +115,9 @@ tinyetl huge_dataset.csv output.parquet --batch-size 100000
 
 # Download and convert web data
 tinyetl "https://example.com/api/export" local_data.json --source-type=csv
+
+# Run complex ETL jobs from configuration files
+tinyetl run my_etl_job.yaml
 ```
 
 ## Usage
@@ -122,10 +125,14 @@ tinyetl "https://example.com/api/export" local_data.json --source-type=csv
 
 ```
 Usage: tinyetl [OPTIONS] <SOURCE> <TARGET>
+       tinyetl run <CONFIG_FILE>
 
-Arguments:
+Direct Transfer:
   <SOURCE>  Source connection string (file path or connection string)
   <TARGET>  Target connection string (file path or connection string)
+
+Config File Mode:
+  run <CONFIG_FILE>  Run ETL job from YAML configuration file
 
 Options:
       --infer-schema             Auto-detect columns and types
@@ -491,82 +498,6 @@ tinyetl messy_data.csv clean_data.db --transform-file filter.lua
 tinyetl data.csv output.db --transform "total=row.qty * row.price" --preview 5
 ```
 
-### Command Line Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--infer-schema` | Auto-detect columns and types | enabled |
-| `--schema-file <FILE>` | YAML schema file for validation (overrides auto-detection) | - |
-| `--batch-size <BATCH_SIZE>` | Number of rows per batch | 10000 |
-| `--preview <N>` | Show first N rows and inferred schema without copying | - |
-| `--dry-run` | Validate source/target without transferring data | disabled |
-| `--log-level <LOG_LEVEL>` | Log level: info, warn, error | info |
-| `--skip-existing` | Skip rows already in target if primary key detected | disabled |
-| `--transform-file <FILE>` | Path to Lua file containing a 'transform' function | - |
-| `--transform <EXPRESSIONS>` | Inline transformation expressions (semicolon-separated) | - |
-| `--source-type <TYPE>` | Force source file type: csv, json, parquet, avro | auto-detect |
-| `--source-secret-id <ID>` | Secret ID for source password (resolves to TINYETL_SECRET_{id}) | - |
-| `--dest-secret-id <ID>` | Secret ID for destination password (resolves to TINYETL_SECRET_{id}) | - |
-| `-h, --help` | Print help | - |
-| `-V, --version` | Print version | - |
-
-### Examples
-
-```bash
-# Basic CSV to SQLite transfer
-tinyetl sales_data.csv analytics.db
-
-# JSON array to CSV conversion
-tinyetl user_data.json users.csv
-
-# Preview large dataset before transfer
-tinyetl large_dataset.csv target.db --preview 5
-
-# Transfer with verbose logging
-tinyetl source.csv target.db --log-level info
-
-# Validate connections without transferring
-tinyetl remote_data.csv local.db --dry-run
-
-# Apply transformations during transfer
-tinyetl raw_sales.csv processed.db --transform "revenue=row.quantity * row.price; profit_margin=revenue * 0.3"
-
-# Complex data cleaning with Lua file
-# Complex data cleaning with Lua file
-tinyetl messy_data.csv clean.db --transform-file cleanup.lua --preview 3
-
-# Secure database transfers using environment variables
-export TINYETL_SECRET_mysql_dest="secure_password_123"
-tinyetl people.csv "mysql://testuser:@localhost:3306/testdb#people"
-
-# Multiple database transfer with explicit secret IDs
-export TINYETL_SECRET_prod_read="prod_password"
-export TINYETL_SECRET_staging_write="staging_password"
-tinyetl "postgres://user@prod.db.com/sales#orders" \
-        "mysql://user@staging.db.com:3306/analytics#orders" \
-        --source-secret-id prod_read \
-        --dest-secret-id staging_write
-```
-
-### Schema Validation
-
-TinyETL supports optional schema validation using YAML schema files. When provided, schema validation **overrides automatic schema detection** and enforces strict data validation, type checking, and pattern matching.
-
-#### Using Schema Files
-
-Use the `--schema-file` option to specify a YAML schema that defines expected columns, types, patterns, and defaults:
-
-```bash
-# Validate CSV data against schema
-tinyetl input.csv output.db --schema-file schema.yaml
-
-# Schema validation with transformations  
-tinyetl data.csv results.db --schema-file validation.yaml --transform "total=row.quantity * row.price"
-
-# Preview with schema validation
-tinyetl large_dataset.csv output.parquet --schema-file schema.yaml --preview 10
-```
-
 #### Schema File Format
 
 Create a YAML file defining your expected schema. Here's the complete format:
@@ -740,6 +671,119 @@ tinyetl raw_sales.csv processed.db
 - **Data Contracts**: Define and enforce data format agreements
 - **Migration Validation**: Ensure data integrity during system migrations
 
+## YAML Configuration Files
+
+For complex ETL jobs, TinyETL supports YAML configuration files that make your data pipelines more maintainable and version-controllable:
+
+```bash
+# Run ETL job from configuration file
+tinyetl run config.yaml
+```
+
+### Benefits of Configuration Files
+
+✅ **Clean, readable YAML format** - Better organization than long command lines  
+✅ **Environment variable substitution** - Perfect for secrets and dynamic values  
+✅ **Multi-line transformations** - Complex Lua transforms with proper formatting  
+✅ **Version control friendly** - Store and share ETL job definitions  
+✅ **Reusable configurations** - Same job across environments  
+
+### Configuration File Format
+
+```yaml
+version: 1
+
+source:
+  uri: "employees.csv"  # or database connection string
+
+target:
+  uri: "employees_output.json"  # or database connection string
+
+options:
+  batch_size: 10000           # Number of rows per batch
+  infer_schema: true          # Auto-detect column types
+  schema_file: "schema.yaml"  # Override with external schema
+  preview: 10                 # Show N rows without transfer
+  dry_run: false             # Validate without transferring
+  log_level: "info"          # info, warn, error
+  skip_existing: false       # Skip if target exists
+  truncate: false            # Truncate target before writing
+  transform: |               # Inline Lua transformation
+    -- Calculate derived fields
+    full_name = row.first_name .. " " .. row.last_name
+    annual_salary = row.monthly_salary * 12
+    hire_year = tonumber(string.sub(row.hire_date, 1, 4))
+  transform_file: "script.lua"  # External transform file
+  source_type: "csv"         # Force source file type
+```
+
+### Environment Variables
+
+Use `${VAR_NAME}` syntax for dynamic values:
+
+```yaml
+version: 1
+
+source:
+  uri: "postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/mydb#users"
+
+target:
+  uri: "${OUTPUT_PATH}/processed_users.parquet"
+
+options:
+  batch_size: ${BATCH_SIZE:-5000}  # Default to 5000 if not set
+  log_level: "${LOG_LEVEL:-info}"
+```
+
+```bash
+# Set environment variables
+export DB_USER="myuser"
+export DB_PASSWORD="mypassword"
+export DB_HOST="localhost"
+export OUTPUT_PATH="/data/exports"
+
+# Run with environment substitution
+tinyetl run my_job.yaml
+```
+
+### Examples
+
+**Simple file conversion:**
+```yaml
+# basic_job.yaml
+version: 1
+source:
+  uri: "sales_data.csv"
+target:
+  uri: "sales_data.parquet"
+options:
+  batch_size: 50000
+  infer_schema: true
+```
+
+**Database with transformations:**
+```yaml
+# etl_job.yaml  
+version: 1
+source:
+  uri: "postgresql://user:${DB_PASSWORD}@host/db#raw_orders"
+target:
+  uri: "analytics.db#processed_orders"
+options:
+  truncate: true
+  transform: |
+    -- Calculate order totals and profit margins
+    total_amount = row.quantity * row.unit_price
+    profit_margin = (total_amount - row.cost) / total_amount
+    order_year = tonumber(string.sub(row.order_date, 1, 4))
+```
+
+Run any configuration file with:
+```bash
+tinyetl run my_job.yaml
+```
+
+
 #### Command Examples
 
 ```bash
@@ -790,11 +834,11 @@ tinyetl "https://api.example.com/export" local_data.db
 - Lua-based data transformations ✅
 - Batch processing ✅
 - Basic CLI interface ✅
+- YAML configuration files ✅
 
 **Future Enhancements:**
 - Advanced transformation functions and libraries
 - Multi-file processing with glob patterns
-- Configuration file support
 - Advanced schema mapping
 - Data validation and quality checks
 
