@@ -1,8 +1,19 @@
 [package]
 name = "tinyetl"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.70"
+
+# Add these required fields:
+authors = ["Alex Nemeth <alex@alexnemethdata.com>"]
+description = "Fast, zero-config ETL in a single binary for transforming data between formats and databases"
+license = "Apache-2.0"  # You have an Apache 2.0 LICENSE file
+repository = "https://github.com/alrpal/TinyETL"
+homepage = "https://tinyetl.com"
+documentation = "https://tinyetl.com/docs"
+readme = "README.md"
+keywords = ["etl", "data", "database", "csv", "parquet"]  # Max 5 keywords
+categories = ["database", "command-line-utilities"]  # See crates.io categories
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
