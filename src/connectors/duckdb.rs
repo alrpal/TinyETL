@@ -139,14 +139,29 @@ impl Source for DuckdbSource {
         let mut stmt = conn.prepare(&query)
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare query: {}", e)))?;
         
-        let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-        let column_count = column_names.len();
+        // Execute the query first to get the rows iterator
+        let mut rows_iter = stmt.query([])
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))?;
         
-        let rows = stmt.query_map([], |row| {
+        let mut result_rows = Vec::new();
+        
+        // Process each row
+        while let Some(row) = rows_iter.next()
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch row: {}", e)))? {
+            
             let mut data_row = Row::new();
             
-            for (i, column_name) in column_names.iter().enumerate() {
-                let value = match row.get_ref(i).unwrap() {
+            // Use row.as_ref() to get column count from the row itself
+            let column_count = row.as_ref().column_count();
+            
+            for i in 0..column_count {
+                // Get column name from the row
+                let column_name = row.as_ref().column_name(i)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| format!("column_{}", i));
+                
+                let value = match row.get_ref(i) {
+                    Ok(value_ref) => match value_ref {
                     ValueRef::Null => Value::Null,
                     ValueRef::Boolean(b) => Value::Boolean(b),
                     ValueRef::TinyInt(n) => Value::Integer(n as i64),
@@ -174,11 +189,21 @@ impl Source for DuckdbSource {
                         // Convert DuckDB decimal to rust_decimal
                         Value::String(d.to_string())
                     },
-                    ValueRef::Timestamp(_, _) => {
-                        // Get as string for now
-                        match row.get::<_, String>(i) {
-                            Ok(s) => Value::String(s),
-                            Err(_) => Value::Null,
+                    ValueRef::Timestamp(unit, value) => {
+                        // DuckDB timestamp is stored as microseconds since epoch
+                        // Convert to a timestamp string in ISO 8601 format
+                        use chrono::{DateTime, NaiveDateTime, Utc};
+                        
+                        let micros = value;
+                        let seconds = micros / 1_000_000;
+                        let nanos = ((micros % 1_000_000) * 1000) as u32;
+                        
+                        match NaiveDateTime::from_timestamp_opt(seconds, nanos) {
+                            Some(naive_dt) => {
+                                let dt = DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc);
+                                Value::String(dt.to_rfc3339())
+                            },
+                            None => Value::Null,
                         }
                     },
                     ValueRef::Text(bytes) => {
@@ -191,40 +216,35 @@ impl Source for DuckdbSource {
                         // Convert blob to base64 string
                         Value::String(base64::encode(bytes))
                     },
-                    ValueRef::Date32(_) => {
-                        // Get as string
-                        match row.get::<_, String>(i) {
-                            Ok(s) => Value::String(s),
-                            Err(_) => Value::Null,
+                        ValueRef::Date32(_) => {
+                            // Get as string
+                            match row.get::<_, String>(i) {
+                                Ok(s) => Value::String(s),
+                                Err(_) => Value::Null,
+                            }
+                        },
+                        _ => {
+                            // Fallback: try to get as string
+                            match row.get::<_, String>(i) {
+                                Ok(s) => Value::String(s),
+                                Err(_) => Value::Null,
+                            }
                         }
                     },
-                    _ => {
-                        // Fallback: try to get as string
-                        match row.get::<_, String>(i) {
-                            Ok(s) => Value::String(s),
-                            Err(_) => Value::Null,
-                        }
-                    }
+                    Err(_) => Value::Null,
                 };
                 
-                data_row.insert(column_name.clone(), value);
+                data_row.insert(column_name, value);
             }
             
-            Ok(data_row)
-        }).map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))?;
-
-        let mut result_rows = Vec::new();
-        for row_result in rows {
-            result_rows.push(row_result.map_err(|e| TinyEtlError::DataTransfer(format!("Failed to read row: {}", e)))?);
+            result_rows.push(data_row);
         }
         
         // Update offset for next batch
         self.current_offset += result_rows.len();
 
         Ok(result_rows)
-    }
-
-    async fn estimated_row_count(&self) -> Result<Option<usize>> {
+    }    async fn estimated_row_count(&self) -> Result<Option<usize>> {
         if let Some(conn) = &self.connection {
             let conn = conn.lock().unwrap();
             let count_query = format!("SELECT COUNT(*) FROM {}", self.table_name);

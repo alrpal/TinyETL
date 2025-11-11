@@ -1,0 +1,50 @@
+[
+  {
+    "category": "Electronics",
+    "in_stock": true,
+    "last_updated": null,
+    "price": 1299.99,
+    "product_id": 1001,
+    "product_name": "Laptop Pro"
+  },
+  {
+    "category": "Electronics",
+    "in_stock": true,
+    "last_updated": null,
+    "price": 29.99,
+    "product_id": 1002,
+    "product_name": "Wireless Mouse"
+  },
+  {
+    "category": "Furniture",
+    "in_stock": false,
+    "last_updated": null,
+    "price": 349.5,
+    "product_id": 1003,
+    "product_name": "Office Chair"
+  },
+  {
+    "category": "Furniture",
+    "in_stock": true,
+    "last_updated": null,
+    "price": 45.0,
+    "product_id": 1004,
+    "product_name": "Desk Lamp"
+  },
+  {
+    "category": "Electronics",
+    "in_stock": true,
+    "last_updated": null,
+    "price": 159.99,
+    "product_id": 1005,
+    "product_name": "Keyboard Mechanical"
+  },
+  {
+    "category": "Electronics",
+    "in_stock": true,
+    "last_updated": null,
+    "price": 399.0,
+    "product_id": 1006,
+    "product_name": "Monitor 27inch"
+  }
+]

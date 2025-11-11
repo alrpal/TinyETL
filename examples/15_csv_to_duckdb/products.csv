@@ -1,0 +1,7 @@
+product_id,product_name,category,price,in_stock,last_updated
+1001,Laptop Pro,Electronics,1299.99,true,2024-11-01
+1002,Wireless Mouse,Electronics,29.99,true,2024-11-02
+1003,Office Chair,Furniture,349.50,false,2024-11-03
+1004,Desk Lamp,Furniture,45.00,true,2024-11-04
+1005,Keyboard Mechanical,Electronics,159.99,true,2024-11-05
+1006,Monitor 27inch,Electronics,399.00,true,2024-11-06
