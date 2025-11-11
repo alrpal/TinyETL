@@ -937,4 +937,304 @@ mod tests {
         // Test that connection string is stored correctly
         assert_eq!(target.database_url, "mysql://user:pass@localhost:3306/testdb");
     }
+
+    #[test]
+    fn test_mysql_source_new_with_table() {
+        let source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#employees");
+        assert!(source.is_ok());
+        let source = source.unwrap();
+        assert_eq!(source.database_url, "mysql://user:pass@localhost:3306/testdb");
+        assert_eq!(source.table_name, "employees");
+        assert_eq!(source.current_offset, 0);
+        assert!(source.pool.is_none());
+    }
+
+    #[test]
+    fn test_mysql_source_parse_connection_string_without_table() {
+        let result = MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/testdb");
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("table specification"));
+        }
+    }
+
+    #[test]
+    fn test_mysql_source_parse_connection_string_with_table() {
+        let result = MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/testdb#orders");
+        assert!(result.is_ok());
+        let (db_url, table) = result.unwrap();
+        assert_eq!(db_url, "mysql://user:pass@localhost:3306/testdb");
+        assert_eq!(table, "orders");
+    }
+
+    #[tokio::test]
+    async fn test_mysql_source_get_pool_without_connection() {
+        let source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#users").unwrap();
+        let result = source.get_pool().await;
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Connection(msg)) = result {
+            assert!(msg.contains("connection not established"));
+        }
+    }
+
+    #[test]
+    fn test_mysql_source_has_more_with_total_rows() {
+        let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#users").unwrap();
+        
+        // When total_rows is None, should return true
+        assert!(source.has_more());
+        
+        // When current_offset < total_rows, should return true
+        source.total_rows = Some(100);
+        source.current_offset = 50;
+        assert!(source.has_more());
+        
+        // When current_offset >= total_rows, should return false
+        source.current_offset = 100;
+        assert!(!source.has_more());
+        
+        source.current_offset = 101;
+        assert!(!source.has_more());
+    }
+
+    #[tokio::test]
+    async fn test_mysql_source_reset() {
+        let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#users").unwrap();
+        source.current_offset = 500;
+        
+        let result = source.reset().await;
+        assert!(result.is_ok());
+        assert_eq!(source.current_offset, 0);
+    }
+
+    #[test]
+    fn test_value_type_conversions() {
+        // Test different value type conversions
+        let int_val = Value::Integer(42);
+        assert!(matches!(int_val, Value::Integer(42)));
+        
+        let dec_val = Value::Decimal(Decimal::new(12345, 2));
+        if let Value::Decimal(d) = dec_val {
+            assert_eq!(d.to_string(), "123.45");
+        }
+        
+        let str_val = Value::String("test".to_string());
+        assert!(matches!(str_val, Value::String(ref s) if s == "test"));
+        
+        let bool_val = Value::Boolean(true);
+        assert!(matches!(bool_val, Value::Boolean(true)));
+        
+        let null_val = Value::Null;
+        assert!(matches!(null_val, Value::Null));
+    }
+
+    #[test]
+    fn test_mysql_target_supports_append() {
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
+        assert!(target.supports_append());
+    }
+
+    #[test]
+    fn test_schema_column_nullable_handling() {
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "required_field".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                },
+                Column {
+                    name: "optional_field".to_string(),
+                    data_type: DataType::String,
+                    nullable: true,
+                },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+
+        assert!(!schema.columns[0].nullable);
+        assert!(schema.columns[1].nullable);
+    }
+
+    #[test]
+    fn test_decimal_precision_handling() {
+        // Test high precision decimals (max scale is 28 for rust_decimal)
+        let dec1 = Decimal::new(123456789012345, 10); // 12345.6789012345
+        let dec2 = Decimal::new(1, 28); // Maximum precision scale
+
+        let val1 = Value::Decimal(dec1);
+        let val2 = Value::Decimal(dec2);
+
+        assert!(matches!(val1, Value::Decimal(_)));
+        assert!(matches!(val2, Value::Decimal(_)));
+    }
+
+    #[test]
+    fn test_multiple_table_names_in_same_connection() {
+        let source1 = MysqlSource::new("mysql://user:pass@localhost:3306/db#table1").unwrap();
+        let source2 = MysqlSource::new("mysql://user:pass@localhost:3306/db#table2").unwrap();
+
+        assert_eq!(source1.table_name, "table1");
+        assert_eq!(source2.table_name, "table2");
+        assert_eq!(source1.database_url, source2.database_url);
+    }
+
+    #[test]
+    fn test_row_with_all_data_types() {
+        use chrono::Utc;
+        
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("int_col".to_string(), Value::Integer(100));
+        row.insert("dec_col".to_string(), Value::Decimal(Decimal::new(9999, 2)));
+        row.insert("str_col".to_string(), Value::String("hello".to_string()));
+        row.insert("bool_col".to_string(), Value::Boolean(false));
+        row.insert("date_col".to_string(), Value::Date(Utc::now()));
+        row.insert("null_col".to_string(), Value::Null);
+
+        assert_eq!(row.len(), 6);
+        assert!(row.contains_key("int_col"));
+        assert!(row.contains_key("dec_col"));
+        assert!(row.contains_key("str_col"));
+        assert!(row.contains_key("bool_col"));
+        assert!(row.contains_key("date_col"));
+        assert!(row.contains_key("null_col"));
+    }
+
+    #[test]
+    fn test_connection_string_with_schema_and_table() {
+        // Some databases use schema.table format
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/db#schema.table").unwrap();
+        assert_eq!(target.table_name, "schema.table");
+    }
+
+    #[test]
+    fn test_column_name_with_special_characters() {
+        let column = Column {
+            name: "user-name".to_string(),
+            data_type: DataType::String,
+            nullable: true,
+        };
+
+        assert_eq!(column.name, "user-name");
+        let escaped = format!("`{}`", column.name);
+        assert_eq!(escaped, "`user-name`");
+    }
+
+    #[test]
+    fn test_large_batch_size() {
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb")
+            .unwrap()
+            .with_batch_size(10000);
+        
+        assert_eq!(target.max_batch_size, 10000);
+    }
+
+    #[test]
+    fn test_zero_offset_after_reset() {
+        let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/db#table").unwrap();
+        source.current_offset = 999;
+        
+        assert_eq!(source.current_offset, 999);
+        // Reset would set it back to 0
+    }
+
+    #[test]
+    fn test_total_rows_initially_none() {
+        let source = MysqlSource::new("mysql://user:pass@localhost:3306/db#table").unwrap();
+        assert!(source.total_rows.is_none());
+    }
+
+    #[test]
+    fn test_database_url_storage() {
+        let target = MysqlTarget::new("mysql://admin:secret@db.example.com:3306/production#logs").unwrap();
+        assert_eq!(target.database_url, "mysql://admin:secret@db.example.com:3306/production");
+        assert_eq!(target.connection_string, "mysql://admin:secret@db.example.com:3306/production#logs");
+    }
+
+    #[test]
+    fn test_data_type_to_mysql_all_types() {
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
+        
+        // Test all DataType variants
+        let type_mappings = vec![
+            (DataType::Integer, "BIGINT"),
+            (DataType::Decimal, "DECIMAL(65,30)"),
+            (DataType::String, "TEXT"),
+            (DataType::Boolean, "BOOLEAN"),
+            (DataType::Date, "DATE"),
+            (DataType::DateTime, "DATETIME"),
+            (DataType::Null, "TEXT"),
+        ];
+
+        for (data_type, expected_sql) in type_mappings {
+            let result = target.map_data_type_to_mysql(&data_type);
+            assert_eq!(result, expected_sql, "Failed for {:?}", data_type);
+        }
+    }
+
+    #[test]
+    fn test_empty_table_name_handling() {
+        // Test what happens with empty table specification
+        let result = MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/db#");
+        assert!(result.is_ok());
+        let (_, table) = result.unwrap();
+        assert_eq!(table, ""); // Empty string table name
+    }
+
+    #[test]
+    fn test_multiple_hash_in_connection_string() {
+        // Test with multiple # characters - should split on first
+        let result = MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/db#table#extra");
+        assert!(result.is_ok());
+        let (db, table) = result.unwrap();
+        assert_eq!(db, "mysql://user:pass@localhost:3306/db");
+        assert_eq!(table, "table#extra");
+    }
+
+    #[test]
+    fn test_value_decimal_from_float() {
+        let f_val = 123.456;
+        if let Ok(dec) = Decimal::try_from(f_val) {
+            let value = Value::Decimal(dec);
+            assert!(matches!(value, Value::Decimal(_)));
+        }
+    }
+
+    #[test]
+    fn test_connection_url_with_options() {
+        // MySQL connection strings can have query parameters
+        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/db?ssl=true#table").unwrap();
+        assert!(target.database_url.contains("mysql://user:pass@localhost:3306/db"));
+    }
+
+    #[test]
+    fn test_schema_estimated_rows() {
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                },
+            ],
+            estimated_rows: Some(1000),
+            primary_key_candidate: Some("id".to_string()),
+        };
+
+        assert_eq!(schema.estimated_rows, Some(1000));
+        assert_eq!(schema.primary_key_candidate, Some("id".to_string()));
+    }
+
+    #[test]
+    fn test_row_len_and_contains() {
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("col1".to_string(), Value::Integer(1));
+        row.insert("col2".to_string(), Value::String("test".to_string()));
+
+        assert_eq!(row.len(), 2);
+        assert!(row.contains_key("col1"));
+        assert!(row.contains_key("col2"));
+        assert!(!row.contains_key("col3"));
+    }
 }

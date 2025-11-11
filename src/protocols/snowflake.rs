@@ -68,6 +68,13 @@ impl SnowflakeProtocol {
             ))?
             .to_string();
         
+        // Validate account is not empty
+        if account.is_empty() {
+            return Err(TinyEtlError::Configuration(
+                "Snowflake URL must include account in host".to_string()
+            ));
+        }
+        
         // Extract database and schema from path
         let path_segments: Vec<&str> = url.path().trim_start_matches('/').split('/').collect();
         if path_segments.len() < 2 {
@@ -528,5 +535,300 @@ mod tests {
         // Invalid scheme
         let url = Url::parse("http://example.com").unwrap();
         assert!(protocol.validate_url(&url).is_err());
+    }
+
+    #[test]
+    fn test_protocol_name() {
+        let protocol = SnowflakeProtocol::new();
+        assert_eq!(protocol.name(), "snowflake");
+    }
+
+    #[test]
+    fn test_parse_url_missing_password() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // URL with username but no password
+        let url = Url::parse("snowflake://alex@xy12345.east-us.azure/mydb/public?table=sales").unwrap();
+        let result = protocol.parse_url(&url);
+        
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("password"));
+        }
+    }
+
+    #[test]
+    fn test_parse_url_missing_database() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // URL with no path segments
+        let url = Url::parse("snowflake://alex:pass@xy12345.east-us.azure/?table=sales").unwrap();
+        let result = protocol.parse_url(&url);
+        
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("database and schema"));
+        }
+    }
+
+    #[test]
+    fn test_parse_url_missing_schema() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // URL with only database in path
+        let url = Url::parse("snowflake://alex:pass@xy12345.east-us.azure/mydb?table=sales").unwrap();
+        let result = protocol.parse_url(&url);
+        
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("database and schema"));
+        }
+    }
+
+    #[test]
+    fn test_parse_url_with_role() {
+        let protocol = SnowflakeProtocol::new();
+        
+        let url = Url::parse("snowflake://user:pass@account.region.cloud/db/schema?warehouse=WH&role=ANALYST&table=data").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        assert_eq!(conn.role, Some("ANALYST".to_string()));
+        assert_eq!(conn.warehouse, Some("WH".to_string()));
+    }
+
+    #[test]
+    fn test_parse_url_without_optional_params() {
+        let protocol = SnowflakeProtocol::new();
+        
+        let url = Url::parse("snowflake://user:pass@account.region.cloud/db/schema?table=data").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        assert_eq!(conn.username, "user");
+        assert_eq!(conn.password, "pass");
+        assert_eq!(conn.database, "db");
+        assert_eq!(conn.schema, "schema");
+        assert_eq!(conn.table, "data");
+        assert_eq!(conn.warehouse, None);
+        assert_eq!(conn.role, None);
+    }
+
+    #[test]
+    fn test_parse_url_with_special_characters_in_password() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // URL-encoded special characters in password
+        // Note: url.password() returns the percent-encoded form, not decoded
+        let url = Url::parse("snowflake://user:p%40ssw0rd%21@account.region.cloud/db/schema?table=data").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        assert_eq!(conn.username, "user");
+        // The password is stored as-is from URL (percent-encoded)
+        assert_eq!(conn.password, "p%40ssw0rd%21");
+    }
+
+    #[test]
+    fn test_parse_url_different_regions() {
+        let protocol = SnowflakeProtocol::new();
+        
+        let regions = vec![
+            "account.us-east-1.aws",
+            "account.eu-west-1.aws",
+            "account.ap-southeast-2.aws",
+            "account.eastus2.azure",
+            "account.westeurope.azure",
+        ];
+        
+        for region in regions {
+            let url_str = format!("snowflake://user:pass@{}/db/schema?table=test", region);
+            let url = Url::parse(&url_str).unwrap();
+            let conn = protocol.parse_url(&url).unwrap();
+            
+            assert_eq!(conn.account, region);
+        }
+    }
+
+    #[test]
+    fn test_parse_url_invalid_scheme() {
+        let protocol = SnowflakeProtocol::new();
+        
+        let url = Url::parse("mysql://user:pass@host/db?table=test").unwrap();
+        let result = protocol.parse_url(&url);
+        
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("snowflake://"));
+            assert!(msg.contains("mysql"));
+        }
+    }
+
+    #[test]
+    fn test_parse_url_case_sensitive_params() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // Snowflake parameters are typically case-insensitive in practice,
+        // but our parser is case-sensitive for query params
+        let url = Url::parse("snowflake://user:pass@account.region.cloud/DB/SCHEMA?table=TABLE&warehouse=WH").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        assert_eq!(conn.database, "DB");
+        assert_eq!(conn.schema, "SCHEMA");
+        assert_eq!(conn.table, "TABLE");
+    }
+
+    #[test]
+    fn test_parse_url_with_extra_query_params() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // URL with extra parameters that should be ignored
+        let url = Url::parse("snowflake://user:pass@account.region.cloud/db/schema?table=data&warehouse=WH&custom=value&timeout=30").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        assert_eq!(conn.table, "data");
+        assert_eq!(conn.warehouse, Some("WH".to_string()));
+        // custom and timeout params are not parsed but shouldn't cause errors
+    }
+
+    #[test]
+    fn test_snowflake_connection_clone() {
+        let conn = SnowflakeConnection {
+            account: "account".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            database: "db".to_string(),
+            schema: "schema".to_string(),
+            warehouse: Some("WH".to_string()),
+            role: Some("ROLE".to_string()),
+            table: "table".to_string(),
+        };
+        
+        let cloned = conn.clone();
+        
+        assert_eq!(conn.account, cloned.account);
+        assert_eq!(conn.username, cloned.username);
+        assert_eq!(conn.password, cloned.password);
+        assert_eq!(conn.table, cloned.table);
+    }
+
+    #[test]
+    fn test_connection_debug_format() {
+        let conn = SnowflakeConnection {
+            account: "test_account".to_string(),
+            username: "test_user".to_string(),
+            password: "secret".to_string(),
+            database: "test_db".to_string(),
+            schema: "test_schema".to_string(),
+            warehouse: None,
+            role: None,
+            table: "test_table".to_string(),
+        };
+        
+        let debug_str = format!("{:?}", conn);
+        assert!(debug_str.contains("test_account"));
+        assert!(debug_str.contains("test_user"));
+        assert!(debug_str.contains("test_table"));
+    }
+
+    #[test]
+    fn test_parse_url_empty_table_param() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // Table parameter exists but is empty
+        let url = Url::parse("snowflake://user:pass@account.region.cloud/db/schema?table=").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        // Empty table name is technically valid in URL parsing
+        assert_eq!(conn.table, "");
+    }
+
+    #[test]
+    fn test_parse_url_complex_path() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // URL with additional path segments (should only use first two)
+        let url = Url::parse("snowflake://user:pass@account.region.cloud/db/schema/extra/path?table=test").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        assert_eq!(conn.database, "db");
+        assert_eq!(conn.schema, "schema");
+    }
+
+    #[test]
+    fn test_parse_url_no_host() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // Try to parse URL with empty host - this will fail at URL parsing level
+        match Url::parse("snowflake://user:pass@/db/schema?table=test") {
+            Ok(url) => {
+                // If it somehow parses, it should fail at protocol level
+                let result = protocol.parse_url(&url);
+                assert!(result.is_err());
+            }
+            Err(_) => {
+                // Expected: URL parsing itself fails for empty host
+                // This is the correct behavior
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_url_localhost_host() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // URL with valid host but missing other required fields
+        let url = Url::parse("snowflake://user:pass@localhost/db/schema").unwrap();
+        let result = protocol.parse_url(&url);
+        // Should fail because table parameter is missing
+        assert!(result.is_err());
+        match result {
+            Err(TinyEtlError::Configuration(msg)) => {
+                assert!(msg.contains("table"), "Error message was: {}", msg);
+            }
+            _ => panic!("Expected Configuration error about table"),
+        }
+    }
+
+    #[test]
+    fn test_validate_url_with_different_schemes() {
+        let protocol = SnowflakeProtocol::new();
+        
+        let invalid_schemes = vec![
+            "http://example.com",
+            "https://example.com",
+            "mysql://host/db",
+            "postgres://host/db",
+            "ftp://example.com",
+        ];
+        
+        for scheme in invalid_schemes {
+            let url = Url::parse(scheme).unwrap();
+            assert!(protocol.validate_url(&url).is_err(), "Should reject scheme: {}", scheme);
+        }
+    }
+
+    #[test]
+    fn test_snowflake_url_with_port() {
+        let protocol = SnowflakeProtocol::new();
+        
+        // Snowflake doesn't typically use custom ports, but test URL parsing
+        let url = Url::parse("snowflake://user:pass@account.region.cloud:443/db/schema?table=test").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        // Port is part of the host in URL parsing
+        assert!(conn.account.contains("account.region.cloud"));
+    }
+
+    #[test]
+    fn test_parse_url_with_underscore_and_numbers() {
+        let protocol = SnowflakeProtocol::new();
+        
+        let url = Url::parse("snowflake://user_123:pass@account_456.region.cloud/db_test/schema_v2?table=table_2024&warehouse=WH_PROD").unwrap();
+        let conn = protocol.parse_url(&url).unwrap();
+        
+        assert_eq!(conn.username, "user_123");
+        assert_eq!(conn.account, "account_456.region.cloud");
+        assert_eq!(conn.database, "db_test");
+        assert_eq!(conn.schema, "schema_v2");
+        assert_eq!(conn.table, "table_2024");
+        assert_eq!(conn.warehouse, Some("WH_PROD".to_string()));
     }
 }

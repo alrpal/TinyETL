@@ -624,3 +624,329 @@ impl Target for MssqlTarget {
         true // MSSQL supports INSERT operations on existing tables
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{Schema, Column, DataType, Value};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_parse_connection_string_valid() {
+        let result = MssqlSource::parse_connection_string(
+            "mssql://user:pass@localhost:1433/testdb#testtable"
+        );
+        assert!(result.is_ok());
+        let (db_part, table_name) = result.unwrap();
+        assert_eq!(db_part, "mssql://user:pass@localhost:1433/testdb");
+        assert_eq!(table_name, "testtable");
+    }
+
+    #[test]
+    fn test_parse_connection_string_missing_table() {
+        let result = MssqlSource::parse_connection_string(
+            "mssql://user:pass@localhost:1433/testdb"
+        );
+        assert!(result.is_err());
+        match result {
+            Err(TinyEtlError::Configuration(msg)) => {
+                assert!(msg.contains("must include table name"));
+            },
+            _ => panic!("Expected Configuration error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_connection_string_with_complex_table() {
+        let result = MssqlSource::parse_connection_string(
+            "mssql://user:pass@localhost:1433/testdb#schema.table"
+        );
+        assert!(result.is_ok());
+        let (_, table_name) = result.unwrap();
+        assert_eq!(table_name, "schema.table");
+    }
+
+    #[test]
+    fn test_mssql_source_new_valid() {
+        let source = MssqlSource::new("mssql://user:pass@localhost:1433/testdb#testtable");
+        assert!(source.is_ok());
+        let source = source.unwrap();
+        assert_eq!(source.table_name, "testtable");
+        assert_eq!(source.current_offset, 0);
+        assert!(source.client.is_none());
+        assert!(source.schema.is_none());
+    }
+
+    #[test]
+    fn test_mssql_source_new_invalid() {
+        let source = MssqlSource::new("mssql://user:pass@localhost:1433/testdb");
+        assert!(source.is_err());
+    }
+
+    #[test]
+    fn test_mssql_source_with_query() {
+        let source = MssqlSource::new("mssql://user:pass@localhost:1433/testdb#testtable")
+            .unwrap()
+            .with_query("SELECT * FROM testtable WHERE id > 100".to_string());
+        
+        assert_eq!(source.query, Some("SELECT * FROM testtable WHERE id > 100".to_string()));
+    }
+
+    #[test]
+    fn test_mssql_target_new_valid() {
+        let target = MssqlTarget::new("mssql://user:pass@localhost:1433/testdb#testtable");
+        assert!(target.is_ok());
+        let target = target.unwrap();
+        assert_eq!(target.table_name, "testtable");
+        assert!(target.client.is_none());
+        assert_eq!(target.max_batch_size, 1000);
+    }
+
+    #[test]
+    fn test_mssql_target_new_invalid() {
+        let target = MssqlTarget::new("mssql://user:pass@localhost:1433/testdb");
+        assert!(target.is_err());
+    }
+
+    #[test]
+    fn test_mssql_target_with_batch_size() {
+        let target = MssqlTarget::new("mssql://user:pass@localhost:1433/testdb#testtable")
+            .unwrap()
+            .with_batch_size(500);
+        
+        assert_eq!(target.max_batch_size, 500);
+    }
+
+    #[test]
+    fn test_mssql_target_with_batch_size_minimum() {
+        let target = MssqlTarget::new("mssql://user:pass@localhost:1433/testdb#testtable")
+            .unwrap()
+            .with_batch_size(0);  // Should be clamped to 1
+        
+        assert_eq!(target.max_batch_size, 1);
+    }
+
+    #[test]
+    fn test_sql_type_from_data_type_integer() {
+        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Integer), "BIGINT");
+    }
+
+    #[test]
+    fn test_sql_type_from_data_type_decimal() {
+        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Decimal), "DECIMAL(18,6)");
+    }
+
+    #[test]
+    fn test_sql_type_from_data_type_string() {
+        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::String), "NVARCHAR(MAX)");
+    }
+
+    #[test]
+    fn test_sql_type_from_data_type_boolean() {
+        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Boolean), "BIT");
+    }
+
+    #[test]
+    fn test_sql_type_from_data_type_date() {
+        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Date), "DATE");
+    }
+
+    #[test]
+    fn test_sql_type_from_data_type_datetime() {
+        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::DateTime), "DATETIME2");
+    }
+
+    #[test]
+    fn test_sql_type_from_data_type_null() {
+        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Null), "NVARCHAR(MAX)");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_null() {
+        let result = MssqlTarget::format_value_for_insert(&Value::Null, &DataType::String);
+        assert_eq!(result, "NULL");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_string_to_string() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::String("hello".to_string()), 
+            &DataType::String
+        );
+        assert_eq!(result, "N'hello'");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_string_with_quotes() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::String("O'Brien".to_string()), 
+            &DataType::String
+        );
+        assert_eq!(result, "N'O''Brien'");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_string_to_integer() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::String("42".to_string()), 
+            &DataType::Integer
+        );
+        assert_eq!(result, "42");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_string_to_integer_invalid() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::String("not_a_number".to_string()), 
+            &DataType::Integer
+        );
+        assert_eq!(result, "NULL");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_string_to_decimal() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::String("3.14".to_string()), 
+            &DataType::Decimal
+        );
+        assert_eq!(result, "3.14");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_string_to_boolean_true() {
+        let tests = vec!["true", "TRUE", "1", "yes", "YES"];
+        for s in tests {
+            let result = MssqlTarget::format_value_for_insert(
+                &Value::String(s.to_string()), 
+                &DataType::Boolean
+            );
+            assert_eq!(result, "1", "Failed for input: {}", s);
+        }
+    }
+
+    #[test]
+    fn test_format_value_for_insert_string_to_boolean_false() {
+        let tests = vec!["false", "FALSE", "0", "no", "NO"];
+        for s in tests {
+            let result = MssqlTarget::format_value_for_insert(
+                &Value::String(s.to_string()), 
+                &DataType::Boolean
+            );
+            assert_eq!(result, "0", "Failed for input: {}", s);
+        }
+    }
+
+    #[test]
+    fn test_format_value_for_insert_integer() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::Integer(42), 
+            &DataType::Integer
+        );
+        assert_eq!(result, "42");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_integer_to_string() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::Integer(42), 
+            &DataType::String
+        );
+        assert_eq!(result, "N'42'");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_boolean_true() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::Boolean(true), 
+            &DataType::Boolean
+        );
+        assert_eq!(result, "1");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_boolean_false() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::Boolean(false), 
+            &DataType::Boolean
+        );
+        assert_eq!(result, "0");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_boolean_to_string() {
+        let result_true = MssqlTarget::format_value_for_insert(
+            &Value::Boolean(true), 
+            &DataType::String
+        );
+        assert_eq!(result_true, "N'true'");
+
+        let result_false = MssqlTarget::format_value_for_insert(
+            &Value::Boolean(false), 
+            &DataType::String
+        );
+        assert_eq!(result_false, "N'false'");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_decimal() {
+        use rust_decimal::Decimal;
+        let dec = Decimal::new(12345, 2); // 123.45
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::Decimal(dec), 
+            &DataType::Decimal
+        );
+        assert_eq!(result, "123.45");
+    }
+
+    #[test]
+    fn test_format_value_for_insert_date() {
+        use chrono::{DateTime, Utc};
+        let dt = DateTime::parse_from_rfc3339("2024-03-15T14:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::Date(dt), 
+            &DataType::DateTime
+        );
+        assert!(result.starts_with("'2024-03-15"));
+        assert!(result.ends_with("'"));
+    }
+
+    #[test]
+    fn test_supports_append() {
+        let target = MssqlTarget::new("mssql://user:pass@localhost:1433/testdb#testtable").unwrap();
+        assert!(target.supports_append());
+    }
+
+    #[test]
+    fn test_parse_target_connection_string() {
+        let result = MssqlTarget::parse_connection_string(
+            "mssql://user:pass@localhost:1433/testdb#testtable"
+        );
+        assert!(result.is_ok());
+        let (db_part, table_name) = result.unwrap();
+        assert_eq!(db_part, "mssql://user:pass@localhost:1433/testdb");
+        assert_eq!(table_name, "testtable");
+    }
+
+    #[test]
+    fn test_parse_target_connection_string_error() {
+        let result = MssqlTarget::parse_connection_string("mssql://user:pass@localhost/db");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_row_with_various_types() {
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("id".to_string(), Value::Integer(1));
+        row.insert("name".to_string(), Value::String("Test".to_string()));
+        row.insert("active".to_string(), Value::Boolean(true));
+        row.insert("score".to_string(), Value::Decimal(rust_decimal::Decimal::new(955, 1)));
+        row.insert("deleted".to_string(), Value::Null);
+        
+        assert_eq!(row.get("id"), Some(&Value::Integer(1)));
+        assert_eq!(row.get("name"), Some(&Value::String("Test".to_string())));
+        assert_eq!(row.get("active"), Some(&Value::Boolean(true)));
+        assert_eq!(row.get("deleted"), Some(&Value::Null));
+    }
+}

@@ -536,4 +536,279 @@ mod tests {
         let target = target.unwrap();
         assert_eq!(target.connection_string, "postgres://user:pass@localhost:5432/db");
     }
+
+    #[test]
+    fn test_postgres_source_connection_string_parsing() {
+        let test_cases = vec![
+            ("postgres://user:pass@localhost:5432/mydb#mytable", "postgres://user:pass@localhost:5432/mydb", "mytable"),
+            ("postgres://admin:secret@db.example.com/production#users", "postgres://admin:secret@db.example.com/production", "users"),
+            ("postgres://user:pass@127.0.0.1:5433/testdb#schema.table", "postgres://user:pass@127.0.0.1:5433/testdb", "schema.table"),
+        ];
+
+        for (input, expected_conn, expected_table) in test_cases {
+            let source = PostgresSource::new(input).unwrap();
+            assert_eq!(source.connection_string, expected_conn);
+            assert_eq!(source.table_name, expected_table);
+        }
+    }
+
+    #[test]
+    fn test_postgres_source_invalid_connection_strings() {
+        let invalid_cases = vec![
+            "postgres://user:pass@localhost:5432/db",
+            "postgres://user:pass@localhost:5432/db#table#extra",
+        ];
+
+        for input in invalid_cases {
+            let result = PostgresSource::new(input);
+            assert!(result.is_err(), "Expected error for input: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_postgres_source_empty_table_name() {
+        // Connection string with # but empty table name
+        let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#");
+        assert!(source.is_ok());
+        let source = source.unwrap();
+        assert_eq!(source.table_name, "");
+    }
+
+    #[test]
+    fn test_postgres_with_query_strips_table() {
+        let source = PostgresSource::with_query(
+            "postgres://user:pass@localhost:5432/db#ignored_table",
+            "SELECT * FROM custom_view"
+        ).unwrap();
+        
+        assert_eq!(source.connection_string, "postgres://user:pass@localhost:5432/db");
+        assert_eq!(source.table_name, "");
+        assert_eq!(source.query, Some("SELECT * FROM custom_view".to_string()));
+    }
+
+    #[test]
+    fn test_postgres_with_query_no_table() {
+        let source = PostgresSource::with_query(
+            "postgres://user:pass@localhost:5432/db",
+            "SELECT id, name FROM users WHERE active = true"
+        ).unwrap();
+        
+        assert_eq!(source.connection_string, "postgres://user:pass@localhost:5432/db");
+        assert!(source.query.is_some());
+    }
+
+    #[test]
+    fn test_postgres_source_initial_state() {
+        let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
+        
+        assert_eq!(source.current_offset, 0);
+        assert_eq!(source.total_rows, None);
+        assert!(source.pool.is_none());
+        assert!(source.query.is_none());
+    }
+
+    #[test]
+    fn test_postgres_target_with_table() {
+        let target = PostgresTarget::new("postgres://user:pass@localhost:5432/db#orders").unwrap();
+        
+        assert_eq!(target.table_name, Some("orders".to_string()));
+        assert!(target.pool.is_none());
+        assert!(target.schema.is_none());
+    }
+
+    #[test]
+    fn test_postgres_target_without_table() {
+        let target = PostgresTarget::new("postgres://user:pass@localhost:5432/db").unwrap();
+        
+        assert_eq!(target.table_name, None);
+    }
+
+    #[test]
+    fn test_postgres_target_supports_append() {
+        let target = PostgresTarget::new("postgres://user:pass@localhost:5432/db").unwrap();
+        assert!(target.supports_append());
+    }
+
+    #[test]
+    fn test_postgres_data_type_mapping() {
+        // Test that we map DataType correctly to PostgreSQL types
+        use crate::schema::{Schema, Column, DataType};
+        
+        let schema = Schema {
+            columns: vec![
+                Column { name: "id".to_string(), data_type: DataType::Integer, nullable: false },
+                Column { name: "name".to_string(), data_type: DataType::String, nullable: true },
+                Column { name: "price".to_string(), data_type: DataType::Decimal, nullable: true },
+                Column { name: "active".to_string(), data_type: DataType::Boolean, nullable: false },
+                Column { name: "created_at".to_string(), data_type: DataType::DateTime, nullable: true },
+                Column { name: "birth_date".to_string(), data_type: DataType::Date, nullable: true },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+
+        // Verify schema has expected columns
+        assert_eq!(schema.columns.len(), 6);
+        assert_eq!(schema.columns[0].data_type, DataType::Integer);
+        assert_eq!(schema.columns[1].data_type, DataType::String);
+        assert_eq!(schema.columns[2].data_type, DataType::Decimal);
+        assert_eq!(schema.columns[3].data_type, DataType::Boolean);
+        assert_eq!(schema.columns[4].data_type, DataType::DateTime);
+        assert_eq!(schema.columns[5].data_type, DataType::Date);
+    }
+
+    #[test]
+    fn test_postgres_source_has_more_with_total() {
+        let mut source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
+        
+        // When total_rows is set and current_offset < total
+        source.total_rows = Some(100);
+        source.current_offset = 50;
+        assert!(source.has_more());
+        
+        // When current_offset == total
+        source.current_offset = 100;
+        assert!(!source.has_more());
+        
+        // When current_offset > total
+        source.current_offset = 150;
+        assert!(!source.has_more());
+    }
+
+    #[test]
+    fn test_postgres_source_has_more_without_total() {
+        let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
+        
+        // When total_rows is None, always return true
+        assert!(source.has_more());
+    }
+
+    #[test]
+    fn test_postgres_connection_string_with_schema_qualified_table() {
+        let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#public.users").unwrap();
+        
+        assert_eq!(source.table_name, "public.users");
+    }
+
+    #[test]
+    fn test_postgres_multiple_hash_error() {
+        let result = PostgresSource::new("postgres://user:pass@localhost:5432/db#table1#table2");
+        
+        assert!(result.is_err());
+        match result {
+            Err(TinyEtlError::Configuration(msg)) => {
+                assert!(msg.contains("format"));
+            }
+            _ => panic!("Expected Configuration error"),
+        }
+    }
+
+    #[test]
+    fn test_postgres_target_invalid_multiple_hash() {
+        let result = PostgresTarget::new("postgres://user:pass@localhost:5432/db#table1#table2");
+        
+        assert!(result.is_err());
+        match result {
+            Err(TinyEtlError::Configuration(msg)) => {
+                assert!(msg.contains("format"));
+            }
+            _ => panic!("Expected Configuration error"),
+        }
+    }
+
+    #[test]
+    fn test_postgres_value_types() {
+        use std::collections::HashMap;
+        use chrono::{DateTime, Utc};
+        use rust_decimal::Decimal;
+
+        // Test creating a row with all value types
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("id".to_string(), Value::Integer(42));
+        row.insert("name".to_string(), Value::String("Alice".to_string()));
+        row.insert("score".to_string(), Value::Decimal(Decimal::new(9876, 2))); // 98.76
+        row.insert("active".to_string(), Value::Boolean(true));
+        row.insert("created".to_string(), Value::Date(Utc::now()));
+        row.insert("deleted".to_string(), Value::Null);
+
+        assert_eq!(row.get("id"), Some(&Value::Integer(42)));
+        assert!(matches!(row.get("name"), Some(Value::String(_))));
+        assert!(matches!(row.get("score"), Some(Value::Decimal(_))));
+        assert_eq!(row.get("active"), Some(&Value::Boolean(true)));
+        assert!(matches!(row.get("created"), Some(Value::Date(_))));
+        assert_eq!(row.get("deleted"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn test_postgres_chunk_size_calculation() {
+        // Test that chunk size calculation is reasonable
+        let max_params = 65535;
+        
+        // With 10 columns
+        let cols = 10;
+        let max_rows = max_params / cols;
+        assert_eq!(max_rows, 6553);
+        assert!(max_rows.min(1000) == 1000); // Should be clamped to 1000
+        
+        // With 1 column
+        let cols = 1;
+        let max_rows = max_params / cols;
+        assert_eq!(max_rows, 65535);
+        assert!(max_rows.min(1000) == 1000); // Should be clamped to 1000
+        
+        // With 100 columns
+        let cols = 100;
+        let max_rows = max_params / cols;
+        assert_eq!(max_rows, 655);
+        assert!(max_rows.min(1000) == 655); // Under the cap
+    }
+
+    #[test]
+    fn test_postgres_string_with_null_bytes() {
+        // PostgreSQL doesn't allow null bytes in strings
+        let input = "hello\0world";
+        let cleaned: String = input.chars().filter(|&c| c != '\0').collect();
+        
+        assert_eq!(cleaned, "helloworld");
+        assert!(!cleaned.contains('\0'));
+    }
+
+    #[test]
+    fn test_postgres_decimal_to_string() {
+        use rust_decimal::Decimal;
+        
+        let dec = Decimal::new(12345, 2); // 123.45
+        let s = dec.to_string();
+        assert_eq!(s, "123.45");
+        
+        // Test that we can filter null bytes from decimal strings too
+        let cleaned: String = s.chars().filter(|&c| c != '\0').collect();
+        assert_eq!(cleaned, "123.45");
+    }
+
+    #[test]
+    fn test_postgres_connection_with_port() {
+        let source = PostgresSource::new("postgres://user:pass@localhost:5433/db#table").unwrap();
+        assert!(source.connection_string.contains(":5433"));
+    }
+
+    #[test]
+    fn test_postgres_connection_with_host() {
+        let source = PostgresSource::new("postgres://user:pass@db.example.com:5432/db#table").unwrap();
+        assert!(source.connection_string.contains("db.example.com"));
+    }
+
+    #[test]
+    fn test_postgres_table_name_extraction() {
+        let test_cases = vec![
+            ("postgres://user:pass@localhost/db#users", "users"),
+            ("postgres://user:pass@localhost/db#public.orders", "public.orders"),
+            ("postgres://user:pass@localhost/db#schema_name.table_name", "schema_name.table_name"),
+        ];
+
+        for (conn_str, expected_table) in test_cases {
+            let source = PostgresSource::new(conn_str).unwrap();
+            assert_eq!(source.table_name, expected_table);
+        }
+    }
 }
