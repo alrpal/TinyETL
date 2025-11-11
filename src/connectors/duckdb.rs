@@ -74,7 +74,7 @@ impl Source for DuckdbSource {
         // Get table schema using PRAGMA or DESCRIBE
         let query = format!("DESCRIBE {}", self.table_name);
         let mut stmt = conn.prepare(&query)
-            .map_err(|e| TinyEtlError::Database(format!("Failed to describe table '{}': {}", self.table_name, e)))?;
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to describe table '{}': {}", self.table_name, e)))?;
         
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -82,12 +82,12 @@ impl Source for DuckdbSource {
                 row.get::<_, String>(1)?,  // column_type
                 row.get::<_, String>(2)?,  // null
             ))
-        }).map_err(|e| TinyEtlError::Database(format!("Failed to query table schema: {}", e)))?;
+        }).map_err(|e| TinyEtlError::DataTransfer(format!("Failed to query table schema: {}", e)))?;
 
         let mut columns = Vec::new();
         for row_result in rows {
             let (name, duckdb_type, null_str) = row_result
-                .map_err(|e| TinyEtlError::Database(format!("Failed to read schema row: {}", e)))?;
+                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to read schema row: {}", e)))?;
             
             let data_type = match duckdb_type.to_uppercase().as_str() {
                 t if t.contains("INT") || t.contains("INTEGER") => DataType::Integer,
@@ -111,7 +111,7 @@ impl Source for DuckdbSource {
         // Get estimated row count
         let count_query = format!("SELECT COUNT(*) FROM {}", self.table_name);
         let count: i64 = conn.query_row(&count_query, [], |row| row.get(0))
-            .map_err(|e| TinyEtlError::Database(format!("Failed to count rows: {}", e)))?;
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to count rows: {}", e)))?;
         
         self.total_rows = Some(count as usize);
 
@@ -137,7 +137,7 @@ impl Source for DuckdbSource {
         );
         
         let mut stmt = conn.prepare(&query)
-            .map_err(|e| TinyEtlError::Database(format!("Failed to prepare query: {}", e)))?;
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare query: {}", e)))?;
         
         let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let column_count = column_names.len();
@@ -211,11 +211,11 @@ impl Source for DuckdbSource {
             }
             
             Ok(data_row)
-        }).map_err(|e| TinyEtlError::Database(format!("Failed to execute query: {}", e)))?;
+        }).map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))?;
 
         let mut result_rows = Vec::new();
         for row_result in rows {
-            result_rows.push(row_result.map_err(|e| TinyEtlError::Database(format!("Failed to read row: {}", e)))?);
+            result_rows.push(row_result.map_err(|e| TinyEtlError::DataTransfer(format!("Failed to read row: {}", e)))?);
         }
         
         // Update offset for next batch
@@ -229,7 +229,7 @@ impl Source for DuckdbSource {
             let conn = conn.lock().unwrap();
             let count_query = format!("SELECT COUNT(*) FROM {}", self.table_name);
             let count: i64 = conn.query_row(&count_query, [], |row| row.get(0))
-                .map_err(|e| TinyEtlError::Database(format!("Failed to count rows: {}", e)))?;
+                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to count rows: {}", e)))?;
             Ok(Some(count as usize))
         } else {
             Ok(None)
@@ -358,7 +358,7 @@ impl Target for DuckdbTarget {
         );
 
         conn.execute(&create_sql, [])
-            .map_err(|e| TinyEtlError::Database(format!("Failed to create table: {}", e)))?;
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to create table: {}", e)))?;
         
         Ok(())
     }
@@ -394,7 +394,7 @@ impl Target for DuckdbTarget {
 
         // Prepare the statement
         let mut stmt = conn.prepare(&insert_sql)
-            .map_err(|e| TinyEtlError::Database(format!("Failed to prepare insert statement: {}", e)))?;
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare insert statement: {}", e)))?;
         
         // Build the params vector
         let mut param_values: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
@@ -422,7 +422,7 @@ impl Target for DuckdbTarget {
         // Execute with params - need to convert to trait objects
         let params_refs: Vec<&dyn duckdb::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
         let affected = stmt.execute(params_refs.as_slice())
-            .map_err(|e| TinyEtlError::Database(format!("Failed to execute insert: {}", e)))?;
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute insert: {}", e)))?;
         
         Ok(affected)
     }
@@ -460,7 +460,7 @@ impl Target for DuckdbTarget {
             };
 
             conn.execute(&format!("DELETE FROM {}", actual_table_name), [])
-                .map_err(|e| TinyEtlError::Database(format!("Failed to truncate table: {}", e)))?;
+                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
         }
         Ok(())
     }
