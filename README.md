@@ -30,7 +30,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 ✅ **Zero configuration** — automatic schema detection and table creation (override with schema and config files in yaml) 
 
 ✅ **Lua transformations** — powerful data transformations  
-✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, native MSSQL (currently slow). Coming soon: ODBC, Snowflake, Databricks, OneLake
+✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, DuckDB, native MSSQL (currently slow). Coming soon: ODBC, Snowflake, Databricks, OneLake
 
 ✅ **Cross-platform** — Linux, macOS, Windows ready
 
@@ -96,7 +96,7 @@ cargo install tinyetl
 
 **Verify installation**:
 ```bash
-tinyetl --version  # Should show: tinyetl 0.1.0
+tinyetl --version
 ```
 
 ## Get Started in 30 Seconds
@@ -242,6 +242,7 @@ TinyETL supports two main categories of data sources and targets:
 - **SQLite** - Embedded database
 - **PostgreSQL** - Advanced open-source database
 - **MySQL** - Popular relational database
+- **DuckDB** - Embedded analytical database optimized for OLAP workloads
 
 **Connection Examples:**
 ```bash
@@ -256,6 +257,10 @@ tinyetl data.csv "postgresql://user:@localhost/mydb#customers"
 # MySQL
 tinyetl "mysql://user:@localhost:3306/mydb#products" output.json
 tinyetl data.csv "mysql://user:@localhost:3306/mydb#sales"
+
+# DuckDB
+tinyetl "products.duckdb#inventory" output.csv
+tinyetl data.csv "analytics.duckdb#sales"
 ```
 
 #### Source Type Override
@@ -315,9 +320,24 @@ tinyetl data.csv /path/to/database.db   # Creates table named 'database'
 tinyetl data.csv "sqlite:///path/to/database.db#custom_table"
 ```
 
+**DuckDB:**
+```bash
+# File path (table name inferred from filename without extension)
+tinyetl data.csv output.duckdb              # Creates table named 'output'
+tinyetl data.csv /path/to/analytics.duckdb   # Creates table named 'analytics'
+
+# Explicit table name using # separator
+tinyetl data.csv "analytics.duckdb#sales_data"
+
+# Reading from DuckDB table
+tinyetl "products.duckdb#inventory" output.csv
+tinyetl "analytics.duckdb#daily_sales" report.parquet
+```
+
 **Important Notes:**
 - Table names are automatically created if they don't exist
 - For MySQL, the database must exist before running TinyETL
+- DuckDB is optimized for analytical (OLAP) workloads and offers better performance than SQLite for aggregations
 - Connection strings should be quoted to prevent shell interpretation
 - Default ports: PostgreSQL (5432), MySQL (3306)
 
