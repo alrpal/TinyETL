@@ -27,7 +27,8 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 
 ✅ **Single 12.5MB binary** — no dependencies, no installation headaches  
 ✅ **180k+ rows/sec streaming** — handles massive datasets efficiently  
-✅ **Zero configuration** — automatic schema detection and table creation (override with schema and config files in yaml) 
+✅ **Zero configuration** — automatic schema detection and table creation (override with schema and config files in yaml)  
+   *Note: Auto-inferred schemas default all columns to nullable for safety*
 
 ✅ **Lua transformations** — powerful data transformations  
 ✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, DuckDB, native MSSQL (currently slow). Coming soon: ODBC, Snowflake, Databricks, OneLake
@@ -523,6 +524,8 @@ tinyetl data.csv output.db --transform "total=row.qty * row.price" --preview 5
 #### Schema File Format
 
 Create a YAML file defining your expected schema. Here's the complete format:
+
+> **📝 Note on Schema Inference:** When TinyETL automatically infers schema from your data, all columns are marked as `nullable: true` by default. This is a safety measure for ETL operations—sample data may not represent all possible values in your dataset. If you need `NOT NULL` constraints or other strict validation, you must provide an explicit schema file.
 
 **schema.yaml:**
 ```yaml

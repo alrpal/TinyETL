@@ -448,47 +448,65 @@ impl AvroTarget {
             .map_err(|e| TinyEtlError::Configuration(format!("Failed to create Avro schema: {}", e)))
     }
 
-    fn value_to_avro_value(value: &Value, data_type: &DataType) -> Result<AvroValue> {
-        match (value, data_type) {
-            (Value::Null, _) => Ok(AvroValue::Union(0, Box::new(AvroValue::Null))),
-            (Value::String(s), DataType::String) => Ok(AvroValue::String(s.clone())),
-            (Value::Integer(i), DataType::Integer) => Ok(AvroValue::Long(*i)),
+    fn value_to_avro_value(value: &Value, data_type: &DataType, nullable: bool) -> Result<AvroValue> {
+        // Handle null values - always wrap in Union for nullable fields
+        if matches!(value, Value::Null) {
+            if nullable {
+                return Ok(AvroValue::Union(0, Box::new(AvroValue::Null)));
+            } else {
+                return Err(TinyEtlError::DataTransfer(
+                    "Cannot insert null value into non-nullable field".to_string()
+                ));
+            }
+        }
+
+        // Convert the value to the appropriate Avro type
+        let avro_value = match (value, data_type) {
+            (Value::String(s), DataType::String) => AvroValue::String(s.clone()),
+            (Value::Integer(i), DataType::Integer) => AvroValue::Long(*i),
             (Value::Decimal(d), DataType::Decimal) => {
                 // Convert Decimal to f64 for Avro
                 let f: f64 = (*d).try_into().unwrap_or(0.0);
-                Ok(AvroValue::Double(f))
+                AvroValue::Double(f)
             },
-            (Value::Boolean(b), DataType::Boolean) => Ok(AvroValue::Boolean(*b)),
+            (Value::Boolean(b), DataType::Boolean) => AvroValue::Boolean(*b),
             (Value::Date(dt), DataType::Date) => {
                 let days_since_epoch = (dt.timestamp() / 86400) as i32;
-                Ok(AvroValue::Date(days_since_epoch))
+                AvroValue::Date(days_since_epoch)
             },
             (Value::Date(dt), DataType::DateTime) => {
-                Ok(AvroValue::TimestampMillis(dt.timestamp_millis()))
+                AvroValue::TimestampMillis(dt.timestamp_millis())
             },
             // Type conversion fallbacks
             (Value::String(s), DataType::Integer) => {
                 let parsed = s.parse::<i64>()
                     .map_err(|_| TinyEtlError::DataTransfer(format!("Cannot convert '{}' to integer", s)))?;
-                Ok(AvroValue::Long(parsed))
+                AvroValue::Long(parsed)
             },
             (Value::String(s), DataType::Decimal) => {
                 let parsed = s.parse::<Decimal>()
                     .map_err(|_| TinyEtlError::DataTransfer(format!("Cannot convert '{}' to decimal", s)))?;
                 let f: f64 = parsed.try_into().unwrap_or(0.0);
-                Ok(AvroValue::Double(f))
+                AvroValue::Double(f)
             },
             (Value::String(s), DataType::Boolean) => {
                 let parsed = s.parse::<bool>()
                     .map_err(|_| TinyEtlError::DataTransfer(format!("Cannot convert '{}' to boolean", s)))?;
-                Ok(AvroValue::Boolean(parsed))
+                AvroValue::Boolean(parsed)
             },
-            (Value::Integer(i), DataType::String) => Ok(AvroValue::String(i.to_string())),
-            (Value::Decimal(d), DataType::String) => Ok(AvroValue::String(d.to_string())),
-            (Value::Boolean(b), DataType::String) => Ok(AvroValue::String(b.to_string())),
-            _ => Err(TinyEtlError::DataTransfer(format!(
+            (Value::Integer(i), DataType::String) => AvroValue::String(i.to_string()),
+            (Value::Decimal(d), DataType::String) => AvroValue::String(d.to_string()),
+            (Value::Boolean(b), DataType::String) => AvroValue::String(b.to_string()),
+            _ => return Err(TinyEtlError::DataTransfer(format!(
                 "Cannot convert value {:?} to Avro type {:?}", value, data_type
             ))),
+        };
+
+        // For nullable fields, wrap non-null values in a Union with index 1 (the non-null variant)
+        if nullable {
+            Ok(AvroValue::Union(1, Box::new(avro_value)))
+        } else {
+            Ok(avro_value)
         }
     }
 }
@@ -547,9 +565,10 @@ impl Target for AvroTarget {
                             let default_type = JsonValue::String("string".to_string());
                             let field_type = field_obj.get("type").unwrap_or(&default_type);
                             let data_type = AvroSource::avro_type_to_schema_type(field_type);
+                            let nullable = AvroSource::is_nullable(field_type);
                             
                             let value = row.get(field_name).unwrap_or(&Value::Null);
-                            let avro_value = Self::value_to_avro_value(value, &data_type)?;
+                            let avro_value = Self::value_to_avro_value(value, &data_type, nullable)?;
                             
                             record_fields.push((field_name.to_string(), avro_value));
                         }
@@ -979,45 +998,51 @@ mod tests {
     
     #[tokio::test]
     async fn test_value_to_avro_value() {
-        // Test basic conversions
+        // Test basic conversions with nullable=true
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::Null, &DataType::String).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::Null, &DataType::String, true).unwrap(),
             AvroValue::Union(0, Box::new(AvroValue::Null))
         );
         
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::String("test".to_string()), &DataType::String).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::String("test".to_string()), &DataType::String, true).unwrap(),
+            AvroValue::Union(1, Box::new(AvroValue::String("test".to_string())))
+        );
+        
+        // Test basic conversions with nullable=false
+        assert_eq!(
+            AvroTarget::value_to_avro_value(&Value::String("test".to_string()), &DataType::String, false).unwrap(),
             AvroValue::String("test".to_string())
         );
         
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::Integer(42), &DataType::Integer).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::Integer(42), &DataType::Integer, false).unwrap(),
             AvroValue::Long(42)
         );
         
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::Decimal(Decimal::new(314, 2)), &DataType::Decimal).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::Decimal(Decimal::new(314, 2)), &DataType::Decimal, false).unwrap(),
             AvroValue::Double(3.14)
         );
         
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::Boolean).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::Boolean, false).unwrap(),
             AvroValue::Boolean(true)
         );
         
         // Test type conversions
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::String("42".to_string()), &DataType::Integer).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::String("42".to_string()), &DataType::Integer, false).unwrap(),
             AvroValue::Long(42)
         );
         
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::String("3.14".to_string()), &DataType::Decimal).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::String("3.14".to_string()), &DataType::Decimal, false).unwrap(),
             AvroValue::Double(3.14)
         );
         
         assert_eq!(
-            AvroTarget::value_to_avro_value(&Value::String("true".to_string()), &DataType::Boolean).unwrap(),
+            AvroTarget::value_to_avro_value(&Value::String("true".to_string()), &DataType::Boolean, false).unwrap(),
             AvroValue::Boolean(true)
         );
         
@@ -1025,14 +1050,14 @@ mod tests {
         let datetime = DateTime::from_timestamp(1609459200, 0).unwrap();
         let date_value = Value::Date(datetime);
         
-        let result = AvroTarget::value_to_avro_value(&date_value, &DataType::Date).unwrap();
+        let result = AvroTarget::value_to_avro_value(&date_value, &DataType::Date, false).unwrap();
         if let AvroValue::Date(_) = result {
             // Success
         } else {
             panic!("Expected Date value");
         }
         
-        let result = AvroTarget::value_to_avro_value(&date_value, &DataType::DateTime).unwrap();
+        let result = AvroTarget::value_to_avro_value(&date_value, &DataType::DateTime, false).unwrap();
         if let AvroValue::TimestampMillis(_) = result {
             // Success
         } else {
@@ -1043,15 +1068,19 @@ mod tests {
     #[tokio::test]
     async fn test_value_to_avro_value_invalid_conversions() {
         // Test invalid string to int conversion
-        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_number".to_string()), &DataType::Integer);
+        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_number".to_string()), &DataType::Integer, false);
         assert!(result.is_err());
         
         // Test invalid string to float conversion
-        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_float".to_string()), &DataType::Decimal);
+        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_float".to_string()), &DataType::Decimal, false);
         assert!(result.is_err());
         
         // Test invalid string to bool conversion
-        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_bool".to_string()), &DataType::Boolean);
+        let result = AvroTarget::value_to_avro_value(&Value::String("not_a_bool".to_string()), &DataType::Boolean, false);
+        assert!(result.is_err());
+        
+        // Test null value in non-nullable field
+        let result = AvroTarget::value_to_avro_value(&Value::Null, &DataType::String, false);
         assert!(result.is_err());
     }
     
@@ -1383,19 +1412,19 @@ mod tests {
     #[tokio::test]
     async fn test_avro_target_value_conversion_edge_cases() {
         // Test Integer to String
-        let result = AvroTarget::value_to_avro_value(&Value::Integer(42), &DataType::String).unwrap();
+        let result = AvroTarget::value_to_avro_value(&Value::Integer(42), &DataType::String, false).unwrap();
         assert_eq!(result, AvroValue::String("42".to_string()));
         
         // Test Decimal to String
-        let result = AvroTarget::value_to_avro_value(&Value::Decimal(Decimal::new(314, 2)), &DataType::String).unwrap();
+        let result = AvroTarget::value_to_avro_value(&Value::Decimal(Decimal::new(314, 2)), &DataType::String, false).unwrap();
         assert_eq!(result, AvroValue::String("3.14".to_string()));
         
         // Test Boolean to String
-        let result = AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::String).unwrap();
+        let result = AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::String, false).unwrap();
         assert_eq!(result, AvroValue::String("true".to_string()));
         
         // Test invalid type combination
-        let result = AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::Integer);
+        let result = AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::Integer, false);
         assert!(result.is_err());
     }
     
