@@ -949,4 +949,295 @@ mod tests {
         assert_eq!(row.get("active"), Some(&Value::Boolean(true)));
         assert_eq!(row.get("deleted"), Some(&Value::Null));
     }
+    
+    #[test]
+    fn test_write_value_to_buffer_null() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Null, &DataType::String);
+        assert_eq!(buffer, "NULL");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_to_string() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::String("test".to_string()),
+            &DataType::String
+        );
+        assert_eq!(buffer, "N'test'");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_with_quotes() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::String("O'Brien's".to_string()),
+            &DataType::String
+        );
+        assert_eq!(buffer, "N'O''Brien''s'");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_to_integer_valid() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::String("123".to_string()),
+            &DataType::Integer
+        );
+        assert_eq!(buffer, "123");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_to_integer_invalid() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::String("not_a_number".to_string()),
+            &DataType::Integer
+        );
+        assert_eq!(buffer, "NULL");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_to_decimal_valid() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::String("3.14159".to_string()),
+            &DataType::Decimal
+        );
+        assert_eq!(buffer, "3.14159");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_to_decimal_invalid() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::String("not_a_decimal".to_string()),
+            &DataType::Decimal
+        );
+        assert_eq!(buffer, "NULL");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_to_boolean_true_values() {
+        let true_values = vec!["true", "1", "yes"];
+        for val in true_values {
+            let mut buffer = String::new();
+            MssqlTarget::write_value_to_buffer(
+                &mut buffer,
+                &Value::String(val.to_string()),
+                &DataType::Boolean
+            );
+            assert_eq!(buffer, "1", "Failed for: {}", val);
+        }
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_to_boolean_false_values() {
+        let false_values = vec!["false", "0", "no"];
+        for val in false_values {
+            let mut buffer = String::new();
+            MssqlTarget::write_value_to_buffer(
+                &mut buffer,
+                &Value::String(val.to_string()),
+                &DataType::Boolean
+            );
+            assert_eq!(buffer, "0", "Failed for: {}", val);
+        }
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_string_to_boolean_invalid() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::String("maybe".to_string()),
+            &DataType::Boolean
+        );
+        assert_eq!(buffer, "NULL");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_integer_to_integer() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Integer(42),
+            &DataType::Integer
+        );
+        assert_eq!(buffer, "42");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_integer_to_string() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Integer(123),
+            &DataType::String
+        );
+        assert_eq!(buffer, "N'123'");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_decimal_to_decimal() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Decimal(rust_decimal::Decimal::new(314159, 5)),
+            &DataType::Decimal
+        );
+        assert_eq!(buffer, "3.14159");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_decimal_to_string() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Decimal(rust_decimal::Decimal::new(271828, 5)),
+            &DataType::String
+        );
+        assert_eq!(buffer, "N'2.71828'");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_boolean_true_to_boolean() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Boolean(true),
+            &DataType::Boolean
+        );
+        assert_eq!(buffer, "1");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_boolean_false_to_boolean() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Boolean(false),
+            &DataType::Boolean
+        );
+        assert_eq!(buffer, "0");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_boolean_to_string_true() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Boolean(true),
+            &DataType::String
+        );
+        assert_eq!(buffer, "N'true'");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_boolean_to_string_false() {
+        let mut buffer = String::new();
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Boolean(false),
+            &DataType::String
+        );
+        assert_eq!(buffer, "N'false'");
+    }
+    
+    #[test]
+    fn test_write_value_to_buffer_date() {
+        use chrono::{DateTime, Utc};
+        let mut buffer = String::new();
+        let dt = DateTime::parse_from_rfc3339("2024-03-15T14:30:45.123Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::Date(dt),
+            &DataType::DateTime
+        );
+        assert!(buffer.starts_with("'2024-03-15"));
+        assert!(buffer.ends_with("'"));
+    }
+    
+    #[test]
+    fn test_format_value_decimal_to_string() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::Decimal(rust_decimal::Decimal::new(12345, 2)),
+            &DataType::String
+        );
+        assert_eq!(result, "N'123.45'");
+    }
+    
+    #[test]
+    fn test_format_value_string_to_boolean_invalid() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::String("maybe".to_string()),
+            &DataType::Boolean
+        );
+        assert_eq!(result, "NULL");
+    }
+    
+    #[test]
+    fn test_format_value_string_to_decimal_invalid() {
+        let result = MssqlTarget::format_value_for_insert(
+            &Value::String("not_a_decimal".to_string()),
+            &DataType::Decimal
+        );
+        assert_eq!(result, "NULL");
+    }
+    
+    #[test]
+    fn test_multiple_buffer_writes() {
+        let mut buffer = String::new();
+        
+        buffer.push('(');
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Integer(1), &DataType::Integer);
+        buffer.push_str(", ");
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::String("test".to_string()), &DataType::String);
+        buffer.push_str(", ");
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Boolean(true), &DataType::Boolean);
+        buffer.push(')');
+        
+        assert_eq!(buffer, "(1, N'test', 1)");
+    }
+    
+    #[test]
+    fn test_parse_source_connection_string() {
+        let result = MssqlSource::parse_connection_string(
+            "mssql://user:pass@localhost:1433/testdb#testtable"
+        );
+        assert!(result.is_ok());
+        let (db_part, table_name) = result.unwrap();
+        assert_eq!(db_part, "mssql://user:pass@localhost:1433/testdb");
+        assert_eq!(table_name, "testtable");
+    }
+    
+    #[test]
+    fn test_parse_source_connection_string_missing_table() {
+        let result = MssqlSource::parse_connection_string(
+            "mssql://user:pass@localhost:1433/testdb"
+        );
+        assert!(result.is_err());
+        if let Err(TinyEtlError::Configuration(msg)) = result {
+            assert!(msg.contains("must include table name"));
+        }
+    }
+    
+    #[test]
+    fn test_source_with_query() {
+        let source = MssqlSource::new("mssql://user:pass@localhost/db#table")
+            .unwrap()
+            .with_query("SELECT * FROM custom_table WHERE active = 1".to_string());
+        
+        assert!(source.query.is_some());
+        assert_eq!(source.query.unwrap(), "SELECT * FROM custom_table WHERE active = 1");
+    }
 }
+

@@ -1199,4 +1199,296 @@ mod tests {
             JsonValue::String("test".to_string())
         );
     }
+    
+    #[test]
+    fn test_avro_value_conversions_comprehensive() {
+        // Test Bytes
+        let bytes_value = AvroValue::Bytes(vec![1, 2, 3]);
+        let result = AvroSource::avro_value_to_value(&bytes_value).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("1"));
+        } else {
+            panic!("Expected String value");
+        }
+        
+        // Test Fixed
+        let fixed_value = AvroValue::Fixed(4, vec![1, 2, 3, 4]);
+        let result = AvroSource::avro_value_to_value(&fixed_value).unwrap();
+        if let Value::String(_) = result {
+            // Success
+        } else {
+            panic!("Expected String value");
+        }
+        
+        // Test Enum
+        let enum_value = AvroValue::Enum(0, "OPTION_A".to_string());
+        let result = AvroSource::avro_value_to_value(&enum_value).unwrap();
+        assert_eq!(result, Value::String("OPTION_A".to_string()));
+        
+        // Test Array
+        let array_value = AvroValue::Array(vec![
+            AvroValue::Int(1),
+            AvroValue::Int(2),
+            AvroValue::Int(3),
+        ]);
+        let result = AvroSource::avro_value_to_value(&array_value).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("1"));
+            assert!(s.contains("2"));
+            assert!(s.contains("3"));
+        } else {
+            panic!("Expected String value");
+        }
+        
+        // Test Map
+        let mut map = std::collections::HashMap::new();
+        map.insert("key1".to_string(), AvroValue::String("value1".to_string()));
+        map.insert("key2".to_string(), AvroValue::Int(42));
+        let map_value = AvroValue::Map(map);
+        let result = AvroSource::avro_value_to_value(&map_value).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("key1"));
+            assert!(s.contains("value1"));
+        } else {
+            panic!("Expected String value");
+        }
+        
+        // Test Record
+        let record_value = AvroValue::Record(vec![
+            ("field1".to_string(), AvroValue::String("test".to_string())),
+            ("field2".to_string(), AvroValue::Int(123)),
+        ]);
+        let result = AvroSource::avro_value_to_value(&record_value).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("field1"));
+            assert!(s.contains("test"));
+        } else {
+            panic!("Expected String value");
+        }
+        
+        // Test TimeMillis
+        let time_millis = AvroValue::TimeMillis(3600000); // 1 hour
+        let result = AvroSource::avro_value_to_value(&time_millis).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("3600000"));
+        } else {
+            panic!("Expected String value");
+        }
+        
+        // Test TimeMicros
+        let time_micros = AvroValue::TimeMicros(3600000000); // 1 hour
+        let result = AvroSource::avro_value_to_value(&time_micros).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("3600000000"));
+        } else {
+            panic!("Expected String value");
+        }
+        
+        // Test TimestampMicros
+        let timestamp_micros = AvroValue::TimestampMicros(1609459200000000); // 2021-01-01
+        let result = AvroSource::avro_value_to_value(&timestamp_micros).unwrap();
+        if let Value::Date(_) = result {
+            // Success
+        } else {
+            panic!("Expected Date value");
+        }
+        
+        // Test LocalTimestampMillis
+        let local_timestamp_millis = AvroValue::LocalTimestampMillis(1609459200000);
+        let result = AvroSource::avro_value_to_value(&local_timestamp_millis).unwrap();
+        if let Value::Date(_) = result {
+            // Success
+        } else {
+            panic!("Expected Date value");
+        }
+        
+        // Test LocalTimestampMicros
+        let local_timestamp_micros = AvroValue::LocalTimestampMicros(1609459200000000);
+        let result = AvroSource::avro_value_to_value(&local_timestamp_micros).unwrap();
+        if let Value::Date(_) = result {
+            // Success
+        } else {
+            panic!("Expected Date value");
+        }
+        
+        // Test Decimal
+        let decimal_bytes = vec![1, 2, 3, 4];
+        let decimal_value = AvroValue::Decimal(apache_avro::Decimal::from(decimal_bytes));
+        let result = AvroSource::avro_value_to_value(&decimal_value).unwrap();
+        if let Value::String(_) = result {
+            // Success
+        } else {
+            panic!("Expected String value");
+        }
+        
+        // Test Uuid
+        let uuid = uuid::Uuid::new_v4();
+        let uuid_value = AvroValue::Uuid(uuid);
+        let result = AvroSource::avro_value_to_value(&uuid_value).unwrap();
+        assert_eq!(result, Value::String(uuid.to_string()));
+        
+        // Test Duration
+        let duration_value = AvroValue::Duration(apache_avro::Duration::new(
+            apache_avro::Months::new(1),
+            apache_avro::Days::new(2),
+            apache_avro::Millis::new(3),
+        ));
+        let result = AvroSource::avro_value_to_value(&duration_value).unwrap();
+        if let Value::String(_) = result {
+            // Success
+        } else {
+            panic!("Expected String value");
+        }
+    }
+    
+    #[test]
+    fn test_avro_type_to_schema_type_edge_cases() {
+        // Test union with only null
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!(["null"])),
+            DataType::String
+        );
+        
+        // Test object without logicalType
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!({"type": "string"})),
+            DataType::String
+        );
+        
+        // Test object with unknown logicalType
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!({"type": "string", "logicalType": "unknown"})),
+            DataType::String
+        );
+        
+        // Test unknown type
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!("unknown_type")),
+            DataType::String
+        );
+        
+        // Test number (shouldn't happen but test default)
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!(123)),
+            DataType::String
+        );
+        
+        // Test timestamp-micros
+        assert_eq!(
+            AvroSource::avro_type_to_schema_type(&json!({"type": "long", "logicalType": "timestamp-micros"})),
+            DataType::DateTime
+        );
+    }
+    
+    #[tokio::test]
+    async fn test_avro_target_value_conversion_edge_cases() {
+        // Test Integer to String
+        let result = AvroTarget::value_to_avro_value(&Value::Integer(42), &DataType::String).unwrap();
+        assert_eq!(result, AvroValue::String("42".to_string()));
+        
+        // Test Decimal to String
+        let result = AvroTarget::value_to_avro_value(&Value::Decimal(Decimal::new(314, 2)), &DataType::String).unwrap();
+        assert_eq!(result, AvroValue::String("3.14".to_string()));
+        
+        // Test Boolean to String
+        let result = AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::String).unwrap();
+        assert_eq!(result, AvroValue::String("true".to_string()));
+        
+        // Test invalid type combination
+        let result = AvroTarget::value_to_avro_value(&Value::Boolean(true), &DataType::Integer);
+        assert!(result.is_err());
+    }
+    
+    #[tokio::test]
+    async fn test_avro_target_buffer_size() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut target = AvroTarget::new(temp_file.path().to_str().unwrap()).unwrap();
+        
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        
+        target.connect().await.unwrap();
+        target.create_table("test", &schema).await.unwrap();
+        
+        // Write multiple small batches
+        for i in 0..5 {
+            let row = std::collections::HashMap::from([
+                ("id".to_string(), Value::Integer(i)),
+            ]);
+            target.write_batch(&[row]).await.unwrap();
+        }
+        
+        // Check buffer
+        assert_eq!(target.buffer.len(), 5);
+        
+        // Finalize to flush buffer
+        target.finalize().await.unwrap();
+        assert_eq!(target.buffer.len(), 0);
+    }
+    
+    #[test]
+    fn test_avro_json_value_float_edge_cases() {
+        // Test Float with NaN (should use fallback)
+        let result = AvroSource::avro_value_to_json_value(&AvroValue::Float(f32::NAN)).unwrap();
+        assert_eq!(result, JsonValue::Number(serde_json::Number::from(0)));
+        
+        // Test Double with NaN (should use fallback)
+        let result = AvroSource::avro_value_to_json_value(&AvroValue::Double(f64::NAN)).unwrap();
+        assert_eq!(result, JsonValue::Number(serde_json::Number::from(0)));
+    }
+    
+    #[tokio::test]
+    async fn test_avro_schema_all_types() {
+        let schema = Schema {
+            columns: vec![
+                Column { name: "col_string".to_string(), data_type: DataType::String, nullable: false },
+                Column { name: "col_string_null".to_string(), data_type: DataType::String, nullable: true },
+                Column { name: "col_int".to_string(), data_type: DataType::Integer, nullable: false },
+                Column { name: "col_int_null".to_string(), data_type: DataType::Integer, nullable: true },
+                Column { name: "col_decimal".to_string(), data_type: DataType::Decimal, nullable: false },
+                Column { name: "col_decimal_null".to_string(), data_type: DataType::Decimal, nullable: true },
+                Column { name: "col_bool".to_string(), data_type: DataType::Boolean, nullable: false },
+                Column { name: "col_bool_null".to_string(), data_type: DataType::Boolean, nullable: true },
+                Column { name: "col_date".to_string(), data_type: DataType::Date, nullable: false },
+                Column { name: "col_date_null".to_string(), data_type: DataType::Date, nullable: true },
+                Column { name: "col_datetime".to_string(), data_type: DataType::DateTime, nullable: false },
+                Column { name: "col_datetime_null".to_string(), data_type: DataType::DateTime, nullable: true },
+                Column { name: "col_null".to_string(), data_type: DataType::Null, nullable: true },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        
+        let avro_schema = AvroTarget::schema_to_avro_schema(&schema);
+        assert!(avro_schema.is_ok());
+        
+        let schema_json: JsonValue = serde_json::from_str(&avro_schema.unwrap().canonical_form()).unwrap();
+        
+        if let JsonValue::Object(obj) = schema_json {
+            if let Some(JsonValue::Array(fields)) = obj.get("fields") {
+                assert_eq!(fields.len(), 13);
+            }
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_avro_source_array_conversion_error() {
+        // Create an array with values that can't convert to JSON
+        let array_with_complex = AvroValue::Array(vec![
+            AvroValue::String("test".to_string()),
+        ]);
+        let result = AvroSource::avro_value_to_value(&array_with_complex).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("test"));
+        }
+    }
 }
