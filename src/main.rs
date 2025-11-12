@@ -311,7 +311,7 @@ mod tests {
         let config = Config::default();
         
         // Test that default values are sensible
-        assert_eq!(config.batch_size, 10_000);
+        assert_eq!(config.batch_size, 1_000);
         assert_eq!(config.preview, None);
         assert!(!config.dry_run);
         assert_eq!(config.log_level, tinyetl::config::LogLevel::Info);

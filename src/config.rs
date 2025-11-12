@@ -74,7 +74,7 @@ impl Default for Config {
             target: String::new(),
             infer_schema: true,
             schema_file: None,
-            batch_size: 10_000,
+            batch_size: 1_000,  // Reduced from 10k to 1k for better memory usage with transactions
             preview: None,
             dry_run: false,
             log_level: LogLevel::Info,
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.batch_size, 10_000);
+        assert_eq!(config.batch_size, 1_000);
         assert!(config.infer_schema);
         assert!(!config.dry_run);
         assert!(!config.skip_existing);

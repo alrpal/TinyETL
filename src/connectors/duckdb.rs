@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use duckdb::{Connection, params, types::ValueRef};
+use duckdb::{Connection, params, types::ValueRef, Appender};
 use rust_decimal::Decimal;
 
 use crate::{
@@ -9,6 +9,55 @@ use crate::{
     schema::{Schema, Row, Value, Column as SchemaColumn, DataType},
     connectors::{Source, Target}
 };
+
+/// Efficient batch insert using DuckDB's Appender API
+fn insert_with_appender(conn: &Connection, table_name: &str, rows: &[Row], schema: &Schema) -> Result<usize> {
+    let mut appender = conn.appender(table_name)
+        .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to create appender: {}", e)))?;
+    
+    // Insert each row using the appender
+    for row in rows {
+        // Collect values in schema order as owned values
+        let mut row_values: Vec<duckdb::types::Value> = Vec::new();
+        
+        for col in &schema.columns {
+            let value = row.get(&col.name).unwrap_or(&Value::Null);
+            
+            let duckdb_value = match value {
+                Value::String(s) => duckdb::types::Value::Text(s.clone()),
+                Value::Integer(i) => duckdb::types::Value::BigInt(*i),
+                Value::Decimal(d) => {
+                    // Convert decimal to f64 for DuckDB
+                    let f: f64 = (*d).try_into().unwrap_or(0.0);
+                    duckdb::types::Value::Double(f)
+                },
+                Value::Boolean(b) => duckdb::types::Value::Boolean(*b),
+                Value::Date(dt) => {
+                    // Convert datetime to string for DuckDB
+                    let timestamp_str = dt.to_rfc3339();
+                    duckdb::types::Value::Text(timestamp_str)
+                },
+                Value::Null => duckdb::types::Value::Null,
+            };
+            
+            row_values.push(duckdb_value);
+        }
+        
+        // Convert to refs for appender
+        let params_refs: Vec<&dyn duckdb::types::ToSql> = row_values.iter()
+            .map(|v| v as &dyn duckdb::types::ToSql)
+            .collect();
+        
+        appender.append_row(params_refs.as_slice())
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to append row: {}", e)))?;
+    }
+    
+    // Flush the appender to commit the data
+    appender.flush()
+        .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to flush appender: {}", e)))?;
+    
+    Ok(rows.len())
+}
 
 /// DuckDB source connector for reading data from DuckDB databases
 pub struct DuckdbSource {
@@ -72,7 +121,7 @@ impl Source for DuckdbSource {
         let conn = conn.lock().unwrap();
         
         // Get table schema using PRAGMA or DESCRIBE
-        let query = format!("DESCRIBE {}", self.table_name);
+        let query = format!("DESCRIBE \"{}\"", self.table_name);
         let mut stmt = conn.prepare(&query)
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to describe table '{}': {}", self.table_name, e)))?;
         
@@ -109,7 +158,7 @@ impl Source for DuckdbSource {
         }
 
         // Get estimated row count
-        let count_query = format!("SELECT COUNT(*) FROM {}", self.table_name);
+        let count_query = format!("SELECT COUNT(*) FROM \"{}\"", self.table_name);
         let count: i64 = conn.query_row(&count_query, [], |row| row.get(0))
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to count rows: {}", e)))?;
         
@@ -132,7 +181,7 @@ impl Source for DuckdbSource {
         
         // Use LIMIT and OFFSET for proper pagination
         let query = format!(
-            "SELECT * FROM {} LIMIT {} OFFSET {}", 
+            "SELECT * FROM \"{}\" LIMIT {} OFFSET {}", 
             self.table_name, batch_size, self.current_offset
         );
         
@@ -247,7 +296,7 @@ impl Source for DuckdbSource {
     }    async fn estimated_row_count(&self) -> Result<Option<usize>> {
         if let Some(conn) = &self.connection {
             let conn = conn.lock().unwrap();
-            let count_query = format!("SELECT COUNT(*) FROM {}", self.table_name);
+            let count_query = format!("SELECT COUNT(*) FROM \"{}\"", self.table_name);
             let count: i64 = conn.query_row(&count_query, [], |row| row.get(0))
                 .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to count rows: {}", e)))?;
             Ok(Some(count as usize))
@@ -278,6 +327,7 @@ pub struct DuckdbTarget {
     connection_string: String,
     connection: Option<Arc<Mutex<Connection>>>,
     table_name: String,
+    schema: Option<Schema>, // Cache the schema to avoid re-inference
 }
 
 impl DuckdbTarget {
@@ -304,6 +354,7 @@ impl DuckdbTarget {
             connection_string: db_path.to_string(),
             connection: None,
             table_name: table.to_string(),
+            schema: None,
         })
     }
     
@@ -362,17 +413,20 @@ impl Target for DuckdbTarget {
 
         // Update our internal table name to match what we're actually creating
         self.table_name = actual_table_name.clone();
+        
+        // Store the schema for efficient Arrow-based writes
+        self.schema = Some(schema.clone());
 
         // Build CREATE TABLE statement with IF NOT EXISTS (append-first philosophy)
         let column_definitions: Vec<String> = schema.columns.iter().map(|col| {
             let duckdb_type = self.map_data_type_to_duckdb(&col.data_type);
             let nullable = if col.nullable { "" } else { " NOT NULL" };
-            format!("{} {}{}", col.name, duckdb_type, nullable)
+            format!("\"{}\" {}{}", col.name, duckdb_type, nullable)
         }).collect();
 
         // Use CREATE TABLE IF NOT EXISTS to support append-first philosophy
         let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS {} ({})",
+            "CREATE TABLE IF NOT EXISTS \"{}\" ({})",
             actual_table_name,
             column_definitions.join(", ")
         );
@@ -395,54 +449,17 @@ impl Target for DuckdbTarget {
         let conn = self.connection.as_ref().unwrap();
         let conn = conn.lock().unwrap();
         
-        // Get column names from first row
-        let columns: Vec<String> = rows[0].keys().cloned().collect();
-        
-        // DuckDB has efficient batch inserts, so we can insert multiple rows at once
-        // Create placeholders for batch insert
-        let placeholders_per_row = vec!["?"; columns.len()].join(", ");
-        let value_groups: Vec<String> = (0..rows.len())
-            .map(|_| format!("({})", placeholders_per_row))
-            .collect();
-        
-        let insert_sql = format!(
-            "INSERT INTO {} ({}) VALUES {}",
-            self.table_name,
-            columns.join(", "),
-            value_groups.join(", ")
-        );
-
-        // Prepare the statement
-        let mut stmt = conn.prepare(&insert_sql)
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare insert statement: {}", e)))?;
-        
-        // Build the params vector
-        let mut param_values: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
-        
-        for row in rows {
-            for column in &columns {
-                let value = row.get(column).unwrap_or(&Value::Null);
-                match value {
-                    Value::String(s) => param_values.push(Box::new(s.clone())),
-                    Value::Integer(i) => param_values.push(Box::new(*i)),
-                    Value::Decimal(d) => {
-                        // Convert Decimal to f64 for DuckDB binding
-                        let f: f64 = (*d).try_into().unwrap_or(0.0);
-                        param_values.push(Box::new(f));
-                    },
-                    Value::Boolean(b) => param_values.push(Box::new(*b)),
-                    Value::Date(dt) => param_values.push(Box::new(dt.to_rfc3339())),
-                    Value::Null => {
-                        param_values.push(Box::new(None::<String>));
-                    },
-                };
+        // Use cached schema if available, otherwise infer from rows
+        let schema = match &self.schema {
+            Some(s) => s.clone(),
+            None => {
+                // Fallback: infer schema from rows (less efficient)
+                crate::schema::SchemaInferer::infer_from_rows(rows)?
             }
-        }
+        };
         
-        // Execute with params - need to convert to trait objects
-        let params_refs: Vec<&dyn duckdb::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let affected = stmt.execute(params_refs.as_slice())
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute insert: {}", e)))?;
+        // Use DuckDB's high-performance Appender API for batch insertion
+        let affected = insert_with_appender(&conn, &self.table_name, rows, &schema)?;
         
         Ok(affected)
     }
@@ -479,7 +496,7 @@ impl Target for DuckdbTarget {
                 table_name
             };
 
-            conn.execute(&format!("DELETE FROM {}", actual_table_name), [])
+            conn.execute(&format!("DELETE FROM \"{}\"", actual_table_name), [])
                 .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
         }
         Ok(())
