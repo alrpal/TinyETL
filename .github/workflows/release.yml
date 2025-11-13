@@ -59,20 +59,33 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        sudo apt-get install -y pkg-config libssl-dev
+        sudo apt-get install -y pkg-config libssl-dev unixodbc-dev
 
     - name: Install system dependencies (macOS)
       if: matrix.os == 'macos-latest'
       run: |
-        # Only install OpenSSL dependencies if needed
+        # Install OpenSSL and unixODBC
         brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
-
+        brew list unixodbc >/dev/null 2>&1 || brew install unixodbc
 
     - name: Install system dependencies (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        # No external dependencies needed with vendored mlua
-        echo "Using vendored Lua - no external dependencies required"
+        # Windows has native ODBC support, no additional installation needed
+        echo "Using Windows native ODBC driver manager"
+
+    - name: Set ODBC library path (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        echo "RUSTFLAGS=-L /opt/homebrew/opt/unixodbc/lib" >> $GITHUB_ENV
+        echo "LIBRARY_PATH=/opt/homebrew/opt/unixodbc/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+        echo "DYLD_LIBRARY_PATH=/opt/homebrew/opt/unixodbc/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
+
+    - name: Set ODBC library path (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        echo "LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LIBRARY_PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
     - name: Build release binary
       id: build

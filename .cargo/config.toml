@@ -1,0 +1,25 @@
+# Cargo configuration for TinyETL
+# This file helps with linking ODBC libraries on different platforms
+
+[build]
+# Additional rustc flags for all builds
+
+[target.x86_64-apple-darwin]
+# Intel macOS - Homebrew libraries
+rustflags = ["-L", "/usr/local/opt/unixodbc/lib", "-L", "/opt/homebrew/opt/unixodbc/lib"]
+
+[target.aarch64-apple-darwin]
+# Apple Silicon macOS - Homebrew libraries
+rustflags = ["-L", "/opt/homebrew/opt/unixodbc/lib"]
+
+[target.x86_64-unknown-linux-gnu]
+# Linux - typically in standard locations
+# ODBC libraries are usually in /usr/lib/x86_64-linux-gnu or /usr/lib
+
+[target.x86_64-pc-windows-msvc]
+# Windows - uses native ODBC driver manager (odbc32.lib)
+# No additional configuration needed
+
+[target.aarch64-pc-windows-msvc]
+# Windows ARM - uses native ODBC driver manager
+# No additional configuration needed

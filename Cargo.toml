@@ -46,6 +46,8 @@ futures-util = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
 base64 = "0.21"
 duckdb = { version = "1.4.1", features = ["bundled"] }
+odbc-api = { version = "8.0", features = ["narrow"] }
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3.8"
