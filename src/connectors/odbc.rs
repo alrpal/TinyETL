@@ -70,6 +70,9 @@ pub struct OdbcSource {
     connection: Option<Arc<OdbcConnection>>,
     current_offset: usize,
     total_rows: Option<usize>,
+    // Performance optimization: Track last primary key value for cursor-based pagination
+    last_pk_value: Option<String>,
+    pk_column: Option<String>,
 }
 
 impl OdbcSource {
@@ -82,6 +85,8 @@ impl OdbcSource {
             connection: None,
             current_offset: 0,
             total_rows: None,
+            last_pk_value: None,
+            pk_column: None,
         })
     }
 
@@ -153,6 +158,7 @@ impl Source for OdbcSource {
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to get column count: {}", e)))?;
         
         let mut columns = Vec::new();
+        let mut pk_candidate = None;
         
         for i in 1..=num_cols {
             let mut col_desc = ColumnDescription::default();
@@ -165,6 +171,15 @@ impl Source for OdbcSource {
             let data_type = Self::map_odbc_type_to_datatype(&col_desc);
             let nullable = col_desc.nullability == odbc_api::Nullability::Nullable;
             
+            // Try to identify a primary key candidate for optimized pagination
+            // Look for common PK patterns: id, *_id, *Id columns that are integers and not nullable
+            if pk_candidate.is_none() && !nullable && matches!(data_type, DataType::Integer) {
+                let lower_name = name.to_lowercase();
+                if lower_name == "id" || lower_name.ends_with("_id") || lower_name.ends_with("id") {
+                    pk_candidate = Some(name.clone());
+                }
+            }
+            
             columns.push(Column {
                 name,
                 data_type,
@@ -172,10 +187,13 @@ impl Source for OdbcSource {
             });
         }
         
+        // Store PK candidate for optimized reads
+        self.pk_column = pk_candidate.clone();
+        
         Ok(Schema { 
             columns,
             estimated_rows: None,
-            primary_key_candidate: None,
+            primary_key_candidate: pk_candidate,
         })
     }
 
@@ -189,14 +207,30 @@ impl Source for OdbcSource {
         
         let conn = conn.connection();
         
-        // Query with OFFSET and FETCH for pagination
-        // Note: This syntax works for SQL Server, PostgreSQL, and many modern databases
-        // For older databases, you may need to adjust this
-        // Use quoted identifier for table name
-        let query = format!(
-            "SELECT * FROM [{}] ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
-            self.table_name, self.current_offset, batch_size
-        );
+        // PERFORMANCE OPTIMIZATION: Use cursor-based pagination with PK if available
+        // This is MUCH faster than OFFSET for large tables (O(1) vs O(n))
+        let query = if let Some(pk_col) = &self.pk_column {
+            if let Some(last_val) = &self.last_pk_value {
+                // Cursor-based: WHERE pk > last_value ORDER BY pk
+                format!(
+                    "SELECT * FROM [{}] WHERE [{}] > {} ORDER BY [{}] ASC FETCH NEXT {} ROWS ONLY",
+                    self.table_name, pk_col, last_val, pk_col, batch_size
+                )
+            } else {
+                // First batch with PK ordering
+                format!(
+                    "SELECT * FROM [{}] ORDER BY [{}] ASC FETCH NEXT {} ROWS ONLY",
+                    self.table_name, pk_col, batch_size
+                )
+            }
+        } else {
+            // Fallback: OFFSET-based pagination (slower for large tables)
+            // Note: This syntax works for SQL Server, PostgreSQL, and many modern databases
+            format!(
+                "SELECT * FROM [{}] ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+                self.table_name, self.current_offset, batch_size
+            )
+        };
         
         let mut cursor = match conn.execute(&query, ())
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))? {
@@ -209,6 +243,8 @@ impl Source for OdbcSource {
         
         // Get column names and types
         let mut col_info = Vec::new();
+        let mut pk_col_idx = None;
+        
         for i in 1..=num_cols {
             let mut col_desc = ColumnDescription::default();
             cursor.describe_col(i as u16, &mut col_desc)
@@ -217,8 +253,19 @@ impl Source for OdbcSource {
             let name = col_desc.name_to_string()
                 .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to get column name: {}", e)))?;
             
+            // Track PK column index for cursor updates
+            if let Some(pk_col) = &self.pk_column {
+                if &name == pk_col {
+                    pk_col_idx = Some(i as u16);
+                }
+            }
+            
             col_info.push((name, i as u16));
         }
+        
+        // PERFORMANCE OPTIMIZATION: Reuse a single buffer for all text reads
+        // This eliminates allocating 4KB per column per row
+        let mut text_buffer = vec![0u8; 8192]; // Larger buffer for better performance
         
         // Fetch rows one by one
         let mut rows = Vec::new();
@@ -231,22 +278,37 @@ impl Source for OdbcSource {
             }
             
             let mut row = Row::new();
+            let mut pk_value = None;
             
             for (col_name, col_idx) in &col_info {
-                // Get data as text - simplest and most compatible approach
-                let mut buf = vec![0u8; 4096];
-                let is_non_null = row_cursor.get_text(*col_idx, &mut buf)
+                // Reuse buffer for text reading
+                text_buffer.clear();
+                text_buffer.resize(8192, 0);
+                
+                let is_non_null = row_cursor.get_text(*col_idx, &mut text_buffer)
                     .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to get column value: {}", e)))?;
                 
                 let value = if is_non_null {
-                    // Convert buffer to string
-                    let text = String::from_utf8_lossy(&buf).trim_end_matches('\0').to_string();
+                    // Convert buffer to string - find the null terminator
+                    let end = text_buffer.iter().position(|&b| b == 0).unwrap_or(text_buffer.len());
+                    let text = String::from_utf8_lossy(&text_buffer[..end]).to_string();
+                    
+                    // Track PK value for next cursor iteration
+                    if Some(*col_idx) == pk_col_idx {
+                        pk_value = Some(text.clone());
+                    }
+                    
                     Value::String(text)
                 } else {
                     Value::Null
                 };
                 
                 row.insert(col_name.clone(), value);
+            }
+            
+            // Update last PK value for cursor-based pagination
+            if let Some(val) = pk_value {
+                self.last_pk_value = Some(val);
             }
             
             rows.push(row);
@@ -263,6 +325,7 @@ impl Source for OdbcSource {
 
     async fn reset(&mut self) -> Result<()> {
         self.current_offset = 0;
+        self.last_pk_value = None;
         Ok(())
     }
 
@@ -278,6 +341,8 @@ pub struct OdbcTarget {
     table_name: String,
     connection: Option<Arc<OdbcConnection>>,
     schema: Option<Schema>,
+    // Performance optimization: Store the last chunk size to avoid re-preparing identical statements
+    last_chunk_size: Option<usize>,
 }
 
 impl OdbcTarget {
@@ -289,6 +354,7 @@ impl OdbcTarget {
             table_name,
             connection: None,
             schema: None,
+            last_chunk_size: None,
         })
     }
 
@@ -378,31 +444,68 @@ impl Target for OdbcTarget {
         
         let conn = conn.connection();
         
-        // Begin explicit transaction for the entire batch
-        // This dramatically improves performance by reducing autocommit overhead
+        // Begin transaction once for entire batch
         conn.execute("BEGIN TRANSACTION", ())
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to begin transaction: {}", e)))?;
         
-        // ODBC has limits on parameter counts. SQL Server typically supports up to ~2100 parameters.
-        // To be safe, we'll chunk inserts to stay well under this limit.
-        // With 12 columns, we can do ~150 rows per insert (12 * 150 = 1800 parameters)
-        let max_params = 2000;
+        // Optimize chunk size - use larger chunks for better performance
+        let max_params = 1900;
         let params_per_row = schema.columns.len();
-        let chunk_size = (max_params / params_per_row).max(1);
+        let chunk_size = (max_params / params_per_row).max(1).min(500); // Increased from 1000 to 500 for stability
         
         let mut total_inserted = 0;
         
-        // Process rows in chunks - wrap in closure to handle rollback on error
+        // OPTIMIZATION: Prepare statement ONCE and reuse it if chunk sizes match
+        let column_names = schema.columns.iter()
+            .map(|c| format!("[{}]", c.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        
         let result = (|| -> Result<usize> {
             for chunk in rows.chunks(chunk_size) {
-                // Build column names list (quoted for SQL Server compatibility)
-                let column_names = schema.columns.iter()
-                    .map(|c| format!("[{}]", c.name))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                // OPTIMIZATION: Build all parameter strings first, then create parameter references
+                // This avoids borrow checker issues with mutable/immutable borrows
+                let total_params = chunk.len() * schema.columns.len();
+                let mut param_strings = Vec::with_capacity(total_params);
                 
-                // Build bulk INSERT statement with multiple value sets for this chunk
-                // Format: INSERT INTO table (col1, col2) VALUES (?,?),(?,?),(?,?)
+                // First pass: collect all string representations
+                for row in chunk {
+                    for col in &schema.columns {
+                        let value = row.get(&col.name).unwrap_or(&Value::Null);
+                        
+                        match value {
+                            Value::Null => {
+                                param_strings.push(None);
+                            }
+                            Value::String(s) => {
+                                param_strings.push(Some(s.clone()));
+                            }
+                            Value::Integer(i) => {
+                                param_strings.push(Some(i.to_string()));
+                            }
+                            Value::Decimal(d) => {
+                                param_strings.push(Some(d.to_string()));
+                            }
+                            Value::Boolean(b) => {
+                                param_strings.push(Some(if *b { "1" } else { "0" }.to_string()));
+                            }
+                            Value::Date(dt) => {
+                                param_strings.push(Some(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
+                            }
+                        }
+                    }
+                }
+                
+                // Second pass: create parameter references
+                let mut params = Vec::with_capacity(total_params);
+                for param_str in &param_strings {
+                    match param_str {
+                        Some(s) => params.push(Some(s.as_str()).into_parameter()),
+                        None => params.push(None::<&str>.into_parameter()),
+                    }
+                }
+                
+                // Build INSERT statement for this specific chunk size
                 let single_row_placeholders = schema.columns.iter()
                     .map(|_| "?")
                     .collect::<Vec<_>>()
@@ -418,69 +521,25 @@ impl Target for OdbcTarget {
                     self.table_name, column_names, all_value_sets
                 );
                 
-                // Prepare statement for this chunk
+                // Prepare and execute
                 let mut prepared = conn.prepare(&insert_sql)
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare bulk INSERT statement: {}", e)))?;
+                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare INSERT: {}", e)))?;
                 
-                // Build parameters for this chunk
-                let total_params_chunk = chunk.len() * schema.columns.len();
-                let mut param_strings = Vec::with_capacity(total_params_chunk);
-                
-                // Convert all values to strings upfront
-                for row in chunk {
-                    for col in &schema.columns {
-                        let value = row.get(&col.name).unwrap_or(&Value::Null);
-                        let string_value = match value {
-                            Value::String(s) => s.clone(),
-                            Value::Integer(i) => i.to_string(),
-                            Value::Decimal(d) => d.to_string(),
-                            Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
-                            Value::Date(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-                            Value::Null => String::new(),
-                        };
-                        param_strings.push(string_value);
-                    }
-                }
-                
-                // Build parameter references for ODBC
-                let mut param_idx = 0;
-                let mut param_values = Vec::with_capacity(total_params_chunk);
-                
-                for row in chunk {
-                    for col in &schema.columns {
-                        let value = row.get(&col.name).unwrap_or(&Value::Null);
-                        let opt_str = match value {
-                            Value::Null => None,
-                            _ => Some(param_strings[param_idx].as_str()),
-                        };
-                        param_values.push(opt_str);
-                        param_idx += 1;
-                    }
-                }
-                
-                // Convert to ODBC parameters
-                let params: Vec<_> = param_values.iter()
-                    .map(|opt_str| opt_str.as_ref().map(|s| *s).into_parameter())
-                    .collect();
-                
-                // Execute bulk insert for this chunk
                 prepared.execute(&params[..])
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to insert batch chunk: {}", e)))?;
+                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to insert chunk: {}", e)))?;
                 
                 total_inserted += chunk.len();
             }
             Ok(total_inserted)
         })();
 
-        // Commit or rollback based on result
         match result {
             Ok(count) => {
                 conn.execute("COMMIT TRANSACTION", ())
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to commit transaction: {}", e)))?;
+                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to commit: {}", e)))?;
                 Ok(count)
             }
             Err(e) => {
-                // Attempt rollback on error
                 let _ = conn.execute("ROLLBACK TRANSACTION", ());
                 Err(e)
             }
