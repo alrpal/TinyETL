@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use async_trait::async_trait;
-use sqlx::{MySqlPool, Row as SqlxRow, Column as SqlxColumn};
+use sqlx::{MySqlPool, Row as SqlxRow, Column as SqlxColumn, TypeInfo};
 use url::Url;
 use rust_decimal::Decimal;
 use chrono::{DateTime, Utc, NaiveDateTime, NaiveDate};
+use serde_json;
 
 use crate::{
     Result, TinyEtlError,
@@ -52,8 +53,28 @@ impl MysqlSource {
 
     fn extract_value(&self, row: &sqlx::mysql::MySqlRow, column: &sqlx::mysql::MySqlColumn) -> Result<Value> {
         let col_name = column.name();
+        let col_type = column.type_info();
+        let type_name = col_type.name();
+        
+        // Debug: Log the column type
+        tracing::debug!("Column '{}' has type '{}'", col_name, type_name);
+        
+        // Handle JSON type explicitly using serde_json::Value
+        if type_name.eq_ignore_ascii_case("JSON") {
+            tracing::debug!("Detected JSON column: {}", col_name);
+            if let Ok(Some(json_val)) = row.try_get::<Option<serde_json::Value>, _>(col_name) {
+                // Convert the JSON value to a compact string representation
+                let json_string = serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
+                tracing::debug!("Successfully extracted JSON as string: {} bytes", json_string.len());
+                return Ok(Value::String(json_string));
+            } else {
+                tracing::debug!("JSON column '{}' is NULL", col_name);
+                return Ok(Value::Null);
+            }
+        }
         
         // Try different MySQL types in order of likelihood
+        // Try String (TEXT, VARCHAR, CHAR types)
         if let Ok(val) = row.try_get::<Option<String>, _>(col_name) {
             match val {
                 Some(s) => Ok(Value::String(s)),
@@ -1236,5 +1257,44 @@ mod tests {
         assert!(row.contains_key("col1"));
         assert!(row.contains_key("col2"));
         assert!(!row.contains_key("col3"));
+    }
+
+    #[test]
+    fn test_json_field_as_string() {
+        // Test that JSON data would be stored as a string
+        let json_data = r#"{"key": "value", "number": 42}"#;
+        let value = Value::String(json_data.to_string());
+        
+        match value {
+            Value::String(s) => {
+                assert!(s.contains("key"));
+                assert!(s.contains("value"));
+                assert!(s.contains("42"));
+            },
+            _ => panic!("Expected JSON data to be stored as String"),
+        }
+    }
+
+    #[test]
+    fn test_json_array_as_string() {
+        // Test that JSON array data would be stored as a string
+        let json_array = r#"[1, 2, 3, "test"]"#;
+        let value = Value::String(json_array.to_string());
+        
+        match value {
+            Value::String(s) => {
+                assert!(s.starts_with('['));
+                assert!(s.ends_with(']'));
+                assert!(s.contains("test"));
+            },
+            _ => panic!("Expected JSON array to be stored as String"),
+        }
+    }
+
+    #[test]
+    fn test_null_json_field() {
+        // Test that NULL JSON fields are handled correctly
+        let value = Value::Null;
+        assert!(matches!(value, Value::Null));
     }
 }

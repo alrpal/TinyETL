@@ -7,12 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0] - 2025-11-15
+## [0.7.0] - 2025-11-15
 
 ### Added
 - ODBC connector support for broader database compatibility
 
 ### Fixed
+- Fixed MySQL JSON columns being read as NULL values - now properly extracted as strings
 - Resolved cargo install issues
 - Various minor bug fixes
 
