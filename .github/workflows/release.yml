@@ -18,21 +18,21 @@ jobs:
           # macOS builds (native)
           - target: x86_64-apple-darwin
             os: macos-latest
-            name: tinyetl-macos-intel
+            name: tinyetl-macos-intel-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: tinyetl-macos-apple-silicon
+            name: tinyetl-macos-apple-silicon-aarch64
           # Linux build
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            name: tinyetl-linux-x64
+            name: tinyetl-linux-x86_64
           # Windows builds
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            name: tinyetl-windows-x64
+            name: tinyetl-windows-x86_64
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            name: tinyetl-windows-arm64
+            name: tinyetl-windows-aarch64
 
     steps:
     - name: Checkout code
