@@ -540,16 +540,12 @@ impl Target for MssqlTarget {
 
         let mut total_written = 0;
         
-        // Begin explicit transaction for the entire batch
-        // This dramatically improves performance by reducing commit overhead
-        client.execute("BEGIN TRANSACTION", &[]).await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to begin transaction: {}", e)))?;
-
         // Process rows in larger chunks for better performance
         // SQL Server can handle 1000 rows per INSERT statement efficiently
         let chunk_size = self.max_batch_size.min(1000);
         
-        // Wrap in a closure to handle rollback on error
+        // Process without explicit transaction management - let tiberius handle it
+        // (tiberius uses autocommit by default which is fine for bulk inserts)
         let result = async {
             for chunk in rows.chunks(chunk_size) {
                 // Build the INSERT statement directly to avoid intermediate allocations
@@ -598,19 +594,8 @@ impl Target for MssqlTarget {
             Ok::<usize, TinyEtlError>(total_written)
         }.await;
 
-        // Commit or rollback based on result
-        match result {
-            Ok(count) => {
-                client.execute("COMMIT TRANSACTION", &[]).await
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to commit transaction: {}", e)))?;
-                Ok(count)
-            }
-            Err(e) => {
-                // Attempt rollback on error
-                let _ = client.execute("ROLLBACK TRANSACTION", &[]).await;
-                Err(e)
-            }
-        }
+        // Return result
+        result
     }
 
     async fn finalize(&mut self) -> Result<()> {
