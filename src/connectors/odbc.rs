@@ -341,8 +341,8 @@ pub struct OdbcTarget {
     table_name: String,
     connection: Option<Arc<OdbcConnection>>,
     schema: Option<Schema>,
-    // Performance optimization: Store the last chunk size to avoid re-preparing identical statements
-    last_chunk_size: Option<usize>,
+    // Performance optimization: Track transaction state
+    in_transaction: bool,
 }
 
 impl OdbcTarget {
@@ -354,7 +354,7 @@ impl OdbcTarget {
             table_name,
             connection: None,
             schema: None,
-            last_chunk_size: None,
+            in_transaction: false,
         })
     }
 
@@ -388,6 +388,18 @@ impl Target for OdbcTarget {
     async fn connect(&mut self) -> Result<()> {
         let conn = OdbcConnection::new(&self.connection_string)?;
         self.connection = Some(Arc::new(conn));
+        
+        // PERFORMANCE: Start a single transaction for the entire transfer
+        // This is MUCH faster than committing after each batch
+        let conn_ref = self.connection.as_ref().unwrap();
+        let conn = conn_ref.connection();
+        
+        // Set autocommit off and begin transaction
+        conn.execute("SET IMPLICIT_TRANSACTIONS ON", ())
+            .map_err(|e| TinyEtlError::Connection(format!("Failed to set implicit transactions: {}", e)))?;
+        
+        self.in_transaction = true;
+        
         Ok(())
     }
 
@@ -444,114 +456,102 @@ impl Target for OdbcTarget {
         
         let conn = conn.connection();
         
-        // Begin transaction once for entire batch
-        conn.execute("BEGIN TRANSACTION", ())
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to begin transaction: {}", e)))?;
+        // OPTIMIZATION: NO per-batch transaction!
+        // Transaction is managed at connect() and finalize() level for max performance
         
         // Optimize chunk size - use larger chunks for better performance
         let max_params = 1900;
         let params_per_row = schema.columns.len();
-        let chunk_size = (max_params / params_per_row).max(1).min(500); // Increased from 1000 to 500 for stability
+        let chunk_size = (max_params / params_per_row).max(1).min(500);
         
         let mut total_inserted = 0;
         
-        // OPTIMIZATION: Prepare statement ONCE and reuse it if chunk sizes match
         let column_names = schema.columns.iter()
             .map(|c| format!("[{}]", c.name))
             .collect::<Vec<_>>()
             .join(", ");
         
-        let result = (|| -> Result<usize> {
-            for chunk in rows.chunks(chunk_size) {
-                // OPTIMIZATION: Build all parameter strings first, then create parameter references
-                // This avoids borrow checker issues with mutable/immutable borrows
-                let total_params = chunk.len() * schema.columns.len();
-                let mut param_strings = Vec::with_capacity(total_params);
-                
-                // First pass: collect all string representations
-                for row in chunk {
-                    for col in &schema.columns {
-                        let value = row.get(&col.name).unwrap_or(&Value::Null);
-                        
-                        match value {
-                            Value::Null => {
-                                param_strings.push(None);
-                            }
-                            Value::String(s) => {
-                                param_strings.push(Some(s.clone()));
-                            }
-                            Value::Integer(i) => {
-                                param_strings.push(Some(i.to_string()));
-                            }
-                            Value::Decimal(d) => {
-                                param_strings.push(Some(d.to_string()));
-                            }
-                            Value::Boolean(b) => {
-                                param_strings.push(Some(if *b { "1" } else { "0" }.to_string()));
-                            }
-                            Value::Date(dt) => {
-                                param_strings.push(Some(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
-                            }
+        for chunk in rows.chunks(chunk_size) {
+            // Build all parameter strings first, then create parameter references
+            let total_params = chunk.len() * schema.columns.len();
+            let mut param_strings = Vec::with_capacity(total_params);
+            
+            // First pass: collect all string representations
+            for row in chunk {
+                for col in &schema.columns {
+                    let value = row.get(&col.name).unwrap_or(&Value::Null);
+                    
+                    match value {
+                        Value::Null => {
+                            param_strings.push(None);
+                        }
+                        Value::String(s) => {
+                            param_strings.push(Some(s.clone()));
+                        }
+                        Value::Integer(i) => {
+                            param_strings.push(Some(i.to_string()));
+                        }
+                        Value::Decimal(d) => {
+                            param_strings.push(Some(d.to_string()));
+                        }
+                        Value::Boolean(b) => {
+                            param_strings.push(Some(if *b { "1" } else { "0" }.to_string()));
+                        }
+                        Value::Date(dt) => {
+                            param_strings.push(Some(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
                         }
                     }
                 }
-                
-                // Second pass: create parameter references
-                let mut params = Vec::with_capacity(total_params);
-                for param_str in &param_strings {
-                    match param_str {
-                        Some(s) => params.push(Some(s.as_str()).into_parameter()),
-                        None => params.push(None::<&str>.into_parameter()),
-                    }
+            }
+            
+            // Second pass: create parameter references
+            let mut params = Vec::with_capacity(total_params);
+            for param_str in &param_strings {
+                match param_str {
+                    Some(s) => params.push(Some(s.as_str()).into_parameter()),
+                    None => params.push(None::<&str>.into_parameter()),
                 }
-                
-                // Build INSERT statement for this specific chunk size
-                let single_row_placeholders = schema.columns.iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                
-                let all_value_sets = (0..chunk.len())
-                    .map(|_| format!("({})", single_row_placeholders))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                
-                let insert_sql = format!(
-                    "INSERT INTO [{}] ({}) VALUES {}",
-                    self.table_name, column_names, all_value_sets
-                );
-                
-                // Prepare and execute
-                let mut prepared = conn.prepare(&insert_sql)
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare INSERT: {}", e)))?;
-                
-                prepared.execute(&params[..])
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to insert chunk: {}", e)))?;
-                
-                total_inserted += chunk.len();
             }
-            Ok(total_inserted)
-        })();
-
-        match result {
-            Ok(count) => {
-                conn.execute("COMMIT TRANSACTION", ())
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to commit: {}", e)))?;
-                Ok(count)
-            }
-            Err(e) => {
-                let _ = conn.execute("ROLLBACK TRANSACTION", ());
-                Err(e)
-            }
+            
+            // Build INSERT statement for this specific chunk size
+            let single_row_placeholders = schema.columns.iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            
+            let all_value_sets = (0..chunk.len())
+                .map(|_| format!("({})", single_row_placeholders))
+                .collect::<Vec<_>>()
+                .join(", ");
+            
+            let insert_sql = format!(
+                "INSERT INTO [{}] ({}) VALUES {}",
+                self.table_name, column_names, all_value_sets
+            );
+            
+            // Prepare and execute
+            let mut prepared = conn.prepare(&insert_sql)
+                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare INSERT: {}", e)))?;
+            
+            prepared.execute(&params[..])
+                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to insert chunk: {}", e)))?;
+            
+            total_inserted += chunk.len();
         }
+        
+        Ok(total_inserted)
     }
 
     async fn finalize(&mut self) -> Result<()> {
-        // Commit any pending transactions
-        if let Some(conn) = &self.connection {
-            let conn = conn.connection();
-            conn.commit()
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to commit transaction: {}", e)))?;
+        // PERFORMANCE: Commit the single transaction started in connect()
+        // This commits ALL batches at once for maximum speed
+        if self.in_transaction {
+            if let Some(conn) = &self.connection {
+                let conn = conn.connection();
+                conn.commit()
+                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to commit transaction: {}", e)))?;
+                self.in_transaction = false;
+            }
         }
         Ok(())
     }

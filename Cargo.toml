@@ -40,7 +40,7 @@ reqwest = { version = "0.11", features = ["json", "native-tls"] }
 tempfile = "3.8"
 apache-avro = "0.16"
 rust_decimal = { version = "1.35", features = ["serde", "db-postgres", "db-tokio-postgres"] }
-tiberius = { version = "0.12", default-features = false, features = ["sql-browser-async-std", "chrono"] }
+tiberius = { version = "0.12", features = ["sql-browser-async-std", "chrono"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
