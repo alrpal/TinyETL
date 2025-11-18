@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Example 17: SQLite JSON to Parquet demonstrating JSON column handling
 - Includes preview mode demonstration and round-trip validation
 
+### Fixed
+- Fixed JSON serialization in Parquet writer to output proper JSON strings instead of Rust debug format
+- Fixed `RUST_LOG=debug` environment variable now properly enables debug logging
+
 ## [0.7.0] - 2025-11-15
 
 ### Added
