@@ -257,6 +257,7 @@ impl CsvTarget {
             Value::Decimal(d) => d.to_string(),
             Value::Boolean(b) => b.to_string(),
             Value::Date(dt) => dt.to_rfc3339(),
+            Value::Json(j) => serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string()),
             Value::Null => String::new(),
         }
     }
@@ -307,6 +308,7 @@ impl Target for CsvTarget {
                 Value::Decimal(d) => d.to_string(),
                 Value::Boolean(b) => b.to_string(),
                 Value::Date(dt) => dt.to_rfc3339(),
+                Value::Json(j) => serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string()),
                 Value::Null => String::new(),
             }
         };

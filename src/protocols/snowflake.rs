@@ -415,6 +415,7 @@ impl Target for SnowflakeTarget {
                 DataType::Boolean => "BOOLEAN",
                 DataType::DateTime => "TIMESTAMP",
                 DataType::Date => "DATE",
+                DataType::Json => "VARIANT", // Snowflake native semi-structured data type
                 DataType::Null => "VARCHAR(16777216)", // Default to VARCHAR for null types
             };
             

@@ -333,6 +333,7 @@ impl MssqlTarget {
             DataType::Boolean => "BIT",
             DataType::Date => "DATE",
             DataType::DateTime => "DATETIME2",
+            DataType::Json => "NVARCHAR(MAX)", // MSSQL stores JSON as NVARCHAR
             DataType::Null => "NVARCHAR(MAX)", // Default to string for null type
         }
     }
@@ -398,6 +399,10 @@ impl MssqlTarget {
                 }
             }
             Value::Date(dt) => format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S%.3f")),
+            Value::Json(j) => {
+                let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
+                format!("N'{}'", json_str.replace("'", "''"))
+            }
         }
     }
 
@@ -474,6 +479,18 @@ impl MssqlTarget {
             Value::Date(dt) => {
                 buffer.push('\'');
                 buffer.push_str(&dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
+                buffer.push('\'');
+            }
+            Value::Json(j) => {
+                buffer.push_str("N'");
+                let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
+                for ch in json_str.chars() {
+                    if ch == '\'' {
+                        buffer.push_str("''");
+                    } else {
+                        buffer.push(ch);
+                    }
+                }
                 buffer.push('\'');
             }
         }

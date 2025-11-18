@@ -346,6 +346,7 @@ impl Target for PostgresTarget {
                 DataType::Decimal => "DECIMAL",
                 DataType::Boolean => "BOOLEAN",
                 DataType::Date | DataType::DateTime => "TIMESTAMP WITH TIME ZONE",
+                DataType::Json => "JSONB", // PostgreSQL native JSON type
                 DataType::Null => "TEXT", // Default to TEXT for null columns
             };
             
@@ -433,6 +434,10 @@ impl Target for PostgresTarget {
                         },
                         Value::Boolean(b) => query.bind(b),
                         Value::Date(d) => query.bind(d),
+                        Value::Json(j) => {
+                            // PostgreSQL accepts JSONB directly
+                            query.bind(serde_json::to_value(j).unwrap_or(serde_json::Value::Null))
+                        },
                         Value::Null => query.bind(None::<String>),
                     };
                 }

@@ -301,6 +301,11 @@ impl Transformer {
                 },
                 Value::Boolean(b) => LuaValue::Boolean(*b),
                 Value::Date(dt) => LuaValue::String(self.lua.create_string(&dt.to_rfc3339())?),
+                Value::Json(j) => {
+                    // Convert JSON to Lua string representation
+                    let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
+                    LuaValue::String(self.lua.create_string(&json_str)?)
+                },
                 Value::Null => LuaValue::Nil,
             };
             table.set(key.as_str(), lua_value)?;

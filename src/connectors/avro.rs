@@ -429,6 +429,14 @@ impl AvroTarget {
                         json!({"type": "long", "logicalType": "timestamp-millis"})
                     }
                 },
+                DataType::Json => {
+                    // Avro stores JSON as string
+                    if column.nullable {
+                        json!(["null", "string"])
+                    } else {
+                        json!("string")
+                    }
+                },
                 DataType::Null => json!(["null", "string"]),
             };
 

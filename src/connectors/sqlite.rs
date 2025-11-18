@@ -255,6 +255,7 @@ impl SqliteTarget {
             DataType::Boolean => "INTEGER", // SQLite uses INTEGER for boolean
             DataType::Date => "TEXT",
             DataType::DateTime => "TEXT",
+            DataType::Json => "TEXT", // SQLite stores JSON as TEXT
             DataType::Null => "TEXT",
         }
     }
@@ -380,6 +381,7 @@ impl Target for SqliteTarget {
                         },
                         Value::Boolean(b) => query.bind(*b),
                         Value::Date(dt) => query.bind(dt.to_rfc3339()),
+                        Value::Json(j) => query.bind(serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string())),
                         Value::Null => query.bind(None::<String>),
                     };
                 }

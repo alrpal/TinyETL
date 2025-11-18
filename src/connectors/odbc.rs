@@ -378,6 +378,7 @@ impl OdbcTarget {
             DataType::Boolean => "BIT",
             DataType::Date => "DATE",
             DataType::DateTime => "DATETIME2",  // Use DATETIME2 instead of TIMESTAMP for SQL Server
+            DataType::Json => "NVARCHAR(MAX)", // ODBC/SQL Server stores JSON as NVARCHAR
             DataType::Null => "VARCHAR(255)", // Default to VARCHAR for NULL type
         }
     }
@@ -506,6 +507,10 @@ impl Target for OdbcTarget {
                         }
                         Value::Date(dt) => {
                             param_strings.push(Some(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
+                        }
+                        Value::Json(j) => {
+                            let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
+                            param_strings.push(Some(json_str));
                         }
                     }
                 }

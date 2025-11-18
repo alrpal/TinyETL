@@ -37,6 +37,11 @@ fn insert_with_appender(conn: &Connection, table_name: &str, rows: &[Row], schem
                     let timestamp_str = dt.to_rfc3339();
                     duckdb::types::Value::Text(timestamp_str)
                 },
+                Value::Json(j) => {
+                    // DuckDB can store JSON as text or use JSON type
+                    let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
+                    duckdb::types::Value::Text(json_str)
+                },
                 Value::Null => duckdb::types::Value::Null,
             };
             
@@ -370,6 +375,7 @@ impl DuckdbTarget {
             DataType::Boolean => "BOOLEAN",
             DataType::Date => "DATE",
             DataType::DateTime => "TIMESTAMP",
+            DataType::Json => "JSON", // DuckDB has native JSON type
             DataType::Null => "VARCHAR",
         }
     }

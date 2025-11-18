@@ -173,6 +173,7 @@ impl JsonTarget {
             }
             Value::Boolean(b) => serde_json::Value::Bool(*b),
             Value::Date(dt) => serde_json::Value::String(dt.to_rfc3339()),
+            Value::Json(j) => j.clone(), // Already a JSON value, just clone it
             Value::Null => serde_json::Value::Null,
         }
     }

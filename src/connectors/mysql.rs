@@ -389,6 +389,7 @@ impl MysqlTarget {
             DataType::Boolean => "BOOLEAN",
             DataType::Date => "DATE",
             DataType::DateTime => "DATETIME",
+            DataType::Json => "JSON", // MySQL native JSON type
             DataType::Null => "TEXT",
         }
     }
@@ -444,6 +445,7 @@ impl MysqlTarget {
                     Value::String(s) => query.bind(s),
                     Value::Boolean(b) => query.bind(b),
                     Value::Date(d) => query.bind(d.to_rfc3339()),
+                    Value::Json(j) => query.bind(serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string())),
                     Value::Null => query.bind(None::<String>),
                 };
             }
@@ -850,6 +852,7 @@ mod tests {
                 Value::Boolean(b) => assert!(*b),
                 Value::Null => {}, // Null should be handled
                 Value::Date(_) => {}, // Date should be converted to string
+                Value::Json(_) => {}, // JSON should be handled
             }
         }
     }
