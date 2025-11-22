@@ -316,4 +316,323 @@ hire_year = tonumber(string.sub(row.hire_date, 1, 4))
             .to_string()
             .contains("Environment variable 'MISSING_VAR' not found"));
     }
+
+    // Round-trip tests: CLI args → generate-config → YAML → run config → verify results match direct CLI
+
+    #[test]
+    fn test_round_trip_basic_config() {
+        // Step 1: Create a Config as if it came from CLI args
+        let original_config = Config {
+            source: "input.csv".to_string(),
+            target: "output.json".to_string(),
+            infer_schema: true,
+            schema_file: None,
+            batch_size: 5000,
+            preview: None,
+            dry_run: false,
+            log_level: LogLevel::Info,
+            skip_existing: false,
+            truncate: false,
+            transform: TransformConfig::None,
+            source_type: None,
+            source_secret_id: None,
+            dest_secret_id: None,
+        };
+
+        // Step 2: Convert to YamlConfig (simulate generate-config)
+        let yaml_config = YamlConfig::from_config(original_config.clone());
+
+        // Step 3: Serialize to YAML string
+        let yaml_string = yaml_config.to_yaml_string().unwrap();
+
+        // Verify YAML contains expected content
+        assert!(yaml_string.contains("version: 1"));
+        assert!(yaml_string.contains("uri: input.csv"));
+        assert!(yaml_string.contains("uri: output.json"));
+        assert!(yaml_string.contains("batch_size: 5000"));
+
+        // Step 4: Deserialize from YAML string (simulate run config)
+        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
+
+        // Step 5: Convert back to Config
+        let restored_config = deserialized_yaml.into_config().unwrap();
+
+        // Step 6: Verify all fields match the original
+        assert_eq!(restored_config.source, original_config.source);
+        assert_eq!(restored_config.target, original_config.target);
+        assert_eq!(restored_config.infer_schema, original_config.infer_schema);
+        assert_eq!(restored_config.schema_file, original_config.schema_file);
+        assert_eq!(restored_config.batch_size, original_config.batch_size);
+        assert_eq!(restored_config.preview, original_config.preview);
+        assert_eq!(restored_config.dry_run, original_config.dry_run);
+        assert_eq!(restored_config.log_level, original_config.log_level);
+        assert_eq!(restored_config.skip_existing, original_config.skip_existing);
+        assert_eq!(restored_config.truncate, original_config.truncate);
+        assert_eq!(restored_config.transform, original_config.transform);
+        assert_eq!(restored_config.source_type, original_config.source_type);
+        // Note: source_secret_id and dest_secret_id are not preserved through YAML (by design)
+    }
+
+    #[test]
+    fn test_round_trip_config_with_all_options() {
+        // Step 1: Create a Config with all options set
+        let original_config = Config {
+            source: "https://example.com/data.csv".to_string(),
+            target: "sqlite://output.db#my_table".to_string(),
+            infer_schema: false,
+            schema_file: Some("schema.yaml".to_string()),
+            batch_size: 2000,
+            preview: Some(10),
+            dry_run: true,
+            log_level: LogLevel::Warn,
+            skip_existing: true,
+            truncate: true,
+            transform: TransformConfig::Inline("result = row.value * 2".to_string()),
+            source_type: Some("csv".to_string()),
+            source_secret_id: None, // Not preserved through YAML
+            dest_secret_id: None,   // Not preserved through YAML
+        };
+
+        // Step 2: Convert to YamlConfig
+        let yaml_config = YamlConfig::from_config(original_config.clone());
+
+        // Step 3: Serialize to YAML string
+        let yaml_string = yaml_config.to_yaml_string().unwrap();
+
+        // Verify specific options in YAML
+        assert!(yaml_string.contains("infer_schema: false"));
+        assert!(yaml_string.contains("schema_file: schema.yaml"));
+        assert!(yaml_string.contains("preview: 10"));
+        assert!(yaml_string.contains("dry_run: true"));
+        assert!(yaml_string.contains("log_level: warn"));
+        assert!(yaml_string.contains("skip_existing: true"));
+        assert!(yaml_string.contains("truncate: true"));
+        assert!(yaml_string.contains("source_type: csv"));
+        assert!(yaml_string.contains("type: inline"));
+
+        // Step 4: Deserialize from YAML string
+        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
+
+        // Step 5: Convert back to Config
+        let restored_config = deserialized_yaml.into_config().unwrap();
+
+        // Step 6: Verify all fields match
+        assert_eq!(restored_config.source, original_config.source);
+        assert_eq!(restored_config.target, original_config.target);
+        assert_eq!(restored_config.infer_schema, original_config.infer_schema);
+        assert_eq!(restored_config.schema_file, original_config.schema_file);
+        assert_eq!(restored_config.batch_size, original_config.batch_size);
+        assert_eq!(restored_config.preview, original_config.preview);
+        assert_eq!(restored_config.dry_run, original_config.dry_run);
+        assert_eq!(restored_config.log_level, original_config.log_level);
+        assert_eq!(restored_config.skip_existing, original_config.skip_existing);
+        assert_eq!(restored_config.truncate, original_config.truncate);
+        assert_eq!(restored_config.transform, original_config.transform);
+        assert_eq!(restored_config.source_type, original_config.source_type);
+    }
+
+    #[test]
+    fn test_round_trip_with_transform_file() {
+        // Test with File transform
+        let original_config = Config {
+            source: "data.csv".to_string(),
+            target: "output.db#table".to_string(),
+            infer_schema: true,
+            schema_file: None,
+            batch_size: 10000,
+            preview: None,
+            dry_run: false,
+            log_level: LogLevel::Info,
+            skip_existing: false,
+            truncate: false,
+            transform: TransformConfig::File("transform.lua".to_string()),
+            source_type: None,
+            source_secret_id: None,
+            dest_secret_id: None,
+        };
+
+        let yaml_config = YamlConfig::from_config(original_config.clone());
+        let yaml_string = yaml_config.to_yaml_string().unwrap();
+
+        assert!(yaml_string.contains("type: file"));
+        assert!(yaml_string.contains("value: transform.lua"));
+
+        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
+        let restored_config = deserialized_yaml.into_config().unwrap();
+
+        assert_eq!(restored_config.transform, original_config.transform);
+    }
+
+    #[test]
+    fn test_round_trip_with_transform_script() {
+        // Test with Script transform (multi-line Lua)
+        let script = r#"-- Calculate values
+total = row.price * row.quantity
+discount = total * 0.1"#;
+
+        let original_config = Config {
+            source: "sales.csv".to_string(),
+            target: "processed.json".to_string(),
+            infer_schema: true,
+            schema_file: None,
+            batch_size: 10000,
+            preview: None,
+            dry_run: false,
+            log_level: LogLevel::Info,
+            skip_existing: false,
+            truncate: false,
+            transform: TransformConfig::Script(script.to_string()),
+            source_type: None,
+            source_secret_id: None,
+            dest_secret_id: None,
+        };
+
+        let yaml_config = YamlConfig::from_config(original_config.clone());
+        let yaml_string = yaml_config.to_yaml_string().unwrap();
+
+        assert!(yaml_string.contains("type: script"));
+        assert!(yaml_string.contains("Calculate values"));
+
+        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
+        let restored_config = deserialized_yaml.into_config().unwrap();
+
+        assert_eq!(restored_config.transform, original_config.transform);
+    }
+
+    #[test]
+    fn test_round_trip_with_default_values() {
+        // Test that default values are properly restored
+        let original_config = Config {
+            source: "in.csv".to_string(),
+            target: "out.json".to_string(),
+            ..Config::default()
+        };
+
+        let yaml_config = YamlConfig::from_config(original_config.clone());
+        let yaml_string = yaml_config.to_yaml_string().unwrap();
+        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
+        let restored_config = deserialized_yaml.into_config().unwrap();
+
+        // Verify defaults are preserved
+        assert_eq!(restored_config.infer_schema, true);
+        assert_eq!(restored_config.batch_size, Config::default().batch_size);
+        assert_eq!(restored_config.dry_run, false);
+        assert_eq!(restored_config.log_level, LogLevel::Info);
+        assert_eq!(restored_config.skip_existing, false);
+        assert_eq!(restored_config.truncate, false);
+        assert_eq!(restored_config.transform, TransformConfig::None);
+    }
+
+    #[test]
+    fn test_round_trip_multiple_cycles() {
+        // Test that multiple round-trips don't degrade the data
+        let mut config = Config {
+            source: "input.csv".to_string(),
+            target: "output.db#data".to_string(),
+            infer_schema: false,
+            schema_file: Some("my_schema.yaml".to_string()),
+            batch_size: 7500,
+            preview: Some(25),
+            dry_run: false,
+            log_level: LogLevel::Error,
+            skip_existing: true,
+            truncate: false,
+            transform: TransformConfig::Inline("x = row.a + row.b".to_string()),
+            source_type: Some("json".to_string()),
+            source_secret_id: None,
+            dest_secret_id: None,
+        };
+
+        // Perform 3 round-trips
+        for _ in 0..3 {
+            let yaml_config = YamlConfig::from_config(config.clone());
+            let yaml_string = yaml_config.to_yaml_string().unwrap();
+            let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
+            config = deserialized_yaml.into_config().unwrap();
+        }
+
+        // Verify data is still intact after multiple cycles
+        assert_eq!(config.source, "input.csv");
+        assert_eq!(config.target, "output.db#data");
+        assert_eq!(config.infer_schema, false);
+        assert_eq!(config.schema_file, Some("my_schema.yaml".to_string()));
+        assert_eq!(config.batch_size, 7500);
+        assert_eq!(config.preview, Some(25));
+        assert_eq!(config.log_level, LogLevel::Error);
+        assert_eq!(config.skip_existing, true);
+        assert_eq!(
+            config.transform,
+            TransformConfig::Inline("x = row.a + row.b".to_string())
+        );
+        assert_eq!(config.source_type, Some("json".to_string()));
+    }
+
+    #[test]
+    fn test_round_trip_preserves_special_characters() {
+        // Test that special characters in URIs and other fields are preserved
+        let original_config = Config {
+            source: "postgresql://user:p@ss!w0rd@localhost:5432/db?sslmode=require".to_string(),
+            target: "mysql://admin:s3cr3t#123@remote:3306/database".to_string(),
+            infer_schema: true,
+            schema_file: Some("path/to/my schema file.yaml".to_string()),
+            batch_size: 1000,
+            preview: None,
+            dry_run: false,
+            log_level: LogLevel::Info,
+            skip_existing: false,
+            truncate: false,
+            transform: TransformConfig::Script(
+                "name = row['first-name'] .. ' ' .. row['last-name']".to_string(),
+            ),
+            source_type: None,
+            source_secret_id: None,
+            dest_secret_id: None,
+        };
+
+        let yaml_config = YamlConfig::from_config(original_config.clone());
+        let yaml_string = yaml_config.to_yaml_string().unwrap();
+        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
+        let restored_config = deserialized_yaml.into_config().unwrap();
+
+        assert_eq!(restored_config.source, original_config.source);
+        assert_eq!(restored_config.target, original_config.target);
+        assert_eq!(restored_config.schema_file, original_config.schema_file);
+        assert_eq!(restored_config.transform, original_config.transform);
+    }
+
+    #[test]
+    fn test_round_trip_none_transform_handling() {
+        // Verify that TransformConfig::None properly round-trips
+        let original_config = Config {
+            source: "in.csv".to_string(),
+            target: "out.json".to_string(),
+            infer_schema: true,
+            schema_file: None,
+            batch_size: 10000,
+            preview: None,
+            dry_run: false,
+            log_level: LogLevel::Info,
+            skip_existing: false,
+            truncate: false,
+            transform: TransformConfig::None,
+            source_type: None,
+            source_secret_id: None,
+            dest_secret_id: None,
+        };
+
+        let yaml_config = YamlConfig::from_config(original_config.clone());
+        let yaml_string = yaml_config.to_yaml_string().unwrap();
+
+        // Deserialize and convert back
+        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
+        let restored_config = deserialized_yaml.into_config().unwrap();
+
+        // Should restore as TransformConfig::None
+        assert_eq!(restored_config.transform, TransformConfig::None);
+
+        // Verify all other fields match as well
+        assert_eq!(restored_config.source, original_config.source);
+        assert_eq!(restored_config.target, original_config.target);
+        assert_eq!(restored_config.batch_size, original_config.batch_size);
+    }
 }
