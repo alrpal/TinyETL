@@ -1,11 +1,13 @@
-use clap::{Parser, Subcommand};
 use crate::config::{Config, LogLevel};
 use crate::transformer::TransformConfig;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "tinyetl")]
 #[command(about = "A tiny ETL tool for moving data between sources")]
 #[command(version)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(subcommand_precedence_over_arg = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -76,6 +78,66 @@ pub enum Commands {
         /// Path to the YAML configuration file
         config_file: String,
     },
+    /// Generate a YAML configuration file from CLI arguments and output to STDOUT
+    GenerateConfig {
+        /// Source connection string (file path or connection string)
+        source: String,
+
+        /// Target connection string (file path or connection string)
+        target: String,
+
+        /// Auto-detect columns and types
+        #[arg(long, default_value = "true")]
+        infer_schema: bool,
+
+        /// Path to schema file (YAML) to override auto-detection
+        #[arg(long, value_name = "FILE")]
+        schema_file: Option<String>,
+
+        /// Number of rows per batch
+        #[arg(long, default_value = "10000")]
+        batch_size: usize,
+
+        /// Show first N rows and inferred schema without copying
+        #[arg(long, value_name = "N")]
+        preview: Option<usize>,
+
+        /// Validate source/target without transferring data
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Log level: info, warn, error
+        #[arg(long, default_value = "info")]
+        log_level: LogLevel,
+
+        /// Skip rows already in target if primary key detected
+        #[arg(long)]
+        skip_existing: bool,
+
+        /// Truncate target before writing (overrides append-first behavior)
+        #[arg(long)]
+        truncate: bool,
+
+        /// Path to Lua file containing a 'transform' function
+        #[arg(long, value_name = "FILE")]
+        transform_file: Option<String>,
+
+        /// Inline transformation expressions (semicolon-separated)
+        #[arg(long, value_name = "EXPRESSIONS")]
+        transform: Option<String>,
+
+        /// Force source file type (csv, json, parquet)
+        #[arg(long, value_name = "TYPE")]
+        source_type: Option<String>,
+
+        /// Secret ID for source password (resolves to TINYETL_SECRET_{id})
+        #[arg(long, value_name = "ID")]
+        source_secret_id: Option<String>,
+
+        /// Secret ID for destination password (resolves to TINYETL_SECRET_{id})
+        #[arg(long, value_name = "ID")]
+        dest_secret_id: Option<String>,
+    },
 }
 
 impl Cli {
@@ -84,11 +146,16 @@ impl Cli {
         matches!(self.command, Some(Commands::Run { .. }))
     }
 
+    /// Check if this CLI call is for generating a config file
+    pub fn is_generate_config_mode(&self) -> bool {
+        matches!(self.command, Some(Commands::GenerateConfig { .. }))
+    }
+
     /// Get the config file path if in config mode
     pub fn get_config_file(&self) -> Option<&str> {
         match &self.command {
             Some(Commands::Run { config_file }) => Some(config_file),
-            None => None,
+            _ => None,
         }
     }
 
@@ -141,11 +208,7 @@ mod tests {
 
     #[test]
     fn test_basic_cli_parsing() {
-        let cli = Cli::try_parse_from(&[
-            "tinyetl",
-            "source.csv",
-            "target.db#table"
-        ]).unwrap();
+        let cli = Cli::try_parse_from(&["tinyetl", "source.csv", "target.db#table"]).unwrap();
 
         assert_eq!(cli.source, Some("source.csv".to_string()));
         assert_eq!(cli.target, Some("target.db#table".to_string()));
@@ -159,11 +222,7 @@ mod tests {
 
     #[test]
     fn test_config_file_parsing() {
-        let cli = Cli::try_parse_from(&[
-            "tinyetl",
-            "run",
-            "my_job.yaml"
-        ]).unwrap();
+        let cli = Cli::try_parse_from(&["tinyetl", "run", "my_job.yaml"]).unwrap();
 
         assert!(cli.is_config_mode());
         assert_eq!(cli.get_config_file(), Some("my_job.yaml"));
@@ -176,13 +235,18 @@ mod tests {
             "tinyetl",
             "source.json",
             "target.csv",
-            "--batch-size", "5000",
-            "--preview", "10",
+            "--batch-size",
+            "5000",
+            "--preview",
+            "10",
             "--dry-run",
-            "--log-level", "warn",
+            "--log-level",
+            "warn",
             "--skip-existing",
-            "--source-type", "json"
-        ]).unwrap();
+            "--source-type",
+            "json",
+        ])
+        .unwrap();
 
         assert_eq!(cli.source, Some("source.json".to_string()));
         assert_eq!(cli.target, Some("target.csv".to_string()));
@@ -200,9 +264,12 @@ mod tests {
             "tinyetl",
             "input.csv",
             "output.db#data",
-            "--batch-size", "2000",
-            "--preview", "5"
-        ]).unwrap();
+            "--batch-size",
+            "2000",
+            "--preview",
+            "5",
+        ])
+        .unwrap();
 
         let config: Config = cli.into();
         assert_eq!(config.source, "input.csv");
@@ -216,7 +283,7 @@ mod tests {
         // Should still work without source/target for subcommands
         let result = Cli::try_parse_from(&["tinyetl"]);
         assert!(result.is_ok());
-        
+
         // But should fail when trying to convert to Config without source/target
         let cli = result.unwrap();
         // This would panic when converting to Config, but that's expected behavior
@@ -228,19 +295,22 @@ mod tests {
             "tinyetl",
             "source.csv",
             "target.db",
-            "--log-level", "invalid"
+            "--log-level",
+            "invalid",
         ]);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_http_source_with_type() {
         let cli = Cli::try_parse_from(&[
             "tinyetl",
             "https://example.com/api/data",
             "output.csv",
-            "--source-type", "json"
-        ]).unwrap();
+            "--source-type",
+            "json",
+        ])
+        .unwrap();
 
         assert_eq!(cli.source, Some("https://example.com/api/data".to_string()));
         assert_eq!(cli.target, Some("output.csv".to_string()));

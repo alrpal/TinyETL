@@ -41,6 +41,36 @@ impl YamlConfig {
         Ok(config)
     }
 
+    /// Convert a Config struct to a YamlConfig struct
+    pub fn from_config(config: Config) -> Self {
+        YamlConfig {
+            version: 1,
+            source: SourceOrTargetConfig { uri: config.source },
+            target: SourceOrTargetConfig { uri: config.target },
+            options: Some(OptionsConfig {
+                batch_size: Some(config.batch_size),
+                infer_schema: Some(config.infer_schema),
+                schema_file: config.schema_file,
+                preview: config.preview,
+                dry_run: Some(config.dry_run),
+                log_level: Some(config.log_level),
+                skip_existing: Some(config.skip_existing),
+                truncate: Some(config.truncate),
+                transform: match config.transform {
+                    TransformConfig::None => None,
+                    other => Some(other),
+                },
+                source_type: config.source_type,
+            }),
+        }
+    }
+
+    /// Serialize this YamlConfig to a YAML string
+    pub fn to_yaml_string(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let yaml = serde_yaml::to_string(self)?;
+        Ok(yaml)
+    }
+
     pub fn into_config(self) -> Result<Config, Box<dyn std::error::Error>> {
         // Process environment variable substitution in URIs and other fields
         let source_uri = Self::substitute_env_vars(&self.source.uri)?;
@@ -112,6 +142,12 @@ impl YamlConfig {
         }
 
         Ok(result)
+    }
+}
+
+impl From<Config> for YamlConfig {
+    fn from(config: Config) -> Self {
+        YamlConfig::from_config(config)
     }
 }
 
