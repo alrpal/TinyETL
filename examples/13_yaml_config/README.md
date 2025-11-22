@@ -82,15 +82,14 @@ options:
   infer_schema: true          # Auto-detect column types
   schema_file: "schema.yaml"  # Override with external schema
   preview: 10                 # Show N rows without transfer
-  dry_run: false             # Validate without transferring
-  log_level: "info"          # info, warn, error
-  skip_existing: false       # Skip if target exists
-  truncate: false            # Truncate target before writing
-  transform: |               # Inline Lua transformation
-    -- Your Lua code here
-    new_column = row.existing_column * 2
-  transform_file: "script.lua"  # External transform file
-  source_type: "csv"         # Force source file type
+  dry_run: false              # Validate without transferring
+  log_level: "info"           # info, warn, error
+  skip_existing: false        # Skip if target exists
+  truncate: false             # Truncate target before writing
+  transform: 
+    type: file                # External transform file
+    value: "script.lua"       # Path to Lua file containing a 'transform' function
+  source_type: "csv"          # Force source file type
 ```
 
 ## Environment Variable Examples
@@ -128,10 +127,12 @@ target:
 options:
   batch_size: 1000
   preview: 5
-  transform: |
-    -- Calculate full name and annual salary
-    full_name = row.first_name .. " " .. row.last_name
-    annual_salary = row.monthly_salary * 12
+  transform:
+    type: script
+    value: |
+      -- Calculate full name and annual salary
+      full_name = row.first_name .. " " .. row.last_name
+      annual_salary = row.monthly_salary * 12
 ```
 
 ```bash

@@ -2,35 +2,6 @@ use crate::transformer::TransformConfig;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-// YAML config file structures
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct YamlConfig {
-    pub version: u32,
-    pub source: SourceOrTargetConfig,
-    pub target: SourceOrTargetConfig,
-    pub options: Option<OptionsConfig>,
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-pub struct SourceOrTargetConfig {
-    pub uri: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptionsConfig {
-    pub batch_size: Option<usize>,
-    pub infer_schema: Option<bool>,
-    pub schema_file: Option<String>,
-    pub preview: Option<usize>,
-    pub dry_run: Option<bool>,
-    pub log_level: Option<LogLevel>,
-    pub skip_existing: Option<bool>,
-    pub truncate: Option<bool>,
-    pub transform: Option<String>,
-    pub transform_file: Option<String>,
-    pub source_type: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub source: String,
@@ -47,13 +18,6 @@ pub struct Config {
     pub source_type: Option<String>,
     pub source_secret_id: Option<String>,
     pub dest_secret_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum LogLevel {
-    Info,
-    Warn,
-    Error,
 }
 
 impl Default for Config {
@@ -77,110 +41,12 @@ impl Default for Config {
     }
 }
 
-impl YamlConfig {
-    pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)?;
-        let config: YamlConfig = serde_yaml::from_str(&content)?;
-        Ok(config)
-    }
-
-    pub fn into_config(self) -> Result<Config, Box<dyn std::error::Error>> {
-        // Process environment variable substitution in URIs and other fields
-        let source_uri = Self::substitute_env_vars(&self.source.uri)?;
-        let target_uri = Self::substitute_env_vars(&self.target.uri)?;
-
-        // Handle transform config with env var substitution
-        let transform_config = if let Some(options) = &self.options {
-            match (&options.transform_file, &options.transform) {
-                (Some(file), None) => {
-                    let processed_file = Self::substitute_env_vars(file)?;
-                    TransformConfig::File(processed_file)
-                }
-                (None, Some(script)) => {
-                    let processed_script = Self::substitute_env_vars(script)?;
-                    TransformConfig::Script(processed_script)
-                }
-                (Some(file), Some(_)) => {
-                    eprintln!("Warning: Both transform_file and transform specified. Using transform_file.");
-                    let processed_file = Self::substitute_env_vars(file)?;
-                    TransformConfig::File(processed_file)
-                }
-                (None, None) => TransformConfig::None,
-            }
-        } else {
-            TransformConfig::None
-        };
-
-        let options = self.options.unwrap_or_default();
-
-        // Process schema_file path if present
-        let schema_file = if let Some(ref file) = options.schema_file {
-            Some(Self::substitute_env_vars(file)?)
-        } else {
-            None
-        };
-
-        // Process source_type with env vars if present
-        let source_type = if let Some(ref stype) = options.source_type {
-            Some(Self::substitute_env_vars(stype)?)
-        } else {
-            None
-        };
-
-        Ok(Config {
-            source: source_uri,
-            target: target_uri,
-            infer_schema: options.infer_schema.unwrap_or(true),
-            schema_file,
-            batch_size: options.batch_size.unwrap_or(10_000),
-            preview: options.preview,
-            dry_run: options.dry_run.unwrap_or(false),
-            log_level: options.log_level.unwrap_or(LogLevel::Info),
-            skip_existing: options.skip_existing.unwrap_or(false),
-            truncate: options.truncate.unwrap_or(false),
-            transform: transform_config,
-            source_type,
-            source_secret_id: None, // Not used with config files - env vars are substituted directly
-            dest_secret_id: None, // Not used with config files - env vars are substituted directly
-        })
-    }
-
-    /// Substitute environment variable patterns like ${VAR_NAME} in strings
-    fn substitute_env_vars(input: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let env_var_pattern = Regex::new(r"\$\{([^}]+)\}")?;
-        let mut result = input.to_string();
-
-        for caps in env_var_pattern.captures_iter(input) {
-            if let Some(var_name) = caps.get(1) {
-                let var_name_str = var_name.as_str();
-                let env_value = std::env::var(var_name_str)
-                    .map_err(|_| format!("Environment variable '{}' not found", var_name_str))?;
-
-                let pattern = format!("${{{}}}", var_name_str);
-                result = result.replace(&pattern, &env_value);
-            }
-        }
-
-        Ok(result)
-    }
-}
-
-impl Default for OptionsConfig {
-    fn default() -> Self {
-        Self {
-            batch_size: None,
-            infer_schema: None,
-            schema_file: None,
-            preview: None,
-            dry_run: None,
-            log_level: None,
-            skip_existing: None,
-            truncate: None,
-            transform: None,
-            transform_file: None,
-            source_type: None,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
 }
 
 impl std::fmt::Display for LogLevel {
@@ -234,128 +100,5 @@ mod tests {
         assert_eq!(LogLevel::Info.to_string(), "info");
         assert_eq!(LogLevel::Warn.to_string(), "warn");
         assert_eq!(LogLevel::Error.to_string(), "error");
-    }
-
-    #[test]
-    fn test_env_var_substitution() {
-        // Set test environment variable
-        std::env::set_var("TEST_VAR", "test_value");
-        std::env::set_var("DB_PASSWORD", "secret123");
-
-        // Test simple substitution
-        let result = YamlConfig::substitute_env_vars("${TEST_VAR}").unwrap();
-        assert_eq!(result, "test_value");
-
-        // Test substitution within a string
-        let result =
-            YamlConfig::substitute_env_vars("mysql://user:${DB_PASSWORD}@localhost/db").unwrap();
-        assert_eq!(result, "mysql://user:secret123@localhost/db");
-
-        // Test multiple substitutions
-        let result = YamlConfig::substitute_env_vars("${TEST_VAR}_${DB_PASSWORD}").unwrap();
-        assert_eq!(result, "test_value_secret123");
-
-        // Test no substitution needed
-        let result = YamlConfig::substitute_env_vars("no_env_vars_here").unwrap();
-        assert_eq!(result, "no_env_vars_here");
-
-        // Clean up
-        std::env::remove_var("TEST_VAR");
-        std::env::remove_var("DB_PASSWORD");
-    }
-
-    #[test]
-    fn test_env_var_substitution_missing_var() {
-        let result = YamlConfig::substitute_env_vars("${MISSING_VAR}");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Environment variable 'MISSING_VAR' not found"));
-    }
-
-    #[test]
-    fn test_default_source_or_target_config() {
-        let config = SourceOrTargetConfig::default();
-        assert_eq!(config.uri, String::new());
-    }
-
-    #[test]
-    fn test_serialize_source_or_target_config() {
-        let config = SourceOrTargetConfig {
-            uri: "file://tmp/file.txt".to_string(),
-        };
-
-        let serialized = serde_yaml::to_string(&config).unwrap();
-        assert!(serialized.contains("uri: file://tmp/file.txt"));
-
-        let deserialized: SourceOrTargetConfig = serde_yaml::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.uri, "file://tmp/file.txt");
-    }
-
-    #[test]
-    fn test_yaml_config_serialization_and_deserialization() {
-        let yaml_config = YamlConfig {
-            version: 1,
-            source: SourceOrTargetConfig {
-                uri: "file://source_uri".to_string(),
-            },
-            target: SourceOrTargetConfig {
-                uri: "file://target_uri".to_string(),
-            },
-            options: Some(OptionsConfig {
-                batch_size: Some(5000),
-                infer_schema: Some(true),
-                schema_file: Some("schema.yaml".to_string()),
-                preview: Some(10),
-                dry_run: Some(false),
-                log_level: Some(LogLevel::Warn),
-                skip_existing: Some(true),
-                truncate: Some(false),
-                transform: Some("transform_script".to_string()),
-                transform_file: None,
-                source_type: Some("csv".to_string()),
-            }),
-        };
-
-        let expected_yaml = r#"version: 1
-source:
-  uri: file://source_uri
-target:
-  uri: file://target_uri
-options:
-  batch_size: 5000
-  infer_schema: true
-  schema_file: schema.yaml
-  preview: 10
-  dry_run: false
-  log_level: Warn
-  skip_existing: true
-  truncate: false
-  transform: transform_script
-  transform_file: null
-  source_type: csv
-"#;
-
-        let serialized = serde_yaml::to_string(&yaml_config).unwrap();
-        let deserialized: YamlConfig = serde_yaml::from_str(&serialized).unwrap();
-
-        assert_eq!(serialized, expected_yaml);
-
-        assert_eq!(deserialized.version, 1);
-        assert_eq!(deserialized.source.uri, "file://source_uri");
-        assert_eq!(deserialized.target.uri, "file://target_uri");
-        let options = deserialized.options.unwrap();
-        assert_eq!(options.batch_size.unwrap(), 5000);
-        assert!(options.infer_schema.unwrap());
-        assert_eq!(options.schema_file.unwrap(), "schema.yaml");
-        assert_eq!(options.preview.unwrap(), 10);
-        assert!(!options.dry_run.unwrap());
-        assert_eq!(options.log_level.unwrap(), LogLevel::Warn);
-        assert!(options.skip_existing.unwrap());
-        assert!(!options.truncate.unwrap());
-        assert_eq!(options.transform.unwrap(), "transform_script");
-        assert!(options.transform_file.is_none());
-        assert_eq!(options.source_type.unwrap(), "csv");
     }
 }

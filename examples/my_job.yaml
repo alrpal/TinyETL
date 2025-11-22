@@ -10,7 +10,9 @@ target:
 options:
   batch_size: 50000
   infer_schema: true
-  transform: |
-    profit = row.revenue - row.cost
-    margin = profit / row.revenue
+  transform:
+    type: script
+    value: |
+      profit = row.revenue - row.cost
+      margin = profit / row.revenue
   preview: 10

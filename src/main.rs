@@ -4,10 +4,11 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use tinyetl::{
     cli::Cli,
-    config::{Config, YamlConfig},
+    config::Config,
     connectors::{create_source_from_url_with_type, create_target_from_url},
     secrets::process_connection_string,
     transfer::TransferEngine,
+    yaml_config::YamlConfig,
 };
 
 #[tokio::main]

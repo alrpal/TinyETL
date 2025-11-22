@@ -3,7 +3,7 @@
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/alrpal/tinyetl/actions)
 [![Coverage](https://img.shields.io/badge/coverage-60%25-brightgreen)](https://github.com/alrpal/tinyetl/actions)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/alrpal/tinyetl/releases)
+[![Version](https://img.shields.io/badge/version-0.8.0-blue)](https://github.com/alrpal/tinyetl/releases)
 [![Rust Edition](https://img.shields.io/badge/rust-2021-orange)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
 [![Binary Size](https://img.shields.io/badge/binary-15MB-green)](https://github.com/alrpal/tinyetl/releases)
 
@@ -25,7 +25,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 
 ## Why TinyETL?
 
-✅ **Single 12.5MB binary** — no dependencies, no installation headaches  
+✅ **Single 15 MB binary** — no dependencies, no installation headaches  
 ✅ **180k+ rows/sec streaming** — handles massive datasets efficiently  
 ✅ **Zero configuration** — automatic schema detection and table creation (override with schema and config files in yaml)  
    *Note: Auto-inferred schemas default all columns to nullable for safety*
@@ -576,7 +576,7 @@ Create a YAML file defining your expected schema. Here's the complete format:
 
 **schema.yaml:**
 ```yaml
-fields:
+columns:
   - name: "id"
     type: "Integer"
     nullable: false
@@ -651,7 +651,7 @@ fields:
 
 **Customer Data Schema:**
 ```yaml
-fields:
+columns:
   - name: "customer_id"
     type: "Integer"
     nullable: false
@@ -688,7 +688,7 @@ fields:
 
 **Sales Data Schema:**
 ```yaml
-fields:
+columns:
   - name: "order_id"
     type: "Text"
     nullable: false
@@ -763,30 +763,31 @@ tinyetl run config.yaml
 ### Configuration File Format
 
 ```yaml
-version: 1
+        let yaml_str = r##"version: 1
 
 source:
-  uri: "employees.csv"  # or database connection string
+  uri: "employees.csv"          # or database connection string
 
 target:
   uri: "employees_output.json"  # or database connection string
 
 options:
-  batch_size: 10000           # Number of rows per batch
-  infer_schema: true          # Auto-detect column types
-  schema_file: "schema.yaml"  # Override with external schema
-  preview: 10                 # Show N rows without transfer
-  dry_run: false             # Validate without transferring
-  log_level: "info"          # info, warn, error
-  skip_existing: false       # Skip if target exists
-  truncate: false            # Truncate target before writing
-  transform: |               # Inline Lua transformation
-    -- Calculate derived fields
-    full_name = row.first_name .. " " .. row.last_name
-    annual_salary = row.monthly_salary * 12
-    hire_year = tonumber(string.sub(row.hire_date, 1, 4))
-  transform_file: "script.lua"  # External transform file
-  source_type: "csv"         # Force source file type
+  batch_size: 10000               # Number of rows per batch
+  infer_schema: true              # Auto-detect column types
+  schema_file: "schema path.yaml" # Override with external schema
+  preview: 10                     # Show N rows without transfer
+  dry_run: false                  # Validate without transferring
+  log_level: info                 # info, warn, error (lowercase in YAML)
+  skip_existing: false            # Skip if target exists
+  source_type: "csv"              # Force source file type
+  truncate: false                 # Truncate target before writing
+  transform:                      # Inline Lua script transformation
+    type: script
+    value: |
+      -- Calculate derived fields
+      full_name = row.first_name .. " " .. row.last_name
+      annual_salary = row.monthly_salary * 12
+      hire_year = tonumber(string.sub(row.hire_date, 1, 4))
 ```
 
 ### Environment Variables
@@ -843,7 +844,9 @@ target:
   uri: "analytics.db#processed_orders"
 options:
   truncate: true
-  transform: |
+  transform:
+    type: script
+    value: |
     -- Calculate order totals and profit margins
     total_amount = row.quantity * row.unit_price
     profit_margin = (total_amount - row.cost) / total_amount

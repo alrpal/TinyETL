@@ -13,10 +13,12 @@ options:
   batch_size: 1000
   infer_schema: true
   log_level: "Info"
-  transform: |
-    id = 55555
-    full_name = row.first_name .. " " .. row.last_name
-    annual_salary = row.monthly_salary * 12
-    hire_year = tonumber(string.sub(row.hire_date, 1, 4))
-    current_year = 2024
-    years_service = current_year - hire_year
+  transform:
+    type: script
+    value: |
+      id = 55555
+      full_name = row.first_name .. " " .. row.last_name
+      annual_salary = row.monthly_salary * 12
+      hire_year = tonumber(string.sub(row.hire_date, 1, 4))
+      current_year = 2024
+      years_service = current_year - hire_year
