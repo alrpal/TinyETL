@@ -81,6 +81,7 @@ pub enum Commands {
     /// Generate a default YAML configuration example and output to STDOUT
     GenerateDefaultConfig,
     /// Generate a YAML configuration file from CLI arguments and output to STDOUT
+    #[command(override_usage = "tinyetl generate-config [OPTIONS] <SOURCE> <TARGET>")]
     GenerateConfig {
         /// Source connection string (file path or connection string)
         source: String,
