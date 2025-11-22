@@ -3,7 +3,7 @@
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/alrpal/tinyetl/actions)
 [![Coverage](https://img.shields.io/badge/coverage-60%25-brightgreen)](https://github.com/alrpal/tinyetl/actions)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/alrpal/tinyetl/releases)
+[![Version](https://img.shields.io/badge/version-0.8.0-blue)](https://github.com/alrpal/tinyetl/releases)
 [![Rust Edition](https://img.shields.io/badge/rust-2021-orange)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
 [![Binary Size](https://img.shields.io/badge/binary-15MB-green)](https://github.com/alrpal/tinyetl/releases)
 
@@ -25,7 +25,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 
 ## Why TinyETL?
 
-✅ **Single 12.5MB binary** — no dependencies, no installation headaches  
+✅ **Single 15 MB binary** — no dependencies, no installation headaches  
 ✅ **180k+ rows/sec streaming** — handles massive datasets efficiently  
 ✅ **Zero configuration** — automatic schema detection and table creation (override with schema and config files in yaml)  
    *Note: Auto-inferred schemas default all columns to nullable for safety*
@@ -128,14 +128,10 @@ tinyetl run my_etl_job.yaml
 
 ```
 Usage: tinyetl [OPTIONS] <SOURCE> <TARGET>
-       tinyetl run <CONFIG_FILE>
 
 Direct Transfer:
   <SOURCE>  Source connection string (file path or connection string)
   <TARGET>  Target connection string (file path or connection string)
-
-Config File Mode:
-  run <CONFIG_FILE>  Run ETL job from YAML configuration file
 
 Options:
       --infer-schema             Auto-detect columns and types
@@ -153,6 +149,13 @@ Options:
       --dest-secret-id <ID>      Secret ID for destination password (resolves to TINYETL_SECRET_{id})
   -h, --help                     Print help
   -V, --version                  Print version
+
+Config File Mode:
+  run <CONFIG_FILE>  Run ETL job from YAML configuration file
+  
+Config File Generation Modes:
+  generate-config [OPTIONS] <SOURCE> <TARGET>  Generate a YAML configuration file from CLI arguments and output to STDOUT
+  generate-default-config                      Generate a default YAML configuration example and output to STDOUT
 ```
 
 </div>
@@ -763,30 +766,56 @@ tinyetl run config.yaml
 ### Configuration File Format
 
 ```yaml
+# This is a configuration file for TinyETL.
+# It is in YAML format.
+# Comments start with the '#' character and are ignored.
+# Blank lines are ignored.
+#
+# To use this configuration:
+# 1. Customize this configuration as needed.
+# 2. Save it as 'config.yaml' or with a similar name of your choosing.
+# 3. Use the configuration by running: `tinyetl run config.yaml`.
+#
+# You may generate a configuration file from CLI arguments using:
+# `tinyetl generate-config [OPTIONS] <SOURCE> <TARGET> > config.yaml`
+#
+# Use `${VAR_NAME}` syntax to insert dynamic values from environment variables.
+# For example, to use a database password from an environment variable:
+#   uri: "postgres://user:${DB_PASSWORD}@localhost:5432/dbname"
+
 version: 1
 
 source:
-  uri: "employees.csv"  # or database connection string
+  uri: "employees.csv"            # or database connection string
 
 target:
-  uri: "employees_output.json"  # or database connection string
+  uri: "employees_output.json"    # or database connection string
+
+# The "options" key and all other keys beneath "options" can be omitted.
+# Sensible default values will be used for omitted keys.
 
 options:
-  batch_size: 10000           # Number of rows per batch
-  infer_schema: true          # Auto-detect column types
-  schema_file: "schema.yaml"  # Override with external schema
-  preview: 10                 # Show N rows without transfer
-  dry_run: false             # Validate without transferring
-  log_level: "info"          # info, warn, error
-  skip_existing: false       # Skip if target exists
-  truncate: false            # Truncate target before writing
-  transform: |               # Inline Lua transformation
-    -- Calculate derived fields
-    full_name = row.first_name .. " " .. row.last_name
-    annual_salary = row.monthly_salary * 12
-    hire_year = tonumber(string.sub(row.hire_date, 1, 4))
-  transform_file: "script.lua"  # External transform file
-  source_type: "csv"         # Force source file type
+  batch_size: 10000               # Number of rows per batch
+  infer_schema: true              # Auto-detect column types
+  schema_file: "schema path.yaml" # Override with external schema
+  preview: 10                     # Show N rows without transfer
+  dry_run: false                  # Validate without transferring
+  log_level: info                 # info, warn, error (lowercase in YAML)
+  skip_existing: false            # Skip if target exists
+  source_type: "csv"              # Force source file type
+  truncate: false                 # Truncate target before writing
+  transform:                      # Inline Lua script transformation
+    type: script
+    value: |
+      -- Calculate derived fields
+      full_name = row.first_name .. " " .. row.last_name
+      annual_salary = row.monthly_salary * 12
+      hire_year = tonumber(string.sub(row.hire_date, 1, 4))
+
+# The "transform" key can also specify a Lua script file, as follows:
+#  transform:
+#    type: file
+#    value: "transform.lua"
 ```
 
 ### Environment Variables
@@ -843,18 +872,19 @@ target:
   uri: "analytics.db#processed_orders"
 options:
   truncate: true
-  transform: |
-    -- Calculate order totals and profit margins
-    total_amount = row.quantity * row.unit_price
-    profit_margin = (total_amount - row.cost) / total_amount
-    order_year = tonumber(string.sub(row.order_date, 1, 4))
+  transform:
+    type: script
+    value: |
+      -- Calculate order totals and profit margins
+      total_amount = row.quantity * row.unit_price
+      profit_margin = (total_amount - row.cost) / total_amount
+      order_year = tonumber(string.sub(row.order_date, 1, 4))
 ```
 
 Run any configuration file with:
 ```bash
 tinyetl run my_job.yaml
 ```
-
 
 #### Command Examples
 

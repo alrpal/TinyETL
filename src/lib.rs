@@ -1,12 +1,13 @@
 pub mod cli;
 pub mod config;
 pub mod connectors;
-pub mod protocols;
 pub mod date_parser;
 pub mod error;
+pub mod protocols;
 pub mod schema;
 pub mod secrets;
 pub mod transfer;
 pub mod transformer;
+pub mod yaml_config;
 
-pub use error::{TinyEtlError, Result};
+pub use error::{Result, TinyEtlError};
