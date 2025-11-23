@@ -578,7 +578,7 @@ years_service = current_year - hire_year
         let mut transformer = Transformer::new(&config).unwrap();
 
         let row = HashMap::new();
-        let result = transformer.transform_batch(&[row]).unwrap();
+        let _result = transformer.transform_batch(&[row]).unwrap();
 
         let schema = transformer.get_inferred_schema().unwrap();
         assert_eq!(schema.columns.len(), 2);

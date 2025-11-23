@@ -218,7 +218,6 @@ mod tests {
         assert!(result.is_ok());
 
         // But should fail when trying to convert to Config without source/target
-        let cli = result.unwrap();
         // This would panic when converting to Config, but that's expected behavior
     }
 

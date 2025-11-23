@@ -91,18 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    use std::io::Write;
     use std::process::Command;
     use tempfile::NamedTempFile;
-
-    fn create_test_csv_file() -> Result<NamedTempFile, Box<dyn std::error::Error>> {
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "id,name,age")?;
-        writeln!(temp_file, "1,John,30")?;
-        writeln!(temp_file, "2,Jane,25")?;
-        temp_file.flush()?;
-        Ok(temp_file)
-    }
 
     #[test]
     fn test_main_function_exists() {

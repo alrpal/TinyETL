@@ -659,7 +659,6 @@ impl Target for AvroTarget {
 mod tests {
     use super::*;
     use chrono::DateTime;
-    use std::io::Write;
     use tempfile::NamedTempFile;
 
     fn create_test_avro_file() -> Result<NamedTempFile> {

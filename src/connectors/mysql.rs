@@ -820,9 +820,6 @@ mod tests {
 
     #[test]
     fn test_write_batch_empty_rows() {
-        // Test behavior with empty row slice
-        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
-
         // Can't actually test the async method without a DB, but we can test the logic
         let rows: &[Row] = &[];
         assert!(rows.is_empty());
