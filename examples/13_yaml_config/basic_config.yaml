@@ -12,7 +12,7 @@ target:
 options:
   batch_size: 1000
   infer_schema: true
-  log_level: "Info"
+  log_level: "info"
   transform:
     type: script
     value: |
