@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
 use crate::transformer::TransformConfig;
-use std::collections::HashMap;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // YAML config file structures
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +53,7 @@ pub struct Config {
     pub log_level: LogLevel,
     pub skip_existing: bool,
     pub truncate: bool,
-    #[serde(skip)]  // Skip serialization as TransformConfig doesn't implement Serialize
+    #[serde(skip)] // Skip serialization as TransformConfig doesn't implement Serialize
     pub transform: TransformConfig,
     pub source_type: Option<String>,
     pub source_secret_id: Option<String>,
@@ -74,7 +74,7 @@ impl Default for Config {
             target: String::new(),
             infer_schema: true,
             schema_file: None,
-            batch_size: 1_000,  // Reduced from 10k to 1k for better memory usage with transactions
+            batch_size: 1_000, // Reduced from 10k to 1k for better memory usage with transactions
             preview: None,
             dry_run: false,
             log_level: LogLevel::Info,
@@ -106,11 +106,11 @@ impl YamlConfig {
                 (Some(file), None) => {
                     let processed_file = Self::substitute_env_vars(file)?;
                     TransformConfig::File(processed_file)
-                },
+                }
                 (None, Some(script)) => {
                     let processed_script = Self::substitute_env_vars(script)?;
                     TransformConfig::Script(processed_script)
-                },
+                }
                 (Some(file), Some(_)) => {
                     eprintln!("Warning: Both transform_file and transform specified. Using transform_file.");
                     let processed_file = Self::substitute_env_vars(file)?;
@@ -152,7 +152,7 @@ impl YamlConfig {
             transform: transform_config,
             source_type,
             source_secret_id: None, // Not used with config files - env vars are substituted directly
-            dest_secret_id: None,   // Not used with config files - env vars are substituted directly
+            dest_secret_id: None, // Not used with config files - env vars are substituted directly
         })
     }
 
@@ -160,18 +160,18 @@ impl YamlConfig {
     fn substitute_env_vars(input: &str) -> Result<String, Box<dyn std::error::Error>> {
         let env_var_pattern = Regex::new(r"\$\{([^}]+)\}")?;
         let mut result = input.to_string();
-        
+
         for caps in env_var_pattern.captures_iter(input) {
             if let Some(var_name) = caps.get(1) {
                 let var_name_str = var_name.as_str();
                 let env_value = std::env::var(var_name_str)
                     .map_err(|_| format!("Environment variable '{}' not found", var_name_str))?;
-                
+
                 let pattern = format!("${{{}}}", var_name_str);
                 result = result.replace(&pattern, &env_value);
             }
         }
-        
+
         Ok(result)
     }
 }
@@ -206,7 +206,7 @@ impl std::fmt::Display for LogLevel {
 
 impl std::str::FromStr for LogLevel {
     type Err = &'static str;
-    
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "info" => Ok(LogLevel::Info),
@@ -220,7 +220,7 @@ impl std::str::FromStr for LogLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_default_config() {
         let config = Config::default();
@@ -231,7 +231,7 @@ mod tests {
         assert!(!config.truncate);
         assert!(matches!(config.log_level, LogLevel::Info));
     }
-    
+
     #[test]
     fn test_log_level_parsing() {
         assert!(matches!("info".parse::<LogLevel>(), Ok(LogLevel::Info)));
@@ -239,7 +239,7 @@ mod tests {
         assert!(matches!("Error".parse::<LogLevel>(), Ok(LogLevel::Error)));
         assert!("invalid".parse::<LogLevel>().is_err());
     }
-    
+
     #[test]
     fn test_log_level_display() {
         assert_eq!(LogLevel::Info.to_string(), "info");
@@ -252,23 +252,24 @@ mod tests {
         // Set test environment variable
         std::env::set_var("TEST_VAR", "test_value");
         std::env::set_var("DB_PASSWORD", "secret123");
-        
+
         // Test simple substitution
         let result = YamlConfig::substitute_env_vars("${TEST_VAR}").unwrap();
         assert_eq!(result, "test_value");
-        
+
         // Test substitution within a string
-        let result = YamlConfig::substitute_env_vars("mysql://user:${DB_PASSWORD}@localhost/db").unwrap();
+        let result =
+            YamlConfig::substitute_env_vars("mysql://user:${DB_PASSWORD}@localhost/db").unwrap();
         assert_eq!(result, "mysql://user:secret123@localhost/db");
-        
+
         // Test multiple substitutions
         let result = YamlConfig::substitute_env_vars("${TEST_VAR}_${DB_PASSWORD}").unwrap();
         assert_eq!(result, "test_value_secret123");
-        
+
         // Test no substitution needed
         let result = YamlConfig::substitute_env_vars("no_env_vars_here").unwrap();
         assert_eq!(result, "no_env_vars_here");
-        
+
         // Clean up
         std::env::remove_var("TEST_VAR");
         std::env::remove_var("DB_PASSWORD");
@@ -278,6 +279,9 @@ mod tests {
     fn test_env_var_substitution_missing_var() {
         let result = YamlConfig::substitute_env_vars("${MISSING_VAR}");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Environment variable 'MISSING_VAR' not found"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Environment variable 'MISSING_VAR' not found"));
     }
 }

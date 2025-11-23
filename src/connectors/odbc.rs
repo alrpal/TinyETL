@@ -1,16 +1,16 @@
 use async_trait::async_trait;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use odbc_api::{
-    Environment, Connection, Cursor, ConnectionOptions, ResultSetMetadata, IntoParameter,
-    handles::ColumnDescription,
+    handles::ColumnDescription, Connection, ConnectionOptions, Cursor, Environment, IntoParameter,
+    ResultSetMetadata,
 };
 use rust_decimal::Decimal;
-use chrono::{DateTime, Utc, NaiveDateTime};
 use std::sync::Arc;
 
 use crate::{
-    Result, TinyEtlError,
-    schema::{Schema, Row, Value, Column, DataType},
     connectors::{Source, Target},
+    schema::{Column, DataType, Row, Schema, Value},
+    Result, TinyEtlError,
 };
 
 /// Wrapper that keeps Environment and Connection together with proper lifetimes
@@ -23,25 +23,32 @@ struct OdbcConnection {
 
 impl OdbcConnection {
     fn new(connection_string: &str) -> Result<Self> {
-        let env = Environment::new()
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to create ODBC environment: {}", e)))?;
-        
+        let env = Environment::new().map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to create ODBC environment: {}", e))
+        })?;
+
         let env = Arc::new(env);
-        
+
         // Create connection with proper lifetime management
         let connection = unsafe {
             let env_ref: &'static Environment = std::mem::transmute(env.as_ref());
-            let conn = env_ref.connect_with_connection_string(connection_string, ConnectionOptions::default())
-                .map_err(|e| TinyEtlError::Connection(format!("Failed to connect to ODBC data source: {}", e)))?;
+            let conn = env_ref
+                .connect_with_connection_string(connection_string, ConnectionOptions::default())
+                .map_err(|e| {
+                    TinyEtlError::Connection(format!(
+                        "Failed to connect to ODBC data source: {}",
+                        e
+                    ))
+                })?;
             Box::into_raw(Box::new(conn))
         };
-        
+
         Ok(Self {
             _env: env,
             connection,
         })
     }
-    
+
     fn connection(&self) -> &Connection<'static> {
         unsafe { &*self.connection }
     }
@@ -78,7 +85,7 @@ pub struct OdbcSource {
 impl OdbcSource {
     pub fn new(connection_string: &str) -> Result<Self> {
         let (conn_str, table_name) = Self::parse_connection_string(connection_string)?;
-        
+
         Ok(Self {
             connection_string: conn_str,
             table_name,
@@ -93,35 +100,43 @@ impl OdbcSource {
     fn parse_connection_string(connection_string: &str) -> Result<(String, String)> {
         // Format: odbc://DSN=MyDataSource;UID=user;PWD=pass#table
         // or: odbc://Driver={SQL Server};Server=localhost;Database=mydb;UID=user;PWD=pass#table
-        
+
         let connection_string = connection_string.trim_start_matches("odbc://");
-        
+
         if let Some((conn_part, table_part)) = connection_string.split_once('#') {
             Ok((conn_part.to_string(), table_part.to_string()))
         } else {
             Err(TinyEtlError::Configuration(
-                "ODBC source requires table specification: odbc://connection_string#table".to_string()
+                "ODBC source requires table specification: odbc://connection_string#table"
+                    .to_string(),
             ))
         }
     }
 
     fn map_odbc_type_to_datatype(col_desc: &ColumnDescription) -> DataType {
         use odbc_api::DataType as OdbcDataType;
-        
+
         match &col_desc.data_type {
             OdbcDataType::Unknown => DataType::String,
-            OdbcDataType::Char { .. } | OdbcDataType::Varchar { .. } | 
-            OdbcDataType::WChar { .. } | OdbcDataType::WVarchar { .. } | 
-            OdbcDataType::LongVarchar { .. } => DataType::String,
+            OdbcDataType::Char { .. }
+            | OdbcDataType::Varchar { .. }
+            | OdbcDataType::WChar { .. }
+            | OdbcDataType::WVarchar { .. }
+            | OdbcDataType::LongVarchar { .. } => DataType::String,
             OdbcDataType::Decimal { .. } | OdbcDataType::Numeric { .. } => DataType::Decimal,
-            OdbcDataType::SmallInt | OdbcDataType::Integer | OdbcDataType::TinyInt |
-            OdbcDataType::BigInt => DataType::Integer,
-            OdbcDataType::Real | OdbcDataType::Float { .. } | OdbcDataType::Double => DataType::Decimal,
+            OdbcDataType::SmallInt
+            | OdbcDataType::Integer
+            | OdbcDataType::TinyInt
+            | OdbcDataType::BigInt => DataType::Integer,
+            OdbcDataType::Real | OdbcDataType::Float { .. } | OdbcDataType::Double => {
+                DataType::Decimal
+            }
             OdbcDataType::Bit => DataType::Boolean,
             OdbcDataType::Date => DataType::Date,
             OdbcDataType::Time { .. } | OdbcDataType::Timestamp { .. } => DataType::DateTime,
-            OdbcDataType::Binary { .. } | OdbcDataType::Varbinary { .. } | 
-            OdbcDataType::LongVarbinary { .. } => DataType::String,
+            OdbcDataType::Binary { .. }
+            | OdbcDataType::Varbinary { .. }
+            | OdbcDataType::LongVarbinary { .. } => DataType::String,
             OdbcDataType::Other { .. } => DataType::String,
         }
     }
@@ -140,37 +155,46 @@ impl Source for OdbcSource {
             self.connect().await?;
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("ODBC connection not established".to_string()))?;
-        
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            TinyEtlError::Connection("ODBC connection not established".to_string())
+        })?;
+
         let conn = conn.connection();
-        
+
         // Query to get column metadata - fetch a single row to infer schema
         // Use quoted identifier for table name
         let query = format!("SELECT * FROM [{}] WHERE 1=0", self.table_name);
-        
-        let cursor = conn.execute(&query, ())
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to query table metadata: {}", e)))?
-            .ok_or_else(|| TinyEtlError::DataTransfer("No cursor returned for metadata query".to_string()))?;
-        
+
+        let cursor = conn
+            .execute(&query, ())
+            .map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to query table metadata: {}", e))
+            })?
+            .ok_or_else(|| {
+                TinyEtlError::DataTransfer("No cursor returned for metadata query".to_string())
+            })?;
+
         let mut cursor = cursor;
-        let num_cols = cursor.num_result_cols()
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to get column count: {}", e)))?;
-        
+        let num_cols = cursor.num_result_cols().map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to get column count: {}", e))
+        })?;
+
         let mut columns = Vec::new();
         let mut pk_candidate = None;
-        
+
         for i in 1..=num_cols {
             let mut col_desc = ColumnDescription::default();
-            cursor.describe_col(i as u16, &mut col_desc)
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to describe column {}: {}", i, e)))?;
-            
-            let name = col_desc.name_to_string()
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to get column name: {}", e)))?;
-            
+            cursor.describe_col(i as u16, &mut col_desc).map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to describe column {}: {}", i, e))
+            })?;
+
+            let name = col_desc.name_to_string().map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to get column name: {}", e))
+            })?;
+
             let data_type = Self::map_odbc_type_to_datatype(&col_desc);
             let nullable = col_desc.nullability == odbc_api::Nullability::Nullable;
-            
+
             // Try to identify a primary key candidate for optimized pagination
             // Look for common PK patterns: id, *_id, *Id columns that are integers and not nullable
             if pk_candidate.is_none() && !nullable && matches!(data_type, DataType::Integer) {
@@ -179,18 +203,18 @@ impl Source for OdbcSource {
                     pk_candidate = Some(name.clone());
                 }
             }
-            
+
             columns.push(Column {
                 name,
                 data_type,
                 nullable,
             });
         }
-        
+
         // Store PK candidate for optimized reads
         self.pk_column = pk_candidate.clone();
-        
-        Ok(Schema { 
+
+        Ok(Schema {
             columns,
             estimated_rows: None,
             primary_key_candidate: pk_candidate,
@@ -202,11 +226,12 @@ impl Source for OdbcSource {
             self.connect().await?;
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("ODBC connection not established".to_string()))?;
-        
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            TinyEtlError::Connection("ODBC connection not established".to_string())
+        })?;
+
         let conn = conn.connection();
-        
+
         // PERFORMANCE OPTIMIZATION: Use cursor-based pagination with PK if available
         // This is MUCH faster than OFFSET for large tables (O(1) vs O(n))
         let query = if let Some(pk_col) = &self.pk_column {
@@ -231,91 +256,103 @@ impl Source for OdbcSource {
                 self.table_name, self.current_offset, batch_size
             )
         };
-        
-        let mut cursor = match conn.execute(&query, ())
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))? {
+
+        let mut cursor = match conn
+            .execute(&query, ())
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))?
+        {
             Some(c) => c,
             None => return Ok(Vec::new()),
         };
-        
-        let num_cols = cursor.num_result_cols()
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to get column count: {}", e)))?;
-        
+
+        let num_cols = cursor.num_result_cols().map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to get column count: {}", e))
+        })?;
+
         // Get column names and types
         let mut col_info = Vec::new();
         let mut pk_col_idx = None;
-        
+
         for i in 1..=num_cols {
             let mut col_desc = ColumnDescription::default();
-            cursor.describe_col(i as u16, &mut col_desc)
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to describe column {}: {}", i, e)))?;
-            
-            let name = col_desc.name_to_string()
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to get column name: {}", e)))?;
-            
+            cursor.describe_col(i as u16, &mut col_desc).map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to describe column {}: {}", i, e))
+            })?;
+
+            let name = col_desc.name_to_string().map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to get column name: {}", e))
+            })?;
+
             // Track PK column index for cursor updates
             if let Some(pk_col) = &self.pk_column {
                 if &name == pk_col {
                     pk_col_idx = Some(i as u16);
                 }
             }
-            
+
             col_info.push((name, i as u16));
         }
-        
+
         // PERFORMANCE OPTIMIZATION: Reuse a single buffer for all text reads
         // This eliminates allocating 4KB per column per row
         let mut text_buffer = vec![0u8; 8192]; // Larger buffer for better performance
-        
+
         // Fetch rows one by one
         let mut rows = Vec::new();
-        
-        while let Some(mut row_cursor) = cursor.next_row()
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch row: {}", e)))? {
-            
+
+        while let Some(mut row_cursor) = cursor
+            .next_row()
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch row: {}", e)))?
+        {
             if rows.len() >= batch_size {
                 break;
             }
-            
+
             let mut row = Row::new();
             let mut pk_value = None;
-            
+
             for (col_name, col_idx) in &col_info {
                 // Reuse buffer for text reading
                 text_buffer.clear();
                 text_buffer.resize(8192, 0);
-                
-                let is_non_null = row_cursor.get_text(*col_idx, &mut text_buffer)
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to get column value: {}", e)))?;
-                
+
+                let is_non_null = row_cursor
+                    .get_text(*col_idx, &mut text_buffer)
+                    .map_err(|e| {
+                        TinyEtlError::DataTransfer(format!("Failed to get column value: {}", e))
+                    })?;
+
                 let value = if is_non_null {
                     // Convert buffer to string - find the null terminator
-                    let end = text_buffer.iter().position(|&b| b == 0).unwrap_or(text_buffer.len());
+                    let end = text_buffer
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(text_buffer.len());
                     let text = String::from_utf8_lossy(&text_buffer[..end]).to_string();
-                    
+
                     // Track PK value for next cursor iteration
                     if Some(*col_idx) == pk_col_idx {
                         pk_value = Some(text.clone());
                     }
-                    
+
                     Value::String(text)
                 } else {
                     Value::Null
                 };
-                
+
                 row.insert(col_name.clone(), value);
             }
-            
+
             // Update last PK value for cursor-based pagination
             if let Some(val) = pk_value {
                 self.last_pk_value = Some(val);
             }
-            
+
             rows.push(row);
         }
-        
+
         self.current_offset += rows.len();
-        
+
         Ok(rows)
     }
 
@@ -348,7 +385,7 @@ pub struct OdbcTarget {
 impl OdbcTarget {
     pub fn new(connection_string: &str) -> Result<Self> {
         let (conn_str, table_name) = Self::parse_connection_string(connection_string)?;
-        
+
         Ok(Self {
             connection_string: conn_str,
             table_name,
@@ -360,12 +397,13 @@ impl OdbcTarget {
 
     fn parse_connection_string(connection_string: &str) -> Result<(String, String)> {
         let connection_string = connection_string.trim_start_matches("odbc://");
-        
+
         if let Some((conn_part, table_part)) = connection_string.split_once('#') {
             Ok((conn_part.to_string(), table_part.to_string()))
         } else {
             Err(TinyEtlError::Configuration(
-                "ODBC target requires table specification: odbc://connection_string#table".to_string()
+                "ODBC target requires table specification: odbc://connection_string#table"
+                    .to_string(),
             ))
         }
     }
@@ -377,9 +415,9 @@ impl OdbcTarget {
             DataType::Decimal => "DECIMAL(18,4)",
             DataType::Boolean => "BIT",
             DataType::Date => "DATE",
-            DataType::DateTime => "DATETIME2",  // Use DATETIME2 instead of TIMESTAMP for SQL Server
+            DataType::DateTime => "DATETIME2", // Use DATETIME2 instead of TIMESTAMP for SQL Server
             DataType::Json => "NVARCHAR(MAX)", // ODBC/SQL Server stores JSON as NVARCHAR
-            DataType::Null => "VARCHAR(255)", // Default to VARCHAR for NULL type
+            DataType::Null => "VARCHAR(255)",  // Default to VARCHAR for NULL type
         }
     }
 }
@@ -389,18 +427,20 @@ impl Target for OdbcTarget {
     async fn connect(&mut self) -> Result<()> {
         let conn = OdbcConnection::new(&self.connection_string)?;
         self.connection = Some(Arc::new(conn));
-        
+
         // PERFORMANCE: Start a single transaction for the entire transfer
         // This is MUCH faster than committing after each batch
         let conn_ref = self.connection.as_ref().unwrap();
         let conn = conn_ref.connection();
-        
+
         // Set autocommit off and begin transaction
         conn.execute("SET IMPLICIT_TRANSACTIONS ON", ())
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to set implicit transactions: {}", e)))?;
-        
+            .map_err(|e| {
+                TinyEtlError::Connection(format!("Failed to set implicit transactions: {}", e))
+            })?;
+
         self.in_transaction = true;
-        
+
         Ok(())
     }
 
@@ -409,41 +449,43 @@ impl Target for OdbcTarget {
             self.connect().await?;
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("ODBC connection not established".to_string()))?;
-        
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            TinyEtlError::Connection("ODBC connection not established".to_string())
+        })?;
+
         let conn = conn.connection();
-        
+
         // Check if table already exists
         let check_query = format!("SELECT 1 FROM [{}] WHERE 1=0", table_name);
         let table_exists = conn.execute(&check_query, ()).is_ok();
-        
+
         if !table_exists {
             // Build CREATE TABLE statement with proper identifier quoting for SQL Server
             let mut create_sql = format!("CREATE TABLE [{}] (", table_name);
-            
+
             for (i, col) in schema.columns.iter().enumerate() {
                 if i > 0 {
                     create_sql.push_str(", ");
                 }
-                
+
                 let sql_type = self.map_datatype_to_sql(&col.data_type);
                 let nullable = if col.nullable { "" } else { " NOT NULL" };
-                
+
                 // Quote column names with square brackets for SQL Server
                 create_sql.push_str(&format!("[{}] {}{}", col.name, sql_type, nullable));
             }
-            
+
             create_sql.push(')');
-            
+
             // Execute CREATE TABLE
-            conn.execute(&create_sql, ())
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to create table: {}", e)))?;
+            conn.execute(&create_sql, ()).map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to create table: {}", e))
+            })?;
         }
-        
+
         // Always set the schema regardless of whether table was created
         self.schema = Some(schema.clone());
-        
+
         Ok(())
     }
 
@@ -456,39 +498,43 @@ impl Target for OdbcTarget {
             self.connect().await?;
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("ODBC connection not established".to_string()))?;
-        
-        let schema = self.schema.as_ref()
-            .ok_or_else(|| TinyEtlError::Configuration("Schema not set for ODBC target".to_string()))?;
-        
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            TinyEtlError::Connection("ODBC connection not established".to_string())
+        })?;
+
+        let schema = self.schema.as_ref().ok_or_else(|| {
+            TinyEtlError::Configuration("Schema not set for ODBC target".to_string())
+        })?;
+
         let conn = conn.connection();
-        
+
         // OPTIMIZATION: NO per-batch transaction!
         // Transaction is managed at connect() and finalize() level for max performance
-        
+
         // Optimize chunk size - use larger chunks for better performance
         let max_params = 1900;
         let params_per_row = schema.columns.len();
         let chunk_size = (max_params / params_per_row).max(1).min(500);
-        
+
         let mut total_inserted = 0;
-        
-        let column_names = schema.columns.iter()
+
+        let column_names = schema
+            .columns
+            .iter()
             .map(|c| format!("[{}]", c.name))
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         for chunk in rows.chunks(chunk_size) {
             // Build all parameter strings first, then create parameter references
             let total_params = chunk.len() * schema.columns.len();
             let mut param_strings = Vec::with_capacity(total_params);
-            
+
             // First pass: collect all string representations
             for row in chunk {
                 for col in &schema.columns {
                     let value = row.get(&col.name).unwrap_or(&Value::Null);
-                    
+
                     match value {
                         Value::Null => {
                             param_strings.push(None);
@@ -509,13 +555,14 @@ impl Target for OdbcTarget {
                             param_strings.push(Some(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
                         }
                         Value::Json(j) => {
-                            let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
+                            let json_str =
+                                serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
                             param_strings.push(Some(json_str));
                         }
                     }
                 }
             }
-            
+
             // Second pass: create parameter references
             let mut params = Vec::with_capacity(total_params);
             for param_str in &param_strings {
@@ -524,33 +571,37 @@ impl Target for OdbcTarget {
                     None => params.push(None::<&str>.into_parameter()),
                 }
             }
-            
+
             // Build INSERT statement for this specific chunk size
-            let single_row_placeholders = schema.columns.iter()
+            let single_row_placeholders = schema
+                .columns
+                .iter()
                 .map(|_| "?")
                 .collect::<Vec<_>>()
                 .join(", ");
-            
+
             let all_value_sets = (0..chunk.len())
                 .map(|_| format!("({})", single_row_placeholders))
                 .collect::<Vec<_>>()
                 .join(", ");
-            
+
             let insert_sql = format!(
                 "INSERT INTO [{}] ({}) VALUES {}",
                 self.table_name, column_names, all_value_sets
             );
-            
+
             // Prepare and execute
-            let mut prepared = conn.prepare(&insert_sql)
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare INSERT: {}", e)))?;
-            
-            prepared.execute(&params[..])
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to insert chunk: {}", e)))?;
-            
+            let mut prepared = conn.prepare(&insert_sql).map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to prepare INSERT: {}", e))
+            })?;
+
+            prepared.execute(&params[..]).map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to insert chunk: {}", e))
+            })?;
+
             total_inserted += chunk.len();
         }
-        
+
         Ok(total_inserted)
     }
 
@@ -560,8 +611,9 @@ impl Target for OdbcTarget {
         if self.in_transaction {
             if let Some(conn) = &self.connection {
                 let conn = conn.connection();
-                conn.commit()
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to commit transaction: {}", e)))?;
+                conn.commit().map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to commit transaction: {}", e))
+                })?;
                 self.in_transaction = false;
             }
         }
@@ -573,15 +625,16 @@ impl Target for OdbcTarget {
             return Ok(false);
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("ODBC connection not established".to_string()))?;
-        
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            TinyEtlError::Connection("ODBC connection not established".to_string())
+        })?;
+
         let conn = conn.connection();
-        
+
         // Try to query the table - if it fails, it doesn't exist
         let query = format!("SELECT 1 FROM [{}] WHERE 1=0", table_name);
         let result = conn.execute(&query, ());
-        
+
         match result {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
@@ -593,16 +646,17 @@ impl Target for OdbcTarget {
             self.connect().await?;
         }
 
-        let conn = self.connection.as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("ODBC connection not established".to_string()))?;
-        
+        let conn = self.connection.as_ref().ok_or_else(|| {
+            TinyEtlError::Connection("ODBC connection not established".to_string())
+        })?;
+
         let conn = conn.connection();
-        
+
         // Use DELETE instead of TRUNCATE for better compatibility
         let truncate_sql = format!("DELETE FROM [{}]", table_name);
         conn.execute(&truncate_sql, ())
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
-        
+
         Ok(())
     }
 

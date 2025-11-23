@@ -1,15 +1,15 @@
-use std::collections::HashMap;
 use async_trait::async_trait;
-use sqlx::{MySqlPool, Row as SqlxRow, Column as SqlxColumn, TypeInfo};
-use url::Url;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use rust_decimal::Decimal;
-use chrono::{DateTime, Utc, NaiveDateTime, NaiveDate};
 use serde_json;
+use sqlx::{Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
+use std::collections::HashMap;
+use url::Url;
 
 use crate::{
-    Result, TinyEtlError,
-    schema::{Schema, Row, Value, Column, DataType, SchemaInferer},
     connectors::{Source, Target},
+    schema::{Column, DataType, Row, Schema, SchemaInferer, Value},
+    Result, TinyEtlError,
 };
 
 pub struct MysqlSource {
@@ -24,7 +24,7 @@ pub struct MysqlSource {
 impl MysqlSource {
     pub fn new(connection_string: &str) -> Result<Self> {
         let (db_url, table_name) = Self::parse_connection_string(connection_string)?;
-        
+
         Ok(Self {
             connection_string: connection_string.to_string(),
             database_url: db_url,
@@ -40,39 +40,48 @@ impl MysqlSource {
             Ok((db_part.to_string(), table_part.to_string()))
         } else {
             return Err(TinyEtlError::Configuration(
-                "MySQL source requires table specification: mysql://user:pass@host:port/db#table".to_string()
+                "MySQL source requires table specification: mysql://user:pass@host:port/db#table"
+                    .to_string(),
             ));
         }
     }
 
     async fn get_pool(&self) -> Result<&MySqlPool> {
-        self.pool.as_ref().ok_or_else(|| {
-            TinyEtlError::Connection("MySQL connection not established".to_string())
-        })
+        self.pool
+            .as_ref()
+            .ok_or_else(|| TinyEtlError::Connection("MySQL connection not established".to_string()))
     }
 
-    fn extract_value(&self, row: &sqlx::mysql::MySqlRow, column: &sqlx::mysql::MySqlColumn) -> Result<Value> {
+    fn extract_value(
+        &self,
+        row: &sqlx::mysql::MySqlRow,
+        column: &sqlx::mysql::MySqlColumn,
+    ) -> Result<Value> {
         let col_name = column.name();
         let col_type = column.type_info();
         let type_name = col_type.name();
-        
+
         // Debug: Log the column type
         tracing::debug!("Column '{}' has type '{}'", col_name, type_name);
-        
+
         // Handle JSON type explicitly using serde_json::Value
         if type_name.eq_ignore_ascii_case("JSON") {
             tracing::debug!("Detected JSON column: {}", col_name);
             if let Ok(Some(json_val)) = row.try_get::<Option<serde_json::Value>, _>(col_name) {
                 // Convert the JSON value to a compact string representation
-                let json_string = serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
-                tracing::debug!("Successfully extracted JSON as string: {} bytes", json_string.len());
+                let json_string =
+                    serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
+                tracing::debug!(
+                    "Successfully extracted JSON as string: {} bytes",
+                    json_string.len()
+                );
                 return Ok(Value::String(json_string));
             } else {
                 tracing::debug!("JSON column '{}' is NULL", col_name);
                 return Ok(Value::Null);
             }
         }
-        
+
         // Try different MySQL types in order of likelihood
         // Try String (TEXT, VARCHAR, CHAR types)
         if let Ok(val) = row.try_get::<Option<String>, _>(col_name) {
@@ -122,21 +131,17 @@ impl MysqlSource {
             }
         } else if let Ok(val) = row.try_get::<Option<f64>, _>(col_name) {
             match val {
-                Some(f) => {
-                    match Decimal::try_from(f) {
-                        Ok(d) => Ok(Value::Decimal(d)),
-                        Err(_) => Ok(Value::String(f.to_string())),
-                    }
+                Some(f) => match Decimal::try_from(f) {
+                    Ok(d) => Ok(Value::Decimal(d)),
+                    Err(_) => Ok(Value::String(f.to_string())),
                 },
                 None => Ok(Value::Null),
             }
         } else if let Ok(val) = row.try_get::<Option<f32>, _>(col_name) {
             match val {
-                Some(f) => {
-                    match Decimal::try_from(f as f64) {
-                        Ok(d) => Ok(Value::Decimal(d)),
-                        Err(_) => Ok(Value::String(f.to_string())),
-                    }
+                Some(f) => match Decimal::try_from(f as f64) {
+                    Ok(d) => Ok(Value::Decimal(d)),
+                    Err(_) => Ok(Value::String(f.to_string())),
                 },
                 None => Ok(Value::Null),
             }
@@ -160,7 +165,7 @@ impl MysqlSource {
                 Some(date) => {
                     let datetime = date.and_hms_opt(0, 0, 0).unwrap();
                     Ok(Value::Date(DateTime::from_utc(datetime, Utc)))
-                },
+                }
                 None => Ok(Value::Null),
             }
         } else {
@@ -172,12 +177,10 @@ impl MysqlSource {
 #[async_trait]
 impl Source for MysqlSource {
     async fn connect(&mut self) -> Result<()> {
-        let pool = MySqlPool::connect(&self.database_url)
-            .await
-            .map_err(|e| TinyEtlError::Connection(format!(
-                "Failed to connect to MySQL database: {}", e
-            )))?;
-        
+        let pool = MySqlPool::connect(&self.database_url).await.map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to connect to MySQL database: {}", e))
+        })?;
+
         self.pool = Some(pool);
         Ok(())
     }
@@ -187,10 +190,9 @@ impl Source for MysqlSource {
 
         let query = format!("SELECT * FROM `{}` LIMIT {}", self.table_name, sample_size);
 
-        let rows = sqlx::query(&query)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e)))?;
+        let rows = sqlx::query(&query).fetch_all(pool).await.map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e))
+        })?;
 
         if rows.is_empty() {
             return Ok(Schema {
@@ -213,7 +215,7 @@ impl Source for MysqlSource {
         }
 
         let mut schema = SchemaInferer::infer_from_rows(&schema_rows)?;
-        
+
         // Get estimated row count
         if let Ok(count_result) = self.estimated_row_count().await {
             schema.estimated_rows = count_result;
@@ -225,8 +227,10 @@ impl Source for MysqlSource {
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
         let pool = self.get_pool().await?;
 
-        let query = format!("SELECT * FROM `{}` LIMIT {} OFFSET {}", 
-                self.table_name, batch_size, self.current_offset);
+        let query = format!(
+            "SELECT * FROM `{}` LIMIT {} OFFSET {}",
+            self.table_name, batch_size, self.current_offset
+        );
 
         let rows = sqlx::query(&query)
             .fetch_all(pool)
@@ -270,7 +274,10 @@ impl Source for MysqlSource {
                     .await
                 {
                     Ok(count) => Ok(Some(count as usize)),
-                    Err(e) => Err(TinyEtlError::DataTransfer(format!("Failed to get row count: {}", e))),
+                    Err(e) => Err(TinyEtlError::DataTransfer(format!(
+                        "Failed to get row count: {}",
+                        e
+                    ))),
                 }
             }
         }
@@ -302,7 +309,7 @@ pub struct MysqlTarget {
 impl MysqlTarget {
     pub fn new(connection_string: &str) -> Result<Self> {
         let (db_url, table_name) = Self::parse_connection_string(connection_string)?;
-        
+
         Ok(Self {
             connection_string: connection_string.to_string(),
             database_url: db_url,
@@ -322,9 +329,8 @@ impl MysqlTarget {
             Ok((db_part.to_string(), table_part.to_string()))
         } else {
             // Extract database name from mysql://user:pass@host:port/dbname
-            let url = Url::parse(connection_string).map_err(|e| {
-                TinyEtlError::Configuration(format!("Invalid MySQL URL: {}", e))
-            })?;
+            let url = Url::parse(connection_string)
+                .map_err(|e| TinyEtlError::Configuration(format!("Invalid MySQL URL: {}", e)))?;
             let db_name = url.path().trim_start_matches('/');
             let default_table = if db_name.is_empty() { "data" } else { "data" };
             Ok((connection_string.to_string(), default_table.to_string()))
@@ -332,48 +338,49 @@ impl MysqlTarget {
     }
 
     async fn get_pool(&self) -> Result<&MySqlPool> {
-        self.pool.as_ref().ok_or_else(|| {
-            TinyEtlError::Connection("MySQL connection not established".to_string())
-        })
+        self.pool
+            .as_ref()
+            .ok_or_else(|| TinyEtlError::Connection("MySQL connection not established".to_string()))
     }
 
     async fn verify_database_exists(&self) -> Result<()> {
         // Extract database name from the URL
-        let url = Url::parse(&self.database_url).map_err(|e| {
-            TinyEtlError::Configuration(format!("Invalid MySQL URL: {}", e))
-        })?;
-        
+        let url = Url::parse(&self.database_url)
+            .map_err(|e| TinyEtlError::Configuration(format!("Invalid MySQL URL: {}", e)))?;
+
         let db_name = url.path().trim_start_matches('/');
         if db_name.is_empty() {
             return Err(TinyEtlError::Configuration(
-                "No database name specified in MySQL connection URL".to_string()
+                "No database name specified in MySQL connection URL".to_string(),
             ));
         }
 
         // Create a connection to MySQL without specifying a database
         let mut base_url = url.clone();
         base_url.set_path("");
-        
+
         let base_connection_string = base_url.as_str();
         let pool = MySqlPool::connect(base_connection_string)
             .await
-            .map_err(|e| TinyEtlError::Connection(format!(
-                "Failed to connect to MySQL server: {}", e
-            )))?;
+            .map_err(|e| {
+                TinyEtlError::Connection(format!("Failed to connect to MySQL server: {}", e))
+            })?;
 
         // Check if the database exists
-        let result = sqlx::query("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?")
-            .bind(db_name)
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| TinyEtlError::Connection(format!(
-                "Failed to check database existence: {}", e
-            )))?;
+        let result =
+            sqlx::query("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?")
+                .bind(db_name)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| {
+                    TinyEtlError::Connection(format!("Failed to check database existence: {}", e))
+                })?;
 
         let count: i64 = result.get(0);
         if count == 0 {
             return Err(TinyEtlError::Connection(format!(
-                "Database '{}' does not exist", db_name
+                "Database '{}' does not exist",
+                db_name
             )));
         }
 
@@ -402,36 +409,33 @@ impl MysqlTarget {
         // Get column names from the first row
         let columns: Vec<String> = rows[0].keys().cloned().collect();
         let num_columns = columns.len();
-        
+
         // Build the base INSERT statement with multiple VALUES clauses
-        let column_names = columns.iter()
+        let column_names = columns
+            .iter()
             .map(|c| format!("`{}`", c))
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         // Create placeholders for all rows: (?, ?, ?), (?, ?, ?), ...
-        let values_placeholders = rows.iter()
+        let values_placeholders = rows
+            .iter()
             .map(|_| {
-                let row_placeholders = (0..num_columns)
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let row_placeholders = (0..num_columns).map(|_| "?").collect::<Vec<_>>().join(", ");
                 format!("({})", row_placeholders)
             })
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         let insert_sql = format!(
             "INSERT INTO `{}` ({}) VALUES {}",
-            self.table_name,
-            column_names,
-            values_placeholders
+            self.table_name, column_names, values_placeholders
         );
 
         // Build the query with all parameter bindings
         let mut query = sqlx::query(&insert_sql);
         let default_value = Value::String("".to_string());
-        
+
         // Bind all values for all rows in the correct order
         for row in rows {
             for column in &columns {
@@ -441,21 +445,27 @@ impl MysqlTarget {
                     Value::Decimal(d) => {
                         // Convert Decimal to string for MySQL binding since it doesn't support direct Decimal binding
                         query.bind(d.to_string())
-                    },
+                    }
                     Value::String(s) => query.bind(s),
                     Value::Boolean(b) => query.bind(b),
                     Value::Date(d) => query.bind(d.to_rfc3339()),
-                    Value::Json(j) => query.bind(serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string())),
+                    Value::Json(j) => {
+                        query.bind(serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string()))
+                    }
                     Value::Null => query.bind(None::<String>),
                 };
             }
         }
-        
+
         // Execute the batch insert
         let result = query.execute(pool).await.map_err(|e| {
-            TinyEtlError::Connection(format!("Failed to batch insert {} rows into MySQL: {}", rows.len(), e))
+            TinyEtlError::Connection(format!(
+                "Failed to batch insert {} rows into MySQL: {}",
+                rows.len(),
+                e
+            ))
         })?;
-        
+
         Ok(result.rows_affected() as usize)
     }
 }
@@ -465,13 +475,11 @@ impl Target for MysqlTarget {
     async fn connect(&mut self) -> Result<()> {
         // First verify that the database exists
         self.verify_database_exists().await?;
-        
-        let pool = MySqlPool::connect(&self.database_url)
-            .await
-            .map_err(|e| TinyEtlError::Connection(format!(
-                "Failed to connect to MySQL database: {}", e
-            )))?;
-        
+
+        let pool = MySqlPool::connect(&self.database_url).await.map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to connect to MySQL database: {}", e))
+        })?;
+
         self.pool = Some(pool);
         Ok(())
     }
@@ -486,30 +494,30 @@ impl Target for MysqlTarget {
 
         // Update internal table name
         self.table_name = actual_table_name.clone();
-        
+
         // Get pool after updating table name to avoid borrowing conflicts
         let pool = self.get_pool().await?;
-        
+
         let mut columns = Vec::new();
         for column in &schema.columns {
             let mysql_type = self.map_data_type_to_mysql(&column.data_type);
             let nullable = if column.nullable { "" } else { " NOT NULL" };
             columns.push(format!("`{}` {}{}", column.name, mysql_type, nullable));
         }
-        
+
         let create_sql = format!(
             "CREATE TABLE IF NOT EXISTS `{}` ({})",
             actual_table_name,
             columns.join(", ")
         );
-        
-        sqlx::query(&create_sql)
-            .execute(pool)
-            .await
-            .map_err(|e| TinyEtlError::Connection(format!(
-                "Failed to create MySQL table '{}': {}", actual_table_name, e
-            )))?;
-        
+
+        sqlx::query(&create_sql).execute(pool).await.map_err(|e| {
+            TinyEtlError::Connection(format!(
+                "Failed to create MySQL table '{}': {}",
+                actual_table_name, e
+            ))
+        })?;
+
         Ok(())
     }
 
@@ -520,12 +528,12 @@ impl Target for MysqlTarget {
 
         let pool = self.get_pool().await?;
         let mut total_affected = 0;
-        
+
         // Process rows in chunks to avoid hitting MySQL limits
         for chunk in rows.chunks(self.max_batch_size) {
             total_affected += self.write_chunk(pool, chunk).await?;
         }
-        
+
         Ok(total_affected)
     }
 
@@ -537,18 +545,18 @@ impl Target for MysqlTarget {
         let pool = self.pool.as_ref().ok_or_else(|| {
             TinyEtlError::Connection("MySQL connection not established".to_string())
         })?;
-        
+
         let actual_table_name = if table_name.is_empty() {
             &self.table_name
         } else {
             table_name
         };
-        
+
         let result = sqlx::query("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ? AND table_schema = DATABASE()")
             .bind(actual_table_name)
             .fetch_one(pool)
             .await;
-            
+
         match result {
             Ok(row) => Ok(row.get::<i64, _>(0) > 0),
             Err(_) => Ok(false),
@@ -559,7 +567,7 @@ impl Target for MysqlTarget {
         let pool = self.pool.as_ref().ok_or_else(|| {
             TinyEtlError::Connection("MySQL connection not established".to_string())
         })?;
-        
+
         let actual_table_name = if table_name.is_empty() {
             &self.table_name
         } else {
@@ -584,13 +592,16 @@ impl Target for MysqlTarget {
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
-    
+
     #[test]
     fn test_parse_connection_string_with_table() {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb#employees");
         assert!(target.is_ok());
         let target = target.unwrap();
-        assert_eq!(target.database_url, "mysql://user:pass@localhost:3306/testdb");
+        assert_eq!(
+            target.database_url,
+            "mysql://user:pass@localhost:3306/testdb"
+        );
         assert_eq!(target.table_name, "employees");
     }
 
@@ -599,7 +610,10 @@ mod tests {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb");
         assert!(target.is_ok());
         let target = target.unwrap();
-        assert_eq!(target.database_url, "mysql://user:pass@localhost:3306/testdb");
+        assert_eq!(
+            target.database_url,
+            "mysql://user:pass@localhost:3306/testdb"
+        );
         assert_eq!(target.table_name, "data");
     }
 
@@ -636,31 +650,28 @@ mod tests {
         let columns = vec!["id".to_string(), "name".to_string(), "age".to_string()];
         let num_rows = 3;
         let num_columns = columns.len();
-        
-        let column_names = columns.iter()
+
+        let column_names = columns
+            .iter()
             .map(|c| format!("`{}`", c))
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         let values_placeholders = (0..num_rows)
             .map(|_| {
-                let row_placeholders = (0..num_columns)
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let row_placeholders = (0..num_columns).map(|_| "?").collect::<Vec<_>>().join(", ");
                 format!("({})", row_placeholders)
             })
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         let insert_sql = format!(
             "INSERT INTO `{}` ({}) VALUES {}",
-            "test_table",
-            column_names,
-            values_placeholders
+            "test_table", column_names, values_placeholders
         );
-        
-        let expected = "INSERT INTO `test_table` (`id`, `name`, `age`) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)";
+
+        let expected =
+            "INSERT INTO `test_table` (`id`, `name`, `age`) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)";
         assert_eq!(insert_sql, expected);
     }
 
@@ -670,7 +681,7 @@ mod tests {
             .unwrap()
             .with_batch_size(500);
         assert_eq!(target.max_batch_size, 500);
-        
+
         // Test minimum batch size of 1
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb")
             .unwrap()
@@ -681,13 +692,19 @@ mod tests {
     #[test]
     fn test_map_data_type_to_mysql() {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
-        
+
         assert_eq!(target.map_data_type_to_mysql(&DataType::Integer), "BIGINT");
-        assert_eq!(target.map_data_type_to_mysql(&DataType::Decimal), "DECIMAL(65,30)");
+        assert_eq!(
+            target.map_data_type_to_mysql(&DataType::Decimal),
+            "DECIMAL(65,30)"
+        );
         assert_eq!(target.map_data_type_to_mysql(&DataType::String), "TEXT");
         assert_eq!(target.map_data_type_to_mysql(&DataType::Boolean), "BOOLEAN");
         assert_eq!(target.map_data_type_to_mysql(&DataType::Date), "DATE");
-        assert_eq!(target.map_data_type_to_mysql(&DataType::DateTime), "DATETIME");
+        assert_eq!(
+            target.map_data_type_to_mysql(&DataType::DateTime),
+            "DATETIME"
+        );
         assert_eq!(target.map_data_type_to_mysql(&DataType::Null), "TEXT");
     }
 
@@ -695,7 +712,10 @@ mod tests {
     fn test_connection_string_parsing_edge_cases() {
         // Test with port number
         let target = MysqlTarget::new("mysql://root:password@127.0.0.1:3306/myapp#users").unwrap();
-        assert_eq!(target.database_url, "mysql://root:password@127.0.0.1:3306/myapp");
+        assert_eq!(
+            target.database_url,
+            "mysql://root:password@127.0.0.1:3306/myapp"
+        );
         assert_eq!(target.table_name, "users");
 
         // Test with special characters in password
@@ -716,15 +736,15 @@ mod tests {
             "",
             "not-a-url",
             "://invalid", // No scheme
-            "mysql", // Not a URL format
-            " ", // Just whitespace
+            "mysql",      // Not a URL format
+            " ",          // Just whitespace
         ];
 
         for url in invalid_urls {
             let result = MysqlTarget::new(url);
             assert!(result.is_err(), "Expected error for URL: {}", url);
         }
-        
+
         // Test that mysql:// actually succeeds (it's a valid URL)
         let result = MysqlTarget::new("mysql://");
         assert!(result.is_ok(), "mysql:// should be valid URL");
@@ -745,7 +765,7 @@ mod tests {
     #[test]
     fn test_create_table_sql_generation() {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
-        
+
         let schema = Schema {
             columns: vec![
                 Column {
@@ -785,13 +805,13 @@ mod tests {
             let nullable = if column.nullable { "" } else { " NOT NULL" };
             columns.push(format!("`{}` {}{}", column.name, mysql_type, nullable));
         }
-        
+
         let create_sql = format!(
             "CREATE TABLE IF NOT EXISTS `{}` ({})",
             "test_table",
             columns.join(", ")
         );
-        
+
         let expected = "CREATE TABLE IF NOT EXISTS `test_table` (`id` BIGINT NOT NULL, `name` TEXT, `score` DECIMAL(65,30) NOT NULL, `active` BOOLEAN, `created_at` DATETIME NOT NULL)";
         assert_eq!(create_sql, expected);
     }
@@ -800,11 +820,11 @@ mod tests {
     fn test_write_batch_empty_rows() {
         // Test behavior with empty row slice
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
-        
+
         // Can't actually test the async method without a DB, but we can test the logic
         let rows: &[Row] = &[];
         assert!(rows.is_empty());
-        
+
         // The method should return Ok(0) for empty rows
         // This tests the early return path
     }
@@ -814,7 +834,7 @@ mod tests {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb")
             .unwrap()
             .with_batch_size(2);
-        
+
         // Create test data that would be chunked
         let mut test_rows = Vec::new();
         for i in 0..5 {
@@ -823,7 +843,7 @@ mod tests {
             row.insert("name".to_string(), Value::String(format!("user_{}", i)));
             test_rows.push(row);
         }
-        
+
         // Test chunking behavior
         let chunks: Vec<_> = test_rows.chunks(target.max_batch_size).collect();
         assert_eq!(chunks.len(), 3); // 5 rows / 2 batch_size = 3 chunks
@@ -842,7 +862,7 @@ mod tests {
             Value::Boolean(true),
             Value::Null,
         ];
-        
+
         // Test that each value type can be processed
         for value in &values {
             match value {
@@ -850,9 +870,9 @@ mod tests {
                 Value::Decimal(d) => assert_eq!(*d, Decimal::new(314, 2)),
                 Value::String(s) => assert_eq!(s, "test"),
                 Value::Boolean(b) => assert!(*b),
-                Value::Null => {}, // Null should be handled
-                Value::Date(_) => {}, // Date should be converted to string
-                Value::Json(_) => {}, // JSON should be handled
+                Value::Null => {}    // Null should be handled
+                Value::Date(_) => {} // Date should be converted to string
+                Value::Json(_) => {} // JSON should be handled
             }
         }
     }
@@ -860,11 +880,11 @@ mod tests {
     #[test]
     fn test_date_value_formatting() {
         use chrono::{DateTime, Utc};
-        
+
         // Test date formatting for MySQL
         let datetime = DateTime::from_timestamp(1609459200, 0).unwrap();
         let date_value = Value::Date(datetime);
-        
+
         if let Value::Date(d) = date_value {
             let formatted = d.to_rfc3339();
             assert!(formatted.contains("2021-01-01"));
@@ -909,7 +929,7 @@ mod tests {
         // Test that error messages contain useful information
         let result = MysqlTarget::new("not-a-valid-url");
         assert!(result.is_err());
-        
+
         if let Err(TinyEtlError::Configuration(msg)) = result {
             assert!(msg.contains("Invalid MySQL URL"));
             assert!(msg.contains("not-a-valid-url") || msg.contains("relative URL"));
@@ -934,16 +954,16 @@ mod tests {
     fn test_default_values_handling() {
         // Test default value creation and usage
         let default_value = Value::String("".to_string());
-        
+
         match default_value {
             Value::String(ref s) => assert!(s.is_empty()),
             _ => panic!("Expected empty string default"),
         }
-        
+
         // Test row access with missing columns
         let mut row = HashMap::new();
         row.insert("existing_col".to_string(), Value::Integer(42));
-        
+
         let value = row.get("missing_col").unwrap_or(&default_value);
         match value {
             Value::String(s) => assert!(s.is_empty()),
@@ -954,12 +974,15 @@ mod tests {
     #[test]
     fn test_connection_pool_configuration() {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
-        
+
         // Pool should be None initially
         assert!(target.pool.is_none());
-        
+
         // Test that connection string is stored correctly
-        assert_eq!(target.database_url, "mysql://user:pass@localhost:3306/testdb");
+        assert_eq!(
+            target.database_url,
+            "mysql://user:pass@localhost:3306/testdb"
+        );
     }
 
     #[test]
@@ -967,7 +990,10 @@ mod tests {
         let source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#employees");
         assert!(source.is_ok());
         let source = source.unwrap();
-        assert_eq!(source.database_url, "mysql://user:pass@localhost:3306/testdb");
+        assert_eq!(
+            source.database_url,
+            "mysql://user:pass@localhost:3306/testdb"
+        );
         assert_eq!(source.table_name, "employees");
         assert_eq!(source.current_offset, 0);
         assert!(source.pool.is_none());
@@ -975,7 +1001,8 @@ mod tests {
 
     #[test]
     fn test_mysql_source_parse_connection_string_without_table() {
-        let result = MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/testdb");
+        let result =
+            MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/testdb");
         assert!(result.is_err());
         if let Err(TinyEtlError::Configuration(msg)) = result {
             assert!(msg.contains("table specification"));
@@ -984,7 +1011,8 @@ mod tests {
 
     #[test]
     fn test_mysql_source_parse_connection_string_with_table() {
-        let result = MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/testdb#orders");
+        let result =
+            MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/testdb#orders");
         assert!(result.is_ok());
         let (db_url, table) = result.unwrap();
         assert_eq!(db_url, "mysql://user:pass@localhost:3306/testdb");
@@ -1004,19 +1032,19 @@ mod tests {
     #[test]
     fn test_mysql_source_has_more_with_total_rows() {
         let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#users").unwrap();
-        
+
         // When total_rows is None, should return true
         assert!(source.has_more());
-        
+
         // When current_offset < total_rows, should return true
         source.total_rows = Some(100);
         source.current_offset = 50;
         assert!(source.has_more());
-        
+
         // When current_offset >= total_rows, should return false
         source.current_offset = 100;
         assert!(!source.has_more());
-        
+
         source.current_offset = 101;
         assert!(!source.has_more());
     }
@@ -1025,7 +1053,7 @@ mod tests {
     async fn test_mysql_source_reset() {
         let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#users").unwrap();
         source.current_offset = 500;
-        
+
         let result = source.reset().await;
         assert!(result.is_ok());
         assert_eq!(source.current_offset, 0);
@@ -1036,18 +1064,18 @@ mod tests {
         // Test different value type conversions
         let int_val = Value::Integer(42);
         assert!(matches!(int_val, Value::Integer(42)));
-        
+
         let dec_val = Value::Decimal(Decimal::new(12345, 2));
         if let Value::Decimal(d) = dec_val {
             assert_eq!(d.to_string(), "123.45");
         }
-        
+
         let str_val = Value::String("test".to_string());
         assert!(matches!(str_val, Value::String(ref s) if s == "test"));
-        
+
         let bool_val = Value::Boolean(true);
         assert!(matches!(bool_val, Value::Boolean(true)));
-        
+
         let null_val = Value::Null;
         assert!(matches!(null_val, Value::Null));
     }
@@ -1107,7 +1135,7 @@ mod tests {
     #[test]
     fn test_row_with_all_data_types() {
         use chrono::Utc;
-        
+
         let mut row: HashMap<String, Value> = HashMap::new();
         row.insert("int_col".to_string(), Value::Integer(100));
         row.insert("dec_col".to_string(), Value::Decimal(Decimal::new(9999, 2)));
@@ -1150,7 +1178,7 @@ mod tests {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb")
             .unwrap()
             .with_batch_size(10000);
-        
+
         assert_eq!(target.max_batch_size, 10000);
     }
 
@@ -1158,7 +1186,7 @@ mod tests {
     fn test_zero_offset_after_reset() {
         let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/db#table").unwrap();
         source.current_offset = 999;
-        
+
         assert_eq!(source.current_offset, 999);
         // Reset would set it back to 0
     }
@@ -1171,15 +1199,22 @@ mod tests {
 
     #[test]
     fn test_database_url_storage() {
-        let target = MysqlTarget::new("mysql://admin:secret@db.example.com:3306/production#logs").unwrap();
-        assert_eq!(target.database_url, "mysql://admin:secret@db.example.com:3306/production");
-        assert_eq!(target.connection_string, "mysql://admin:secret@db.example.com:3306/production#logs");
+        let target =
+            MysqlTarget::new("mysql://admin:secret@db.example.com:3306/production#logs").unwrap();
+        assert_eq!(
+            target.database_url,
+            "mysql://admin:secret@db.example.com:3306/production"
+        );
+        assert_eq!(
+            target.connection_string,
+            "mysql://admin:secret@db.example.com:3306/production#logs"
+        );
     }
 
     #[test]
     fn test_data_type_to_mysql_all_types() {
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/testdb").unwrap();
-        
+
         // Test all DataType variants
         let type_mappings = vec![
             (DataType::Integer, "BIGINT"),
@@ -1209,7 +1244,8 @@ mod tests {
     #[test]
     fn test_multiple_hash_in_connection_string() {
         // Test with multiple # characters - should split on first
-        let result = MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/db#table#extra");
+        let result =
+            MysqlSource::parse_connection_string("mysql://user:pass@localhost:3306/db#table#extra");
         assert!(result.is_ok());
         let (db, table) = result.unwrap();
         assert_eq!(db, "mysql://user:pass@localhost:3306/db");
@@ -1228,20 +1264,21 @@ mod tests {
     #[test]
     fn test_connection_url_with_options() {
         // MySQL connection strings can have query parameters
-        let target = MysqlTarget::new("mysql://user:pass@localhost:3306/db?ssl=true#table").unwrap();
-        assert!(target.database_url.contains("mysql://user:pass@localhost:3306/db"));
+        let target =
+            MysqlTarget::new("mysql://user:pass@localhost:3306/db?ssl=true#table").unwrap();
+        assert!(target
+            .database_url
+            .contains("mysql://user:pass@localhost:3306/db"));
     }
 
     #[test]
     fn test_schema_estimated_rows() {
         let schema = Schema {
-            columns: vec![
-                Column {
-                    name: "id".to_string(),
-                    data_type: DataType::Integer,
-                    nullable: false,
-                },
-            ],
+            columns: vec![Column {
+                name: "id".to_string(),
+                data_type: DataType::Integer,
+                nullable: false,
+            }],
             estimated_rows: Some(1000),
             primary_key_candidate: Some("id".to_string()),
         };
@@ -1267,13 +1304,13 @@ mod tests {
         // Test that JSON data would be stored as a string
         let json_data = r#"{"key": "value", "number": 42}"#;
         let value = Value::String(json_data.to_string());
-        
+
         match value {
             Value::String(s) => {
                 assert!(s.contains("key"));
                 assert!(s.contains("value"));
                 assert!(s.contains("42"));
-            },
+            }
             _ => panic!("Expected JSON data to be stored as String"),
         }
     }
@@ -1283,13 +1320,13 @@ mod tests {
         // Test that JSON array data would be stored as a string
         let json_array = r#"[1, 2, 3, "test"]"#;
         let value = Value::String(json_array.to_string());
-        
+
         match value {
             Value::String(s) => {
                 assert!(s.starts_with('['));
                 assert!(s.ends_with(']'));
                 assert!(s.contains("test"));
-            },
+            }
             _ => panic!("Expected JSON array to be stored as String"),
         }
     }

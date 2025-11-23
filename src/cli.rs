@@ -1,6 +1,6 @@
-use clap::{Parser, Subcommand};
 use crate::config::{Config, LogLevel};
 use crate::transformer::TransformConfig;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "tinyetl")]
@@ -141,11 +141,7 @@ mod tests {
 
     #[test]
     fn test_basic_cli_parsing() {
-        let cli = Cli::try_parse_from(&[
-            "tinyetl",
-            "source.csv",
-            "target.db#table"
-        ]).unwrap();
+        let cli = Cli::try_parse_from(&["tinyetl", "source.csv", "target.db#table"]).unwrap();
 
         assert_eq!(cli.source, Some("source.csv".to_string()));
         assert_eq!(cli.target, Some("target.db#table".to_string()));
@@ -159,11 +155,7 @@ mod tests {
 
     #[test]
     fn test_config_file_parsing() {
-        let cli = Cli::try_parse_from(&[
-            "tinyetl",
-            "run",
-            "my_job.yaml"
-        ]).unwrap();
+        let cli = Cli::try_parse_from(&["tinyetl", "run", "my_job.yaml"]).unwrap();
 
         assert!(cli.is_config_mode());
         assert_eq!(cli.get_config_file(), Some("my_job.yaml"));
@@ -176,13 +168,18 @@ mod tests {
             "tinyetl",
             "source.json",
             "target.csv",
-            "--batch-size", "5000",
-            "--preview", "10",
+            "--batch-size",
+            "5000",
+            "--preview",
+            "10",
             "--dry-run",
-            "--log-level", "warn",
+            "--log-level",
+            "warn",
             "--skip-existing",
-            "--source-type", "json"
-        ]).unwrap();
+            "--source-type",
+            "json",
+        ])
+        .unwrap();
 
         assert_eq!(cli.source, Some("source.json".to_string()));
         assert_eq!(cli.target, Some("target.csv".to_string()));
@@ -200,9 +197,12 @@ mod tests {
             "tinyetl",
             "input.csv",
             "output.db#data",
-            "--batch-size", "2000",
-            "--preview", "5"
-        ]).unwrap();
+            "--batch-size",
+            "2000",
+            "--preview",
+            "5",
+        ])
+        .unwrap();
 
         let config: Config = cli.into();
         assert_eq!(config.source, "input.csv");
@@ -216,7 +216,7 @@ mod tests {
         // Should still work without source/target for subcommands
         let result = Cli::try_parse_from(&["tinyetl"]);
         assert!(result.is_ok());
-        
+
         // But should fail when trying to convert to Config without source/target
         let cli = result.unwrap();
         // This would panic when converting to Config, but that's expected behavior
@@ -228,19 +228,22 @@ mod tests {
             "tinyetl",
             "source.csv",
             "target.db",
-            "--log-level", "invalid"
+            "--log-level",
+            "invalid",
         ]);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_http_source_with_type() {
         let cli = Cli::try_parse_from(&[
             "tinyetl",
             "https://example.com/api/data",
             "output.csv",
-            "--source-type", "json"
-        ]).unwrap();
+            "--source-type",
+            "json",
+        ])
+        .unwrap();
 
         assert_eq!(cli.source, Some("https://example.com/api/data".to_string()));
         assert_eq!(cli.target, Some("output.csv".to_string()));

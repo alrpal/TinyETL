@@ -1,15 +1,15 @@
-use std::path::PathBuf;
-use std::collections::HashMap;
 use async_trait::async_trait;
 use csv::{ReaderBuilder, WriterBuilder};
-use serde_json;
 use rust_decimal::Decimal;
+use serde_json;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::{
-    Result, TinyEtlError,
-    schema::{Schema, Row, Value, SchemaInferer},
     connectors::{Source, Target},
     date_parser::DateParser,
+    schema::{Row, Schema, SchemaInferer, Value},
+    Result, TinyEtlError,
 };
 
 pub struct CsvSource {
@@ -30,7 +30,7 @@ impl CsvSource {
             has_more_data: true,
         })
     }
-    
+
     fn infer_schema_with_order(&self, rows: &[Row]) -> Result<Schema> {
         if rows.is_empty() {
             return Ok(Schema {
@@ -41,7 +41,7 @@ impl CsvSource {
         }
 
         let mut column_types: HashMap<String, Vec<crate::schema::DataType>> = HashMap::new();
-        
+
         // Use the CSV headers order instead of HashMap iteration order
         for col_name in &self.headers {
             let mut types = Vec::new();
@@ -56,11 +56,13 @@ impl CsvSource {
         }
 
         // Determine final type for each column, preserving header order
-        let columns = self.headers
+        let columns = self
+            .headers
             .iter()
             .filter_map(|col_name| {
                 column_types.get(col_name).map(|types| {
-                    let (data_type, nullable) = crate::schema::SchemaInferer::resolve_column_type(types);
+                    let (data_type, nullable) =
+                        crate::schema::SchemaInferer::resolve_column_type(types);
                     crate::schema::Column {
                         name: col_name.clone(),
                         data_type,
@@ -76,30 +78,30 @@ impl CsvSource {
             primary_key_candidate: None,
         })
     }
-    
+
     fn parse_value(value: &str) -> Value {
         // Try to parse as different types
-        
+
         // Try integer first
         if let Ok(int_val) = value.parse::<i64>() {
             return Value::Integer(int_val);
         }
-        
+
         // Try decimal
         if let Ok(decimal_val) = value.parse::<Decimal>() {
             return Value::Decimal(decimal_val);
         }
-        
+
         // Try boolean
         if let Ok(bool_val) = value.parse::<bool>() {
             return Value::Boolean(bool_val);
         }
-        
+
         // Try date/datetime using the shared parser
         if let Some(date_value) = DateParser::try_parse(value) {
             return date_value;
         }
-        
+
         // Default to string
         if value.is_empty() {
             Value::Null
@@ -113,24 +115,21 @@ impl CsvSource {
 impl Source for CsvSource {
     async fn connect(&mut self) -> Result<()> {
         if !self.file_path.exists() {
-            return Err(TinyEtlError::Connection(
-                format!("CSV file not found: {}", self.file_path.display())
-            ));
+            return Err(TinyEtlError::Connection(format!(
+                "CSV file not found: {}",
+                self.file_path.display()
+            )));
         }
 
         let file = std::fs::File::open(&self.file_path)?;
-        let mut reader = ReaderBuilder::new()
-            .has_headers(true)
-            .from_reader(file);
+        let mut reader = ReaderBuilder::new().has_headers(true).from_reader(file);
 
         // Read and store headers
         self.headers = reader.headers()?.iter().map(|h| h.to_string()).collect();
-        
+
         // Reset file for actual reading
         let file = std::fs::File::open(&self.file_path)?;
-        self.reader = Some(ReaderBuilder::new()
-            .has_headers(true)
-            .from_reader(file));
+        self.reader = Some(ReaderBuilder::new().has_headers(true).from_reader(file));
 
         Ok(())
     }
@@ -151,14 +150,14 @@ impl Source for CsvSource {
 
                 let record = result?;
                 let mut row = Row::new();
-                
+
                 for (i, field) in record.iter().enumerate() {
                     if let Some(header) = self.headers.get(i) {
                         let value = Self::parse_value(field);
                         row.insert(header.clone(), value);
                     }
                 }
-                
+
                 sample_rows.push(row);
                 count += 1;
             }
@@ -181,19 +180,19 @@ impl Source for CsvSource {
 
         if let Some(ref mut reader) = self.reader {
             let mut records_iter = reader.records();
-            
+
             while count < batch_size {
                 match records_iter.next() {
                     Some(Ok(record)) => {
                         let mut row = Row::new();
-                        
+
                         for (i, field) in record.iter().enumerate() {
                             if let Some(header) = self.headers.get(i) {
                                 let value = Self::parse_value(field);
                                 row.insert(header.clone(), value);
                             }
                         }
-                        
+
                         rows.push(row);
                         count += 1;
                     }
@@ -220,9 +219,7 @@ impl Source for CsvSource {
 
     async fn reset(&mut self) -> Result<()> {
         let file = std::fs::File::open(&self.file_path)?;
-        self.reader = Some(ReaderBuilder::new()
-            .has_headers(true)
-            .from_reader(file));
+        self.reader = Some(ReaderBuilder::new().has_headers(true).from_reader(file));
         self.current_position = 0;
         self.has_more_data = true;
         Ok(())
@@ -249,7 +246,7 @@ impl CsvTarget {
             column_order: Vec::new(),
         })
     }
-    
+
     fn value_to_string(&self, value: &Value) -> String {
         match value {
             Value::String(s) => s.clone(),
@@ -318,22 +315,15 @@ impl Target for CsvTarget {
                 // Use the stored column order from the schema
                 let record: Vec<String> = if !self.column_order.is_empty() {
                     // Use schema-defined column order
-                    self.column_order.iter()
-                        .map(|key| {
-                            row.get(key)
-                                .map(|v| value_to_string(v))
-                                .unwrap_or_default()
-                        })
+                    self.column_order
+                        .iter()
+                        .map(|key| row.get(key).map(|v| value_to_string(v)).unwrap_or_default())
                         .collect()
                 } else {
                     // Fallback for when schema wasn't used (maintain old behavior)
                     let keys: Vec<_> = row.keys().cloned().collect();
                     keys.iter()
-                        .map(|key| {
-                            row.get(key)
-                                .map(|v| value_to_string(v))
-                                .unwrap_or_default()
-                        })
+                        .map(|key| row.get(key).map(|v| value_to_string(v)).unwrap_or_default())
                         .collect()
                 };
 
@@ -374,8 +364,8 @@ impl Target for CsvTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn test_csv_source_connection() {
@@ -398,10 +388,10 @@ mod tests {
 
         let mut source = CsvSource::new(temp_file.path().to_str().unwrap()).unwrap();
         source.connect().await.unwrap();
-        
+
         let schema = source.infer_schema(10).await.unwrap();
         assert_eq!(schema.columns.len(), 4);
-        
+
         let id_col = schema.columns.iter().find(|c| c.name == "id").unwrap();
         assert_eq!(id_col.data_type, crate::schema::DataType::Integer);
     }
@@ -416,10 +406,10 @@ mod tests {
 
         let mut source = CsvSource::new(temp_file.path().to_str().unwrap()).unwrap();
         source.connect().await.unwrap();
-        
+
         let rows = source.read_batch(2).await.unwrap();
         assert_eq!(rows.len(), 2);
-        
+
         if let Some(Value::String(name)) = rows[0].get("name") {
             assert_eq!(name, "Alice");
         } else {
@@ -431,7 +421,7 @@ mod tests {
     async fn test_csv_target_creation() {
         let temp_file = NamedTempFile::new().unwrap();
         let mut target = CsvTarget::new(temp_file.path().to_str().unwrap()).unwrap();
-        
+
         let result = target.connect().await;
         assert!(result.is_ok());
     }
@@ -440,21 +430,30 @@ mod tests {
     fn test_parse_value_types() {
         // Test integer parsing
         assert!(matches!(CsvSource::parse_value("42"), Value::Integer(42)));
-        
+
         // Test decimal parsing
         let decimal_result = CsvSource::parse_value("3.14");
         assert!(matches!(decimal_result, Value::Decimal(d) if d == Decimal::new(314, 2)));
-        
+
         // Test boolean parsing
-        assert!(matches!(CsvSource::parse_value("true"), Value::Boolean(true)));
-        assert!(matches!(CsvSource::parse_value("false"), Value::Boolean(false)));
-        
+        assert!(matches!(
+            CsvSource::parse_value("true"),
+            Value::Boolean(true)
+        ));
+        assert!(matches!(
+            CsvSource::parse_value("false"),
+            Value::Boolean(false)
+        ));
+
         // Test datetime parsing
-        assert!(matches!(CsvSource::parse_value("2023-01-01T12:00:00Z"), Value::Date(_)));
-        
+        assert!(matches!(
+            CsvSource::parse_value("2023-01-01T12:00:00Z"),
+            Value::Date(_)
+        ));
+
         // Test empty string to null
         assert!(matches!(CsvSource::parse_value(""), Value::Null));
-        
+
         // Test string fallback
         assert!(matches!(CsvSource::parse_value("hello"), Value::String(s) if s == "hello"));
     }
@@ -466,16 +465,16 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test] 
+    #[tokio::test]
     async fn test_csv_source_estimated_row_count() {
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(temp_file, "id,name").unwrap();
-        writeln!(temp_file, "1,Alice").unwrap(); 
+        writeln!(temp_file, "1,Alice").unwrap();
         writeln!(temp_file, "2,Bob").unwrap();
 
         let mut source = CsvSource::new(temp_file.path().to_str().unwrap()).unwrap();
         source.connect().await.unwrap();
-        
+
         let count = source.estimated_row_count().await.unwrap();
         assert_eq!(count, Some(2)); // 2 data rows (excluding header)
     }
@@ -488,7 +487,7 @@ mod tests {
 
         let mut source = CsvSource::new(temp_file.path().to_str().unwrap()).unwrap();
         source.connect().await.unwrap();
-        
+
         assert!(source.has_more());
     }
 
@@ -496,7 +495,7 @@ mod tests {
     async fn test_csv_target_write_batch_without_connection() {
         let temp_file = NamedTempFile::new().unwrap();
         let mut target = CsvTarget::new(temp_file.path().to_str().unwrap()).unwrap();
-        
+
         let row = std::collections::HashMap::new();
         let result = target.write_batch(&[row]).await;
         assert!(result.is_err());
@@ -506,7 +505,7 @@ mod tests {
     async fn test_csv_target_create_table_and_write() {
         let temp_file = NamedTempFile::new().unwrap();
         let mut target = CsvTarget::new(temp_file.path().to_str().unwrap()).unwrap();
-        
+
         // Create schema
         let schema = crate::schema::Schema {
             columns: vec![
@@ -526,28 +525,34 @@ mod tests {
         };
 
         target.create_table("test", &schema).await.unwrap();
-        
+
         // Write some data
         let mut row = std::collections::HashMap::new();
         row.insert("id".to_string(), Value::Integer(1));
         row.insert("name".to_string(), Value::String("Alice".to_string()));
-        
+
         let written = target.write_batch(&[row]).await.unwrap();
         assert_eq!(written, 1);
-        
+
         target.finalize().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_csv_target_value_to_string() {
         let target = CsvTarget::new("/tmp/test.csv").unwrap();
-        
-        assert_eq!(target.value_to_string(&Value::String("test".to_string())), "test");
+
+        assert_eq!(
+            target.value_to_string(&Value::String("test".to_string())),
+            "test"
+        );
         assert_eq!(target.value_to_string(&Value::Integer(42)), "42");
-        assert_eq!(target.value_to_string(&Value::Decimal(Decimal::new(314, 2))), "3.14");
+        assert_eq!(
+            target.value_to_string(&Value::Decimal(Decimal::new(314, 2))),
+            "3.14"
+        );
         assert_eq!(target.value_to_string(&Value::Boolean(true)), "true");
         assert_eq!(target.value_to_string(&Value::Null), "");
-        
+
         let dt = chrono::Utc::now();
         assert!(target.value_to_string(&Value::Date(dt)).contains("T"));
     }
@@ -556,7 +561,7 @@ mod tests {
     async fn test_csv_target_exists() {
         let temp_file = NamedTempFile::new().unwrap();
         let target = CsvTarget::new(temp_file.path().to_str().unwrap()).unwrap();
-        
+
         let exists = target.exists("test").await.unwrap();
         assert!(exists);
     }
@@ -566,7 +571,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let mut target = CsvTarget::new(temp_file.path().to_str().unwrap()).unwrap();
         target.connect().await.unwrap();
-        
+
         let mut row = std::collections::HashMap::new();
         row.insert("string".to_string(), Value::String("test".to_string()));
         row.insert("integer".to_string(), Value::Integer(42));
@@ -574,7 +579,7 @@ mod tests {
         row.insert("boolean".to_string(), Value::Boolean(true));
         row.insert("date".to_string(), Value::Date(chrono::Utc::now()));
         row.insert("null".to_string(), Value::Null);
-        
+
         let written = target.write_batch(&[row]).await.unwrap();
         assert_eq!(written, 1);
     }
@@ -589,21 +594,21 @@ mod tests {
         // Set up source
         let mut source = CsvSource::new(source_file.path().to_str().unwrap()).unwrap();
         source.connect().await.unwrap();
-        
+
         // Debug: print headers from source
         println!("Source headers: {:?}", source.headers);
-        
+
         // Infer schema
         let schema = source.infer_schema(10).await.unwrap();
-        
+
         // Debug: print schema column order
         let schema_columns: Vec<_> = schema.columns.iter().map(|c| c.name.clone()).collect();
         println!("Schema columns: {:?}", schema_columns);
-        
+
         // Reset source and read data
         source.reset().await.unwrap();
         let rows = source.read_batch(100).await.unwrap();
-        
+
         // Debug: print first row data
         if let Some(first_row) = rows.first() {
             println!("First row keys: {:?}", first_row.keys().collect::<Vec<_>>());
@@ -611,19 +616,19 @@ mod tests {
                 println!("  {}: {:?}", key, value);
             }
         }
-        
+
         // Set up target
         let target_file = NamedTempFile::new().unwrap();
         let mut target = CsvTarget::new(target_file.path().to_str().unwrap()).unwrap();
         target.create_table("test", &schema).await.unwrap();
-        
+
         // Debug: print target column order
         println!("Target column order: {:?}", target.column_order);
-        
+
         // Write data to target
         target.write_batch(&rows).await.unwrap();
         target.finalize().await.unwrap();
-        
+
         // Read and print the output
         let output_content = std::fs::read_to_string(target_file.path()).unwrap();
         println!("Output content:\n{}", output_content);
@@ -640,40 +645,49 @@ mod tests {
         // Set up source
         let mut source = CsvSource::new(source_file.path().to_str().unwrap()).unwrap();
         source.connect().await.unwrap();
-        
+
         // Infer schema
         let schema = source.infer_schema(10).await.unwrap();
-        
+
         // Verify schema preserves original column order
         assert_eq!(schema.columns.len(), 3);
         assert_eq!(schema.columns[0].name, "one");
         assert_eq!(schema.columns[1].name, "two");
         assert_eq!(schema.columns[2].name, "three");
-        
+
         // Set up target
         let target_file = NamedTempFile::new().unwrap();
         let mut target = CsvTarget::new(target_file.path().to_str().unwrap()).unwrap();
         target.create_table("test", &schema).await.unwrap();
-        
+
         // Reset source and read all data
         source.reset().await.unwrap();
         let rows = source.read_batch(100).await.unwrap();
-        
+
         // Write data to target
         target.write_batch(&rows).await.unwrap();
         target.finalize().await.unwrap();
-        
+
         // Read the output file and verify header order is preserved
         let output_content = std::fs::read_to_string(target_file.path()).unwrap();
         let lines: Vec<&str> = output_content.lines().collect();
-        
+
         // Check that headers are in the correct order (same as input)
         let header_line = lines[0];
-        assert_eq!(header_line, "one,two,three", "Headers should maintain original CSV order");
-        
+        assert_eq!(
+            header_line, "one,two,three",
+            "Headers should maintain original CSV order"
+        );
+
         // Verify data integrity and order
         assert_eq!(lines.len(), 3); // header + 2 data rows
-        assert_eq!(lines[1], "1,blah,bell", "First data row should maintain column order");
-        assert_eq!(lines[2], "2,blo,aff", "Second data row should maintain column order");
+        assert_eq!(
+            lines[1], "1,blah,bell",
+            "First data row should maintain column order"
+        );
+        assert_eq!(
+            lines[2], "2,blo,aff",
+            "Second data row should maintain column order"
+        );
     }
 }

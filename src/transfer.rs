@@ -1,13 +1,13 @@
-use tracing::{info, warn, error};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Instant;
+use tracing::{error, info, warn};
 
 use crate::{
-    Result, TinyEtlError,
     config::Config,
     connectors::{Source, Target},
     schema::{Schema, SchemaFile},
     transformer::Transformer,
+    Result, TinyEtlError,
 };
 
 pub struct TransferEngine;
@@ -26,11 +26,11 @@ impl TransferEngine {
         mut target: Box<dyn Target>,
     ) -> Result<TransferStats> {
         let start_time = Instant::now();
-        
+
         // Step 1: Connect to source and target
         info!("→ Connecting to source: {}", config.source);
         source.connect().await?;
-        
+
         info!("→ Connecting to target: {}", config.target);
         target.connect().await?;
 
@@ -62,15 +62,18 @@ impl TransferEngine {
         let mut transformer = Transformer::new(&config.transform)?;
         let final_schema = if transformer.is_enabled() {
             info!("→ Transformation enabled");
-            
+
             // Read a small sample to infer the transformed schema
             source.reset().await?;
             let sample_batch = source.read_batch(1).await?;
-            
+
             if !sample_batch.is_empty() {
                 let transformed_sample = transformer.transform_batch(&sample_batch)?;
                 if let Some(transform_schema) = transformer.get_inferred_schema() {
-                    info!("→ Schema updated by transformations: {} columns", transform_schema.columns.len());
+                    info!(
+                        "→ Schema updated by transformations: {} columns",
+                        transform_schema.columns.len()
+                    );
                     transform_schema.clone()
                 } else {
                     schema.clone()
@@ -87,7 +90,7 @@ impl TransferEngine {
 
         // Step 7: Handle append-first logic or truncate mode
         let table_exists = target.exists(&table_name).await?;
-        
+
         if table_exists {
             if config.truncate {
                 info!("→ Truncating existing target: {}", table_name);
@@ -100,7 +103,10 @@ impl TransferEngine {
                 target.create_table(&table_name, &final_schema).await?;
             } else {
                 // Target exists but doesn't support append - must truncate
-                info!("→ Target exists but doesn't support append, truncating: {}", table_name);
+                info!(
+                    "→ Target exists but doesn't support append, truncating: {}",
+                    table_name
+                );
                 target.truncate(&table_name).await?;
                 // After truncating, we need to create the table again
                 target.create_table(&table_name, &final_schema).await?;
@@ -136,7 +142,7 @@ impl TransferEngine {
 
         let mut total_rows = 0;
         let mut batches_processed = 0;
-        
+
         source.reset().await?;
 
         while source.has_more() {
@@ -165,8 +171,10 @@ impl TransferEngine {
 
             if let Some(ref pb) = progress_bar {
                 pb.set_position(total_rows as u64);
-                pb.set_message(format!("{}k rows/sec", 
-                    (total_rows as f64 / start_time.elapsed().as_secs_f64() / 1000.0) as u64));
+                pb.set_message(format!(
+                    "{}k rows/sec",
+                    (total_rows as f64 / start_time.elapsed().as_secs_f64() / 1000.0) as u64
+                ));
             }
         }
 
@@ -176,10 +184,10 @@ impl TransferEngine {
 
         // Step 10: Finalize
         target.finalize().await?;
-        
+
         let total_time = start_time.elapsed();
         let rows_per_second = total_rows as f64 / total_time.as_secs_f64();
-        
+
         info!("→ Done in {:.1}s", total_time.as_secs_f64());
 
         Ok(TransferStats {
@@ -198,17 +206,17 @@ impl TransferEngine {
     ) -> Result<TransferStats> {
         // Initialize transformer for preview
         let mut transformer = Transformer::new(&config.transform)?;
-        
+
         println!("\nOriginal Schema Preview:");
         Self::print_schema(schema);
 
         source.reset().await?;
         let sample_data = source.read_batch(preview_rows).await?;
-        
+
         let (final_schema, final_data) = if transformer.is_enabled() && !sample_data.is_empty() {
             println!("\nApplying transformations...");
             let transformed_data = transformer.transform_batch(&sample_data)?;
-            
+
             if let Some(transform_schema) = transformer.get_inferred_schema() {
                 println!("\nTransformed Schema Preview:");
                 Self::print_schema(transform_schema);
@@ -235,12 +243,14 @@ impl TransferEngine {
         println!("┌─────────────────────┬───────────────┬──────────┐");
         println!("│ Column              │ Type          │ Nullable │");
         println!("├─────────────────────┼───────────────┼──────────┤");
-        
+
         for column in &schema.columns {
-            println!("│ {:<19} │ {:<13} │ {:<8} │", 
-                column.name, 
-                format!("{}", column.data_type), 
-                format!("{}", column.nullable));
+            println!(
+                "│ {:<19} │ {:<13} │ {:<8} │",
+                column.name,
+                format!("{}", column.data_type),
+                format!("{}", column.nullable)
+            );
         }
         println!("└─────────────────────┴───────────────┴──────────┘");
     }
@@ -253,7 +263,7 @@ impl TransferEngine {
 
         // Print column headers
         let headers: Vec<&String> = data[0].keys().collect();
-        
+
         // Print top border
         print!("┌");
         for i in 0..headers.len() {
@@ -263,14 +273,14 @@ impl TransferEngine {
             }
         }
         println!("┐");
-        
+
         // Print headers
         print!("│");
         for header in &headers {
             print!(" {:<15} │", header);
         }
         println!();
-        
+
         // Print separator
         print!("├");
         for i in 0..headers.len() {
@@ -280,7 +290,7 @@ impl TransferEngine {
             }
         }
         println!("┤");
-        
+
         // Print data rows
         for row in data {
             print!("│");
@@ -293,7 +303,7 @@ impl TransferEngine {
             }
             println!();
         }
-        
+
         // Print bottom border
         print!("└");
         for i in 0..headers.len() {
@@ -312,38 +322,41 @@ impl TransferEngine {
         config: &Config,
     ) -> Result<TransferStats> {
         info!("Dry run mode - validating connections and schema");
-        
+
         let estimated_rows = source.estimated_row_count().await?.unwrap_or(0);
         info!("Source connection validated");
         info!("Schema inferred: {} columns", schema.columns.len());
         info!("Estimated rows: {}", estimated_rows);
-        
+
         // Test transformations if enabled
         let mut transformer = Transformer::new(&config.transform)?;
         if transformer.is_enabled() {
             info!("Testing transformations...");
             source.reset().await?;
             let test_batch = source.read_batch(10).await?; // Small sample for testing
-            
+
             if !test_batch.is_empty() {
                 let _transformed = transformer.transform_batch(&test_batch)?;
                 if let Some(transform_schema) = transformer.get_inferred_schema() {
-                    info!("Transformation successful: {} output columns", transform_schema.columns.len());
+                    info!(
+                        "Transformation successful: {} output columns",
+                        transform_schema.columns.len()
+                    );
                 } else {
                     info!("Transformation successful: schema unchanged");
                 }
             }
         }
-        
+
         let table_name = Self::extract_table_name(&config.target);
         let table_exists = target.exists(&table_name).await?;
-        
+
         if table_exists {
             warn!("Target table '{}' already exists", table_name);
         } else {
             info!("Target table '{}' will be created", table_name);
         }
-        
+
         info!("Dry run completed successfully");
 
         Ok(TransferStats {
@@ -371,9 +384,9 @@ impl TransferEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::schema::{Column, DataType, Row, Value};
     use async_trait::async_trait;
-    use crate::schema::{Value, Row, Column, DataType};
+    use std::collections::HashMap;
 
     // Mock source for testing
     struct MockSource {
@@ -402,8 +415,16 @@ mod tests {
         async fn infer_schema(&mut self, _sample_size: usize) -> Result<Schema> {
             Ok(Schema {
                 columns: vec![
-                    Column { name: "id".to_string(), data_type: DataType::Integer, nullable: false },
-                    Column { name: "name".to_string(), data_type: DataType::String, nullable: false },
+                    Column {
+                        name: "id".to_string(),
+                        data_type: DataType::Integer,
+                        nullable: false,
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: DataType::String,
+                        nullable: false,
+                    },
                 ],
                 estimated_rows: Some(self.data.len()),
                 primary_key_candidate: None,
@@ -506,11 +527,9 @@ mod tests {
             ..Default::default()
         };
 
-        let stats = TransferEngine::execute(
-            &config,
-            Box::new(source),
-            Box::new(target)
-        ).await.unwrap();
+        let stats = TransferEngine::execute(&config, Box::new(source), Box::new(target))
+            .await
+            .unwrap();
 
         assert_eq!(stats.total_rows, 2);
         assert_eq!(stats.batches_processed, 1);
@@ -522,65 +541,57 @@ mod tests {
         assert_eq!(TransferEngine::extract_table_name("output.csv"), "output");
         assert_eq!(TransferEngine::extract_table_name("data.json"), "data");
     }
-    
+
     #[tokio::test]
     async fn test_transfer_with_preview() {
-        let test_data = vec![
-            {
-                let mut row = HashMap::new();
-                row.insert("id".to_string(), Value::Integer(1));
-                row.insert("name".to_string(), Value::String("Alice".to_string()));
-                row
-            }
-        ];
-        
+        let test_data = vec![{
+            let mut row = HashMap::new();
+            row.insert("id".to_string(), Value::Integer(1));
+            row.insert("name".to_string(), Value::String("Alice".to_string()));
+            row
+        }];
+
         let source = MockSource::new(test_data);
         let target = MockTarget::new();
-        
+
         let config = Config {
             source: "test.csv".to_string(),
             target: "test.db#users".to_string(),
             preview: Some(5),
             ..Default::default()
         };
-        
-        let stats = TransferEngine::execute(
-            &config,
-            Box::new(source),
-            Box::new(target)
-        ).await.unwrap();
-        
+
+        let stats = TransferEngine::execute(&config, Box::new(source), Box::new(target))
+            .await
+            .unwrap();
+
         // Preview mode should not transfer data
         assert_eq!(stats.total_rows, 0);
     }
-    
+
     #[tokio::test]
     async fn test_transfer_with_dry_run() {
-        let test_data = vec![
-            {
-                let mut row = HashMap::new();
-                row.insert("id".to_string(), Value::Integer(1));
-                row.insert("name".to_string(), Value::String("Alice".to_string()));
-                row
-            }
-        ];
-        
+        let test_data = vec![{
+            let mut row = HashMap::new();
+            row.insert("id".to_string(), Value::Integer(1));
+            row.insert("name".to_string(), Value::String("Alice".to_string()));
+            row
+        }];
+
         let source = MockSource::new(test_data);
         let target = MockTarget::new();
-        
+
         let config = Config {
             source: "test.csv".to_string(),
             target: "test.db#users".to_string(),
             dry_run: true,
             ..Default::default()
         };
-        
-        let stats = TransferEngine::execute(
-            &config,
-            Box::new(source),
-            Box::new(target)
-        ).await.unwrap();
-        
+
+        let stats = TransferEngine::execute(&config, Box::new(source), Box::new(target))
+            .await
+            .unwrap();
+
         // Dry run should not transfer data
         assert_eq!(stats.total_rows, 0);
     }

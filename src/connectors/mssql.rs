@@ -1,21 +1,21 @@
+use async_trait::async_trait;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use futures_util::stream::TryStreamExt;
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::time::Duration;
-use async_trait::async_trait;
-use tiberius::{Client, Config, AuthMethod, QueryItem, EncryptionLevel};
+use tiberius::{AuthMethod, Client, Config, EncryptionLevel, QueryItem};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
-use futures_util::stream::TryStreamExt;
 use url::Url;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
-use chrono::{DateTime, Utc, NaiveDate, NaiveDateTime};
 use uuid::Uuid;
 
 use crate::{
-    Result, TinyEtlError,
-    schema::{Schema, Row, Value, Column, DataType, SchemaInferer},
     connectors::{Source, Target},
+    schema::{Column, DataType, Row, Schema, SchemaInferer, Value},
+    Result, TinyEtlError,
 };
 
 type MssqlClient = Client<tokio_util::compat::Compat<TcpStream>>;
@@ -33,7 +33,7 @@ pub struct MssqlSource {
 impl MssqlSource {
     pub fn new(connection_string: &str) -> Result<Self> {
         let (_, table) = Self::parse_connection_string(connection_string)?;
-        
+
         Ok(Self {
             connection_string: connection_string.to_string(),
             client: None,
@@ -55,7 +55,8 @@ impl MssqlSource {
             Ok((db_part.to_string(), table_part.to_string()))
         } else {
             Err(TinyEtlError::Configuration(
-                "MSSQL connection string must include table name: connection_string#table_name".to_string()
+                "MSSQL connection string must include table name: connection_string#table_name"
+                    .to_string(),
             ))
         }
     }
@@ -64,26 +65,25 @@ impl MssqlSource {
         // Support both natural format (localhost\INSTANCE) and URL-encoded format (localhost%5CINSTANCE)
         // Replace backslashes with URL encoding before parsing
         let sanitized_url = connection_string.replace("\\", "%5C");
-        
-        let url = Url::parse(&sanitized_url).map_err(|e| {
-            TinyEtlError::Configuration(format!("Invalid MSSQL URL: {}", e))
-        })?;
+
+        let url = Url::parse(&sanitized_url)
+            .map_err(|e| TinyEtlError::Configuration(format!("Invalid MSSQL URL: {}", e)))?;
 
         let mut config = Config::new();
-        
+
         // Set server address - decode %5C back to backslash for SQL Server named instances
         if let Some(host) = url.host_str() {
             let decoded_host = host.replace("%5C", "\\").replace("%5c", "\\");
             config.host(&decoded_host);
         }
-        
+
         // Set port
         if let Some(port) = url.port() {
             config.port(port);
         } else {
             config.port(1433); // Default MSSQL port
         }
-        
+
         // Set database name
         let database = url.path().trim_start_matches('/');
         if !database.is_empty() {
@@ -110,20 +110,34 @@ impl MssqlSource {
         // Add connection timeout (10 seconds)
         let tcp = timeout(
             Duration::from_secs(10),
-            TcpStream::connect(config.get_addr())
+            TcpStream::connect(config.get_addr()),
         )
-            .await
-            .map_err(|_| TinyEtlError::Connection("Connection timeout: Failed to connect to MSSQL server within 10 seconds".to_string()))?
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to connect to MSSQL server: {}", e)))?;
+        .await
+        .map_err(|_| {
+            TinyEtlError::Connection(
+                "Connection timeout: Failed to connect to MSSQL server within 10 seconds"
+                    .to_string(),
+            )
+        })?
+        .map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to connect to MSSQL server: {}", e))
+        })?;
 
         // Add authentication timeout (10 seconds)
         let client = timeout(
             Duration::from_secs(10),
-            Client::connect(config, tcp.compat_write())
+            Client::connect(config, tcp.compat_write()),
         )
-            .await
-            .map_err(|_| TinyEtlError::Connection("Authentication timeout: Failed to authenticate with MSSQL within 10 seconds".to_string()))?
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to authenticate with MSSQL: {}", e)))?;
+        .await
+        .map_err(|_| {
+            TinyEtlError::Connection(
+                "Authentication timeout: Failed to authenticate with MSSQL within 10 seconds"
+                    .to_string(),
+            )
+        })?
+        .map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to authenticate with MSSQL: {}", e))
+        })?;
 
         Ok(client)
     }
@@ -143,22 +157,22 @@ impl Source for MssqlSource {
         }
 
         let client = self.client.as_mut().unwrap();
-        
+
         // Get column information from the table
         let query = format!(
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
             self.table_name
         );
 
-        let mut stream = client.query(query, &[])
-            .await
-            .map_err(|e| TinyEtlError::SchemaInference(format!("Failed to get table schema: {}", e)))?;
+        let mut stream = client.query(query, &[]).await.map_err(|e| {
+            TinyEtlError::SchemaInference(format!("Failed to get table schema: {}", e))
+        })?;
 
         let mut columns = Vec::new();
 
-        while let Some(item) = stream.try_next().await
-            .map_err(|e| TinyEtlError::SchemaInference(format!("Failed to fetch schema results: {}", e)))? {
-            
+        while let Some(item) = stream.try_next().await.map_err(|e| {
+            TinyEtlError::SchemaInference(format!("Failed to fetch schema results: {}", e))
+        })? {
             if let tiberius::QueryItem::Row(row) = item {
                 let column_name: &str = row.get(0).ok_or_else(|| {
                     TinyEtlError::SchemaInference("Missing column name".to_string())
@@ -170,44 +184,51 @@ impl Source for MssqlSource {
                     TinyEtlError::SchemaInference("Missing nullable info".to_string())
                 })?;
 
-            let data_type = match data_type.to_uppercase().as_str() {
-                "INT" | "SMALLINT" | "TINYINT" | "BIGINT" => DataType::Integer,
-                "FLOAT" | "REAL" | "DECIMAL" | "NUMERIC" | "MONEY" | "SMALLMONEY" => DataType::Decimal,
-                "VARCHAR" | "NVARCHAR" | "CHAR" | "NCHAR" | "TEXT" | "NTEXT" => DataType::String,
-                "BIT" => DataType::Boolean,
-                "DATE" => DataType::Date,
-                "DATETIME" | "DATETIME2" | "SMALLDATETIME" | "TIMESTAMP" => DataType::DateTime,
-                "UNIQUEIDENTIFIER" => DataType::String,
-                _ => DataType::String,
-            };
+                let data_type = match data_type.to_uppercase().as_str() {
+                    "INT" | "SMALLINT" | "TINYINT" | "BIGINT" => DataType::Integer,
+                    "FLOAT" | "REAL" | "DECIMAL" | "NUMERIC" | "MONEY" | "SMALLMONEY" => {
+                        DataType::Decimal
+                    }
+                    "VARCHAR" | "NVARCHAR" | "CHAR" | "NCHAR" | "TEXT" | "NTEXT" => {
+                        DataType::String
+                    }
+                    "BIT" => DataType::Boolean,
+                    "DATE" => DataType::Date,
+                    "DATETIME" | "DATETIME2" | "SMALLDATETIME" | "TIMESTAMP" => DataType::DateTime,
+                    "UNIQUEIDENTIFIER" => DataType::String,
+                    _ => DataType::String,
+                };
 
-            columns.push(Column {
-                name: column_name.to_string(),
-                data_type,
-                nullable: is_nullable.eq_ignore_ascii_case("YES"),
-            });
+                columns.push(Column {
+                    name: column_name.to_string(),
+                    data_type,
+                    nullable: is_nullable.eq_ignore_ascii_case("YES"),
+                });
             }
         }
 
         if columns.is_empty() {
             return Err(TinyEtlError::SchemaInference(format!(
-                "Table '{}' not found or has no columns", self.table_name
+                "Table '{}' not found or has no columns",
+                self.table_name
             )));
         }
 
-        let schema = Schema { 
+        let schema = Schema {
             columns,
             estimated_rows: None,
             primary_key_candidate: None,
         };
-        
+
         self.schema = Some(schema.clone());
         Ok(schema)
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
         if self.client.is_none() {
-            return Err(TinyEtlError::Connection("Not connected to MSSQL".to_string()));
+            return Err(TinyEtlError::Connection(
+                "Not connected to MSSQL".to_string(),
+            ));
         }
 
         // Ensure we have schema
@@ -217,24 +238,31 @@ impl Source for MssqlSource {
 
         let client = self.client.as_mut().unwrap();
         let schema = self.schema.as_ref().unwrap();
-        
+
         let query = if let Some(ref custom_query) = self.query {
-            format!("{} ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY", 
-                    custom_query, self.current_offset, batch_size)
+            format!(
+                "{} ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+                custom_query, self.current_offset, batch_size
+            )
         } else {
-            format!("SELECT * FROM {} ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY", 
-                    self.table_name, self.current_offset, batch_size)
+            format!(
+                "SELECT * FROM {} ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+                self.table_name, self.current_offset, batch_size
+            )
         };
 
-        let mut stream = client.query(query, &[])
+        let mut stream = client
+            .query(query, &[])
             .await
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))?;
 
         let mut rows = Vec::new();
 
-        while let Some(item) = stream.try_next().await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch results: {}", e)))? {
-            
+        while let Some(item) = stream
+            .try_next()
+            .await
+            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch results: {}", e)))?
+        {
             if let tiberius::QueryItem::Row(row) = item {
                 let mut row_data = HashMap::new();
                 for (i, column) in schema.columns.iter().enumerate() {
@@ -261,7 +289,8 @@ impl Source for MssqlSource {
                 }
                 rows.push(row_data);
             }
-        }        self.current_offset += rows.len();
+        }
+        self.current_offset += rows.len();
         Ok(rows)
     }
 
@@ -296,7 +325,7 @@ pub struct MssqlTarget {
 impl MssqlTarget {
     pub fn new(connection_string: &str) -> Result<Self> {
         let (_, table_name) = Self::parse_connection_string(connection_string)?;
-        
+
         Ok(Self {
             connection_string: connection_string.to_string(),
             table_name,
@@ -316,7 +345,8 @@ impl MssqlTarget {
             Ok((db_part.to_string(), table_part.to_string()))
         } else {
             Err(TinyEtlError::Configuration(
-                "MSSQL connection string must include table name: connection_string#table_name".to_string()
+                "MSSQL connection string must include table name: connection_string#table_name"
+                    .to_string(),
             ))
         }
     }
@@ -358,46 +388,38 @@ impl MssqlTarget {
                             "NULL".to_string()
                         }
                     }
-                    DataType::Boolean => {
-                        match s.to_lowercase().as_str() {
-                            "true" | "1" | "yes" => "1".to_string(),
-                            "false" | "0" | "no" => "0".to_string(),
-                            _ => "NULL".to_string(),
-                        }
-                    }
+                    DataType::Boolean => match s.to_lowercase().as_str() {
+                        "true" | "1" | "yes" => "1".to_string(),
+                        "false" | "0" | "no" => "0".to_string(),
+                        _ => "NULL".to_string(),
+                    },
                     _ => format!("N'{}'", s.replace("'", "''")),
                 }
             }
-            Value::Integer(i) => {
-                match expected_type {
-                    DataType::String => format!("N'{}'", i),
-                    _ => i.to_string(),
-                }
-            }
-            Value::Decimal(d) => {
-                match expected_type {
-                    DataType::String => {
-                        if let Some(f) = d.to_f64() {
-                            format!("N'{}'", f)
-                        } else {
-                            "NULL".to_string()
-                        }
-                    }
-                    _ => {
-                        if let Some(f) = d.to_f64() {
-                            f.to_string()
-                        } else {
-                            "NULL".to_string()
-                        }
+            Value::Integer(i) => match expected_type {
+                DataType::String => format!("N'{}'", i),
+                _ => i.to_string(),
+            },
+            Value::Decimal(d) => match expected_type {
+                DataType::String => {
+                    if let Some(f) = d.to_f64() {
+                        format!("N'{}'", f)
+                    } else {
+                        "NULL".to_string()
                     }
                 }
-            }
-            Value::Boolean(b) => {
-                match expected_type {
-                    DataType::String => format!("N'{}'", if *b { "true" } else { "false" }),
-                    _ => if *b { "1" } else { "0" }.to_string(),
+                _ => {
+                    if let Some(f) = d.to_f64() {
+                        f.to_string()
+                    } else {
+                        "NULL".to_string()
+                    }
                 }
-            }
+            },
+            Value::Boolean(b) => match expected_type {
+                DataType::String => format!("N'{}'", if *b { "true" } else { "false" }),
+                _ => if *b { "1" } else { "0" }.to_string(),
+            },
             Value::Date(dt) => format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S%.3f")),
             Value::Json(j) => {
                 let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
@@ -530,7 +552,8 @@ impl Target for MssqlTarget {
             columns_sql.join(", ")
         );
 
-        client.execute(&create_table_sql, &[])
+        client
+            .execute(&create_table_sql, &[])
             .await
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to create table: {}", e)))?;
 
@@ -539,7 +562,9 @@ impl Target for MssqlTarget {
 
     async fn write_batch(&mut self, rows: &[Row]) -> Result<usize> {
         if self.client.is_none() {
-            return Err(TinyEtlError::Connection("Not connected to MSSQL".to_string()));
+            return Err(TinyEtlError::Connection(
+                "Not connected to MSSQL".to_string(),
+            ));
         }
 
         if rows.is_empty() {
@@ -547,20 +572,24 @@ impl Target for MssqlTarget {
         }
 
         let client = self.client.as_mut().unwrap();
-        let schema = self.schema.as_ref()
+        let schema = self
+            .schema
+            .as_ref()
             .ok_or_else(|| TinyEtlError::DataTransfer("Schema not set".to_string()))?;
 
         // Build column names
-        let column_names: Vec<String> = schema.columns.iter()
+        let column_names: Vec<String> = schema
+            .columns
+            .iter()
             .map(|c| format!("[{}]", c.name))
             .collect();
 
         let mut total_written = 0;
-        
+
         // Process rows in larger chunks for better performance
         // SQL Server can handle 1000 rows per INSERT statement efficiently
         let chunk_size = self.max_batch_size.min(1000);
-        
+
         // Process without explicit transaction management - let tiberius handle it
         // (tiberius uses autocommit by default which is fine for bulk inserts)
         let result = async {
@@ -569,13 +598,13 @@ impl Target for MssqlTarget {
                 // Estimate size: table name + columns + (~100 bytes per row avg)
                 let estimated_size = 200 + column_names.len() * 25 + chunk.len() * 150;
                 let mut insert_sql = String::with_capacity(estimated_size);
-                
+
                 insert_sql.push_str("INSERT INTO [");
                 insert_sql.push_str(&self.table_name);
                 insert_sql.push_str("] (");
                 insert_sql.push_str(&column_names.join(", "));
                 insert_sql.push_str(") VALUES ");
-                
+
                 for (row_idx, row) in chunk.iter().enumerate() {
                     if row.len() != schema.columns.len() {
                         return Err(TinyEtlError::DataTransfer(format!(
@@ -589,27 +618,29 @@ impl Target for MssqlTarget {
                         insert_sql.push_str(", ");
                     }
                     insert_sql.push('(');
-                    
+
                     // Write VALUES clause directly into the string buffer for maximum performance
                     for (col_idx, col) in schema.columns.iter().enumerate() {
                         if col_idx > 0 {
                             insert_sql.push_str(", ");
                         }
-                        
+
                         let value = row.get(&col.name).unwrap_or(&Value::Null);
                         Self::write_value_to_buffer(&mut insert_sql, value, &col.data_type);
                     }
-                    
+
                     insert_sql.push(')');
                 }
 
-                client.execute(&insert_sql, &[]).await
-                    .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to insert batch: {}", e)))?;
+                client.execute(&insert_sql, &[]).await.map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to insert batch: {}", e))
+                })?;
 
                 total_written += chunk.len();
             }
             Ok::<usize, TinyEtlError>(total_written)
-        }.await;
+        }
+        .await;
 
         // Return result
         result
@@ -622,21 +653,23 @@ impl Target for MssqlTarget {
 
     async fn exists(&self, table_name: &str) -> Result<bool> {
         if self.client.is_none() {
-            return Err(TinyEtlError::Connection("Not connected to MSSQL".to_string()));
+            return Err(TinyEtlError::Connection(
+                "Not connected to MSSQL".to_string(),
+            ));
         }
 
         // We need to create a temporary connection since the method is not mutable
         let (db_part, _) = Self::parse_connection_string(&self.connection_string)?;
         let mut client = Self::create_client(&db_part).await?;
-        
-        let query = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @P1";
-        let mut stream = client.query(query, &[&table_name])
-            .await
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to check table existence: {}", e)))?;
 
-        if let Some(item) = stream.try_next().await
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to fetch existence result: {}", e)))? {
-            
+        let query = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @P1";
+        let mut stream = client.query(query, &[&table_name]).await.map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to check table existence: {}", e))
+        })?;
+
+        if let Some(item) = stream.try_next().await.map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to fetch existence result: {}", e))
+        })? {
             if let tiberius::QueryItem::Row(row) = item {
                 if let Ok(Some(count)) = row.try_get::<i32, usize>(0) {
                     return Ok(count > 0);
@@ -655,7 +688,8 @@ impl Target for MssqlTarget {
         let client = self.client.as_mut().unwrap();
         let truncate_sql = format!("TRUNCATE TABLE [{}]", table_name);
 
-        client.execute(&truncate_sql, &[])
+        client
+            .execute(&truncate_sql, &[])
             .await
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
 
@@ -670,13 +704,13 @@ impl Target for MssqlTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Schema, Column, DataType, Value};
+    use crate::schema::{Column, DataType, Schema, Value};
     use std::collections::HashMap;
 
     #[test]
     fn test_parse_connection_string_valid() {
         let result = MssqlSource::parse_connection_string(
-            "mssql://user:pass@localhost:1433/testdb#testtable"
+            "mssql://user:pass@localhost:1433/testdb#testtable",
         );
         assert!(result.is_ok());
         let (db_part, table_name) = result.unwrap();
@@ -686,14 +720,13 @@ mod tests {
 
     #[test]
     fn test_parse_connection_string_missing_table() {
-        let result = MssqlSource::parse_connection_string(
-            "mssql://user:pass@localhost:1433/testdb"
-        );
+        let result =
+            MssqlSource::parse_connection_string("mssql://user:pass@localhost:1433/testdb");
         assert!(result.is_err());
         match result {
             Err(TinyEtlError::Configuration(msg)) => {
                 assert!(msg.contains("must include table name"));
-            },
+            }
             _ => panic!("Expected Configuration error"),
         }
     }
@@ -701,7 +734,7 @@ mod tests {
     #[test]
     fn test_parse_connection_string_with_complex_table() {
         let result = MssqlSource::parse_connection_string(
-            "mssql://user:pass@localhost:1433/testdb#schema.table"
+            "mssql://user:pass@localhost:1433/testdb#schema.table",
         );
         assert!(result.is_ok());
         let (_, table_name) = result.unwrap();
@@ -730,8 +763,11 @@ mod tests {
         let source = MssqlSource::new("mssql://user:pass@localhost:1433/testdb#testtable")
             .unwrap()
             .with_query("SELECT * FROM testtable WHERE id > 100".to_string());
-        
-        assert_eq!(source.query, Some("SELECT * FROM testtable WHERE id > 100".to_string()));
+
+        assert_eq!(
+            source.query,
+            Some("SELECT * FROM testtable WHERE id > 100".to_string())
+        );
     }
 
     #[test]
@@ -755,7 +791,7 @@ mod tests {
         let target = MssqlTarget::new("mssql://user:pass@localhost:1433/testdb#testtable")
             .unwrap()
             .with_batch_size(500);
-        
+
         assert_eq!(target.max_batch_size, 500);
     }
 
@@ -763,44 +799,65 @@ mod tests {
     fn test_mssql_target_with_batch_size_minimum() {
         let target = MssqlTarget::new("mssql://user:pass@localhost:1433/testdb#testtable")
             .unwrap()
-            .with_batch_size(0);  // Should be clamped to 1
-        
+            .with_batch_size(0); // Should be clamped to 1
+
         assert_eq!(target.max_batch_size, 1);
     }
 
     #[test]
     fn test_sql_type_from_data_type_integer() {
-        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Integer), "BIGINT");
+        assert_eq!(
+            MssqlTarget::sql_type_from_data_type(&DataType::Integer),
+            "BIGINT"
+        );
     }
 
     #[test]
     fn test_sql_type_from_data_type_decimal() {
-        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Decimal), "DECIMAL(18,6)");
+        assert_eq!(
+            MssqlTarget::sql_type_from_data_type(&DataType::Decimal),
+            "DECIMAL(18,6)"
+        );
     }
 
     #[test]
     fn test_sql_type_from_data_type_string() {
-        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::String), "NVARCHAR(MAX)");
+        assert_eq!(
+            MssqlTarget::sql_type_from_data_type(&DataType::String),
+            "NVARCHAR(MAX)"
+        );
     }
 
     #[test]
     fn test_sql_type_from_data_type_boolean() {
-        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Boolean), "BIT");
+        assert_eq!(
+            MssqlTarget::sql_type_from_data_type(&DataType::Boolean),
+            "BIT"
+        );
     }
 
     #[test]
     fn test_sql_type_from_data_type_date() {
-        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Date), "DATE");
+        assert_eq!(
+            MssqlTarget::sql_type_from_data_type(&DataType::Date),
+            "DATE"
+        );
     }
 
     #[test]
     fn test_sql_type_from_data_type_datetime() {
-        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::DateTime), "DATETIME2");
+        assert_eq!(
+            MssqlTarget::sql_type_from_data_type(&DataType::DateTime),
+            "DATETIME2"
+        );
     }
 
     #[test]
     fn test_sql_type_from_data_type_null() {
-        assert_eq!(MssqlTarget::sql_type_from_data_type(&DataType::Null), "NVARCHAR(MAX)");
+        assert_eq!(
+            MssqlTarget::sql_type_from_data_type(&DataType::Null),
+            "NVARCHAR(MAX)"
+        );
     }
 
     #[test]
@@ -812,8 +869,8 @@ mod tests {
     #[test]
     fn test_format_value_for_insert_string_to_string() {
         let result = MssqlTarget::format_value_for_insert(
-            &Value::String("hello".to_string()), 
-            &DataType::String
+            &Value::String("hello".to_string()),
+            &DataType::String,
         );
         assert_eq!(result, "N'hello'");
     }
@@ -821,8 +878,8 @@ mod tests {
     #[test]
     fn test_format_value_for_insert_string_with_quotes() {
         let result = MssqlTarget::format_value_for_insert(
-            &Value::String("O'Brien".to_string()), 
-            &DataType::String
+            &Value::String("O'Brien".to_string()),
+            &DataType::String,
         );
         assert_eq!(result, "N'O''Brien'");
     }
@@ -830,8 +887,8 @@ mod tests {
     #[test]
     fn test_format_value_for_insert_string_to_integer() {
         let result = MssqlTarget::format_value_for_insert(
-            &Value::String("42".to_string()), 
-            &DataType::Integer
+            &Value::String("42".to_string()),
+            &DataType::Integer,
         );
         assert_eq!(result, "42");
     }
@@ -839,8 +896,8 @@ mod tests {
     #[test]
     fn test_format_value_for_insert_string_to_integer_invalid() {
         let result = MssqlTarget::format_value_for_insert(
-            &Value::String("not_a_number".to_string()), 
-            &DataType::Integer
+            &Value::String("not_a_number".to_string()),
+            &DataType::Integer,
         );
         assert_eq!(result, "NULL");
     }
@@ -848,8 +905,8 @@ mod tests {
     #[test]
     fn test_format_value_for_insert_string_to_decimal() {
         let result = MssqlTarget::format_value_for_insert(
-            &Value::String("3.14".to_string()), 
-            &DataType::Decimal
+            &Value::String("3.14".to_string()),
+            &DataType::Decimal,
         );
         assert_eq!(result, "3.14");
     }
@@ -859,8 +916,8 @@ mod tests {
         let tests = vec!["true", "TRUE", "1", "yes", "YES"];
         for s in tests {
             let result = MssqlTarget::format_value_for_insert(
-                &Value::String(s.to_string()), 
-                &DataType::Boolean
+                &Value::String(s.to_string()),
+                &DataType::Boolean,
             );
             assert_eq!(result, "1", "Failed for input: {}", s);
         }
@@ -871,8 +928,8 @@ mod tests {
         let tests = vec!["false", "FALSE", "0", "no", "NO"];
         for s in tests {
             let result = MssqlTarget::format_value_for_insert(
-                &Value::String(s.to_string()), 
-                &DataType::Boolean
+                &Value::String(s.to_string()),
+                &DataType::Boolean,
             );
             assert_eq!(result, "0", "Failed for input: {}", s);
         }
@@ -880,52 +937,38 @@ mod tests {
 
     #[test]
     fn test_format_value_for_insert_integer() {
-        let result = MssqlTarget::format_value_for_insert(
-            &Value::Integer(42), 
-            &DataType::Integer
-        );
+        let result = MssqlTarget::format_value_for_insert(&Value::Integer(42), &DataType::Integer);
         assert_eq!(result, "42");
     }
 
     #[test]
     fn test_format_value_for_insert_integer_to_string() {
-        let result = MssqlTarget::format_value_for_insert(
-            &Value::Integer(42), 
-            &DataType::String
-        );
+        let result = MssqlTarget::format_value_for_insert(&Value::Integer(42), &DataType::String);
         assert_eq!(result, "N'42'");
     }
 
     #[test]
     fn test_format_value_for_insert_boolean_true() {
-        let result = MssqlTarget::format_value_for_insert(
-            &Value::Boolean(true), 
-            &DataType::Boolean
-        );
+        let result =
+            MssqlTarget::format_value_for_insert(&Value::Boolean(true), &DataType::Boolean);
         assert_eq!(result, "1");
     }
 
     #[test]
     fn test_format_value_for_insert_boolean_false() {
-        let result = MssqlTarget::format_value_for_insert(
-            &Value::Boolean(false), 
-            &DataType::Boolean
-        );
+        let result =
+            MssqlTarget::format_value_for_insert(&Value::Boolean(false), &DataType::Boolean);
         assert_eq!(result, "0");
     }
 
     #[test]
     fn test_format_value_for_insert_boolean_to_string() {
-        let result_true = MssqlTarget::format_value_for_insert(
-            &Value::Boolean(true), 
-            &DataType::String
-        );
+        let result_true =
+            MssqlTarget::format_value_for_insert(&Value::Boolean(true), &DataType::String);
         assert_eq!(result_true, "N'true'");
 
-        let result_false = MssqlTarget::format_value_for_insert(
-            &Value::Boolean(false), 
-            &DataType::String
-        );
+        let result_false =
+            MssqlTarget::format_value_for_insert(&Value::Boolean(false), &DataType::String);
         assert_eq!(result_false, "N'false'");
     }
 
@@ -933,10 +976,7 @@ mod tests {
     fn test_format_value_for_insert_decimal() {
         use rust_decimal::Decimal;
         let dec = Decimal::new(12345, 2); // 123.45
-        let result = MssqlTarget::format_value_for_insert(
-            &Value::Decimal(dec), 
-            &DataType::Decimal
-        );
+        let result = MssqlTarget::format_value_for_insert(&Value::Decimal(dec), &DataType::Decimal);
         assert_eq!(result, "123.45");
     }
 
@@ -946,10 +986,7 @@ mod tests {
         let dt = DateTime::parse_from_rfc3339("2024-03-15T14:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let result = MssqlTarget::format_value_for_insert(
-            &Value::Date(dt), 
-            &DataType::DateTime
-        );
+        let result = MssqlTarget::format_value_for_insert(&Value::Date(dt), &DataType::DateTime);
         assert!(result.starts_with("'2024-03-15"));
         assert!(result.ends_with("'"));
     }
@@ -963,7 +1000,7 @@ mod tests {
     #[test]
     fn test_parse_target_connection_string() {
         let result = MssqlTarget::parse_connection_string(
-            "mssql://user:pass@localhost:1433/testdb#testtable"
+            "mssql://user:pass@localhost:1433/testdb#testtable",
         );
         assert!(result.is_ok());
         let (db_part, table_name) = result.unwrap();
@@ -983,88 +1020,91 @@ mod tests {
         row.insert("id".to_string(), Value::Integer(1));
         row.insert("name".to_string(), Value::String("Test".to_string()));
         row.insert("active".to_string(), Value::Boolean(true));
-        row.insert("score".to_string(), Value::Decimal(rust_decimal::Decimal::new(955, 1)));
+        row.insert(
+            "score".to_string(),
+            Value::Decimal(rust_decimal::Decimal::new(955, 1)),
+        );
         row.insert("deleted".to_string(), Value::Null);
-        
+
         assert_eq!(row.get("id"), Some(&Value::Integer(1)));
         assert_eq!(row.get("name"), Some(&Value::String("Test".to_string())));
         assert_eq!(row.get("active"), Some(&Value::Boolean(true)));
         assert_eq!(row.get("deleted"), Some(&Value::Null));
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_null() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Null, &DataType::String);
         assert_eq!(buffer, "NULL");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_to_string() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::String("test".to_string()),
-            &DataType::String
+            &DataType::String,
         );
         assert_eq!(buffer, "N'test'");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_with_quotes() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::String("O'Brien's".to_string()),
-            &DataType::String
+            &DataType::String,
         );
         assert_eq!(buffer, "N'O''Brien''s'");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_to_integer_valid() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::String("123".to_string()),
-            &DataType::Integer
+            &DataType::Integer,
         );
         assert_eq!(buffer, "123");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_to_integer_invalid() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::String("not_a_number".to_string()),
-            &DataType::Integer
+            &DataType::Integer,
         );
         assert_eq!(buffer, "NULL");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_to_decimal_valid() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::String("3.14159".to_string()),
-            &DataType::Decimal
+            &DataType::Decimal,
         );
         assert_eq!(buffer, "3.14159");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_to_decimal_invalid() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::String("not_a_decimal".to_string()),
-            &DataType::Decimal
+            &DataType::Decimal,
         );
         assert_eq!(buffer, "NULL");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_to_boolean_true_values() {
         let true_values = vec!["true", "1", "yes"];
@@ -1073,12 +1113,12 @@ mod tests {
             MssqlTarget::write_value_to_buffer(
                 &mut buffer,
                 &Value::String(val.to_string()),
-                &DataType::Boolean
+                &DataType::Boolean,
             );
             assert_eq!(buffer, "1", "Failed for: {}", val);
         }
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_to_boolean_false_values() {
         let false_values = vec!["false", "0", "no"];
@@ -1087,111 +1127,87 @@ mod tests {
             MssqlTarget::write_value_to_buffer(
                 &mut buffer,
                 &Value::String(val.to_string()),
-                &DataType::Boolean
+                &DataType::Boolean,
             );
             assert_eq!(buffer, "0", "Failed for: {}", val);
         }
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_string_to_boolean_invalid() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::String("maybe".to_string()),
-            &DataType::Boolean
+            &DataType::Boolean,
         );
         assert_eq!(buffer, "NULL");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_integer_to_integer() {
         let mut buffer = String::new();
-        MssqlTarget::write_value_to_buffer(
-            &mut buffer,
-            &Value::Integer(42),
-            &DataType::Integer
-        );
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Integer(42), &DataType::Integer);
         assert_eq!(buffer, "42");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_integer_to_string() {
         let mut buffer = String::new();
-        MssqlTarget::write_value_to_buffer(
-            &mut buffer,
-            &Value::Integer(123),
-            &DataType::String
-        );
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Integer(123), &DataType::String);
         assert_eq!(buffer, "N'123'");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_decimal_to_decimal() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::Decimal(rust_decimal::Decimal::new(314159, 5)),
-            &DataType::Decimal
+            &DataType::Decimal,
         );
         assert_eq!(buffer, "3.14159");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_decimal_to_string() {
         let mut buffer = String::new();
         MssqlTarget::write_value_to_buffer(
             &mut buffer,
             &Value::Decimal(rust_decimal::Decimal::new(271828, 5)),
-            &DataType::String
+            &DataType::String,
         );
         assert_eq!(buffer, "N'2.71828'");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_boolean_true_to_boolean() {
         let mut buffer = String::new();
-        MssqlTarget::write_value_to_buffer(
-            &mut buffer,
-            &Value::Boolean(true),
-            &DataType::Boolean
-        );
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Boolean(true), &DataType::Boolean);
         assert_eq!(buffer, "1");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_boolean_false_to_boolean() {
         let mut buffer = String::new();
-        MssqlTarget::write_value_to_buffer(
-            &mut buffer,
-            &Value::Boolean(false),
-            &DataType::Boolean
-        );
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Boolean(false), &DataType::Boolean);
         assert_eq!(buffer, "0");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_boolean_to_string_true() {
         let mut buffer = String::new();
-        MssqlTarget::write_value_to_buffer(
-            &mut buffer,
-            &Value::Boolean(true),
-            &DataType::String
-        );
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Boolean(true), &DataType::String);
         assert_eq!(buffer, "N'true'");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_boolean_to_string_false() {
         let mut buffer = String::new();
-        MssqlTarget::write_value_to_buffer(
-            &mut buffer,
-            &Value::Boolean(false),
-            &DataType::String
-        );
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Boolean(false), &DataType::String);
         assert_eq!(buffer, "N'false'");
     }
-    
+
     #[test]
     fn test_write_value_to_buffer_date() {
         use chrono::{DateTime, Utc};
@@ -1199,87 +1215,88 @@ mod tests {
         let dt = DateTime::parse_from_rfc3339("2024-03-15T14:30:45.123Z")
             .unwrap()
             .with_timezone(&Utc);
-        MssqlTarget::write_value_to_buffer(
-            &mut buffer,
-            &Value::Date(dt),
-            &DataType::DateTime
-        );
+        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Date(dt), &DataType::DateTime);
         assert!(buffer.starts_with("'2024-03-15"));
         assert!(buffer.ends_with("'"));
     }
-    
+
     #[test]
     fn test_format_value_decimal_to_string() {
         let result = MssqlTarget::format_value_for_insert(
             &Value::Decimal(rust_decimal::Decimal::new(12345, 2)),
-            &DataType::String
+            &DataType::String,
         );
         assert_eq!(result, "N'123.45'");
     }
-    
+
     #[test]
     fn test_format_value_string_to_boolean_invalid() {
         let result = MssqlTarget::format_value_for_insert(
             &Value::String("maybe".to_string()),
-            &DataType::Boolean
+            &DataType::Boolean,
         );
         assert_eq!(result, "NULL");
     }
-    
+
     #[test]
     fn test_format_value_string_to_decimal_invalid() {
         let result = MssqlTarget::format_value_for_insert(
             &Value::String("not_a_decimal".to_string()),
-            &DataType::Decimal
+            &DataType::Decimal,
         );
         assert_eq!(result, "NULL");
     }
-    
+
     #[test]
     fn test_multiple_buffer_writes() {
         let mut buffer = String::new();
-        
+
         buffer.push('(');
         MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Integer(1), &DataType::Integer);
         buffer.push_str(", ");
-        MssqlTarget::write_value_to_buffer(&mut buffer, &Value::String("test".to_string()), &DataType::String);
+        MssqlTarget::write_value_to_buffer(
+            &mut buffer,
+            &Value::String("test".to_string()),
+            &DataType::String,
+        );
         buffer.push_str(", ");
         MssqlTarget::write_value_to_buffer(&mut buffer, &Value::Boolean(true), &DataType::Boolean);
         buffer.push(')');
-        
+
         assert_eq!(buffer, "(1, N'test', 1)");
     }
-    
+
     #[test]
     fn test_parse_source_connection_string() {
         let result = MssqlSource::parse_connection_string(
-            "mssql://user:pass@localhost:1433/testdb#testtable"
+            "mssql://user:pass@localhost:1433/testdb#testtable",
         );
         assert!(result.is_ok());
         let (db_part, table_name) = result.unwrap();
         assert_eq!(db_part, "mssql://user:pass@localhost:1433/testdb");
         assert_eq!(table_name, "testtable");
     }
-    
+
     #[test]
     fn test_parse_source_connection_string_missing_table() {
-        let result = MssqlSource::parse_connection_string(
-            "mssql://user:pass@localhost:1433/testdb"
-        );
+        let result =
+            MssqlSource::parse_connection_string("mssql://user:pass@localhost:1433/testdb");
         assert!(result.is_err());
         if let Err(TinyEtlError::Configuration(msg)) = result {
             assert!(msg.contains("must include table name"));
         }
     }
-    
+
     #[test]
     fn test_source_with_query() {
         let source = MssqlSource::new("mssql://user:pass@localhost/db#table")
             .unwrap()
             .with_query("SELECT * FROM custom_table WHERE active = 1".to_string());
-        
+
         assert!(source.query.is_some());
-        assert_eq!(source.query.unwrap(), "SELECT * FROM custom_table WHERE active = 1");
+        assert_eq!(
+            source.query.unwrap(),
+            "SELECT * FROM custom_table WHERE active = 1"
+        );
     }
 }
-

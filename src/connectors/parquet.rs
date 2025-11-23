@@ -1,18 +1,18 @@
-use std::path::PathBuf;
-use std::collections::HashMap;
-use std::sync::Arc;
-use async_trait::async_trait;
 use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
+use async_trait::async_trait;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use rust_decimal::Decimal;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::{
-    Result, TinyEtlError,
-    schema::{Schema, Row, Value, SchemaInferer},
     connectors::{Source, Target},
+    schema::{Row, Schema, SchemaInferer, Value},
+    Result, TinyEtlError,
 };
 
 pub struct ParquetSource {
@@ -36,19 +36,32 @@ impl ParquetSource {
         crate::schema::DataType::from_arrow(arrow_type)
     }
 
-    fn arrow_array_to_values(array: &dyn Array, column_name: &str, field: &Field) -> Result<Vec<(String, Value)>> {
+    fn arrow_array_to_values(
+        array: &dyn Array,
+        column_name: &str,
+        field: &Field,
+    ) -> Result<Vec<(String, Value)>> {
         let mut values = Vec::new();
-        
+
         // Check if this is a JSON column based on metadata
-        let is_json = field.metadata()
+        let is_json = field
+            .metadata()
             .get("tinyetl:type")
             .map(|s| s == "json")
             .unwrap_or(false);
-        
+
         match array.data_type() {
             DataType::Utf8 => {
-            let string_array = array.as_any().downcast_ref::<StringArray>()
-                .ok_or_else(|| TinyEtlError::DataTransfer("Failed to downcast to StringArray".to_string()))?;                for i in 0..string_array.len() {
+                let string_array =
+                    array
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            TinyEtlError::DataTransfer(
+                                "Failed to downcast to StringArray".to_string(),
+                            )
+                        })?;
+                for i in 0..string_array.len() {
                     let value = if string_array.is_null(i) {
                         Value::Null
                     } else if is_json {
@@ -65,8 +78,10 @@ impl ParquetSource {
                 }
             }
             DataType::Int64 => {
-            let int_array = array.as_any().downcast_ref::<Int64Array>()
-                .ok_or_else(|| TinyEtlError::DataTransfer("Failed to downcast to Int64Array".to_string()))?;                for i in 0..int_array.len() {
+                let int_array = array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                    TinyEtlError::DataTransfer("Failed to downcast to Int64Array".to_string())
+                })?;
+                for i in 0..int_array.len() {
                     let value = if int_array.is_null(i) {
                         Value::Null
                     } else {
@@ -76,8 +91,10 @@ impl ParquetSource {
                 }
             }
             DataType::Int32 => {
-            let int_array = array.as_any().downcast_ref::<Int32Array>()
-                .ok_or_else(|| TinyEtlError::DataTransfer("Failed to downcast to Int32Array".to_string()))?;                for i in 0..int_array.len() {
+                let int_array = array.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
+                    TinyEtlError::DataTransfer("Failed to downcast to Int32Array".to_string())
+                })?;
+                for i in 0..int_array.len() {
                     let value = if int_array.is_null(i) {
                         Value::Null
                     } else {
@@ -87,8 +104,16 @@ impl ParquetSource {
                 }
             }
             DataType::Float64 => {
-            let float_array = array.as_any().downcast_ref::<Float64Array>()
-                .ok_or_else(|| TinyEtlError::DataTransfer("Failed to downcast to Float64Array".to_string()))?;                for i in 0..float_array.len() {
+                let float_array =
+                    array
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .ok_or_else(|| {
+                            TinyEtlError::DataTransfer(
+                                "Failed to downcast to Float64Array".to_string(),
+                            )
+                        })?;
+                for i in 0..float_array.len() {
                     let value = if float_array.is_null(i) {
                         Value::Null
                     } else {
@@ -102,8 +127,16 @@ impl ParquetSource {
                 }
             }
             DataType::Boolean => {
-            let bool_array = array.as_any().downcast_ref::<BooleanArray>()
-                .ok_or_else(|| TinyEtlError::DataTransfer("Failed to downcast to BooleanArray".to_string()))?;                for i in 0..bool_array.len() {
+                let bool_array =
+                    array
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .ok_or_else(|| {
+                            TinyEtlError::DataTransfer(
+                                "Failed to downcast to BooleanArray".to_string(),
+                            )
+                        })?;
+                for i in 0..bool_array.len() {
                     let value = if bool_array.is_null(i) {
                         Value::Null
                     } else {
@@ -113,8 +146,15 @@ impl ParquetSource {
                 }
             }
             DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-            let ts_array = array.as_any().downcast_ref::<TimestampNanosecondArray>()
-                .ok_or_else(|| TinyEtlError::DataTransfer("Failed to downcast to TimestampNanosecondArray".to_string()))?;                for i in 0..ts_array.len() {
+                let ts_array = array
+                    .as_any()
+                    .downcast_ref::<TimestampNanosecondArray>()
+                    .ok_or_else(|| {
+                        TinyEtlError::DataTransfer(
+                            "Failed to downcast to TimestampNanosecondArray".to_string(),
+                        )
+                    })?;
+                for i in 0..ts_array.len() {
                     let value = if ts_array.is_null(i) {
                         Value::Null
                     } else {
@@ -142,26 +182,26 @@ impl ParquetSource {
                 }
             }
         }
-        
+
         Ok(values)
     }
 
     fn record_batch_to_rows(batch: &RecordBatch) -> Result<Vec<Row>> {
         let num_rows = batch.num_rows();
         let mut rows = vec![HashMap::new(); num_rows];
-        
+
         let schema = batch.schema();
         for (col_index, field) in schema.fields().iter().enumerate() {
             let column = batch.column(col_index);
             let column_values = Self::arrow_array_to_values(column.as_ref(), &field.name(), field)?;
-            
+
             for (row_index, (column_name, value)) in column_values.into_iter().enumerate() {
                 if row_index < num_rows {
                     rows[row_index].insert(column_name, value);
                 }
             }
         }
-        
+
         Ok(rows)
     }
 }
@@ -176,29 +216,32 @@ impl Source for ParquetSource {
             )));
         }
 
-        let file = std::fs::File::open(&self.file_path)
-            .map_err(TinyEtlError::Io)?;
+        let file = std::fs::File::open(&self.file_path).map_err(TinyEtlError::Io)?;
 
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to create reader builder: {}", e)))?;
-        
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to create reader builder: {}", e))
+        })?;
+
         // Get total row count from metadata
         let metadata = builder.metadata();
-        let total_rows: usize = metadata.row_groups().iter()
+        let total_rows: usize = metadata
+            .row_groups()
+            .iter()
             .map(|rg| rg.num_rows() as usize)
             .sum();
         self.total_row_count = Some(total_rows);
-        
+
         // Read all batches upfront
-        let mut batch_reader = builder.build()
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to create batch reader: {}", e)))?;
-        
+        let mut batch_reader = builder.build().map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to create batch reader: {}", e))
+        })?;
+
         while let Some(batch_result) = batch_reader.next() {
             let batch = batch_result
                 .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to read batch: {}", e)))?;
             self.all_batches.push(batch);
         }
-        
+
         Ok(())
     }
 
@@ -213,14 +256,18 @@ impl Source for ParquetSource {
 
         let arrow_schema = self.all_batches[0].schema();
 
-        let columns = arrow_schema.fields().iter().map(|field| {
-            let data_type = Self::arrow_type_to_schema_type(field.data_type());
-            crate::schema::Column {
-                name: field.name().clone(),
-                data_type,
-                nullable: field.is_nullable(),
-            }
-        }).collect();
+        let columns = arrow_schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let data_type = Self::arrow_type_to_schema_type(field.data_type());
+                crate::schema::Column {
+                    name: field.name().clone(),
+                    data_type,
+                    nullable: field.is_nullable(),
+                }
+            })
+            .collect();
 
         Ok(Schema {
             columns,
@@ -233,12 +280,12 @@ impl Source for ParquetSource {
         if self.current_batch_index >= self.all_batches.len() {
             return Ok(Vec::new()); // No more data
         }
-        
+
         let batch = &self.all_batches[self.current_batch_index];
         self.current_batch_index += 1;
-        
+
         let mut rows = Self::record_batch_to_rows(batch)?;
-        
+
         // If requested batch size is smaller than the record batch, we need to split it
         if rows.len() > batch_size {
             let remaining_rows = rows.split_off(batch_size);
@@ -246,7 +293,7 @@ impl Source for ParquetSource {
             // In a more sophisticated implementation, you'd store the remaining rows
             // and return them in subsequent calls
         }
-        
+
         Ok(rows)
     }
 
@@ -285,7 +332,10 @@ impl ParquetTarget {
         Arc::new(schema.to_arrow_schema())
     }
 
-    fn rows_to_record_batch(rows: &[Row], schema: &Arc<arrow::datatypes::Schema>) -> Result<RecordBatch> {
+    fn rows_to_record_batch(
+        rows: &[Row],
+        schema: &Arc<arrow::datatypes::Schema>,
+    ) -> Result<RecordBatch> {
         if rows.is_empty() {
             return Ok(RecordBatch::new_empty(schema.clone()));
         }
@@ -294,7 +344,7 @@ impl ParquetTarget {
 
         for field in schema.fields() {
             let column_name = field.name();
-            
+
             match field.data_type() {
                 DataType::Utf8 => {
                     let mut builder = StringBuilder::new();
@@ -329,7 +379,7 @@ impl ParquetTarget {
                                 // Convert Decimal to f64
                                 let f: f64 = (*d).try_into().unwrap_or(0.0);
                                 builder.append_value(f);
-                            },
+                            }
                             Some(Value::Null) => builder.append_null(),
                             None => builder.append_null(),
                             _ => builder.append_null(),
@@ -379,8 +429,9 @@ impl ParquetTarget {
             }
         }
 
-        RecordBatch::try_new(schema.clone(), arrays)
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to create record batch: {}", e)))
+        RecordBatch::try_new(schema.clone(), arrays).map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to create record batch: {}", e))
+        })
     }
 }
 
@@ -418,24 +469,28 @@ impl Target for ParquetTarget {
             return Ok(());
         }
 
-        let schema = self.schema.as_ref()
+        let schema = self
+            .schema
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Configuration("Schema not set".to_string()))?;
 
         // Create the file and writer
-        let file = std::fs::File::create(&self.file_path)
-            .map_err(TinyEtlError::Io)?;
+        let file = std::fs::File::create(&self.file_path).map_err(TinyEtlError::Io)?;
 
-        let mut writer = ArrowWriter::try_new(file, schema.clone(), None)
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to create parquet writer: {}", e)))?;
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), None).map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to create parquet writer: {}", e))
+        })?;
 
         // Convert all buffered rows to record batch and write
         let batch = Self::rows_to_record_batch(&self.buffered_rows, schema)?;
-        
-        writer.write(&batch)
+
+        writer
+            .write(&batch)
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to write batch: {}", e)))?;
 
-        writer.close()
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to close parquet writer: {}", e)))?;
+        writer.close().map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to close parquet writer: {}", e))
+        })?;
 
         self.is_finalized = true;
         Ok(())
@@ -461,8 +516,8 @@ impl Target for ParquetTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use crate::schema::{Column, DataType};
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_parquet_target_creation() {
@@ -476,7 +531,7 @@ mod tests {
     async fn test_parquet_write_read_cycle() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test_cycle.parquet");
-        
+
         // Create a simple schema
         let schema = Schema {
             columns: vec![
@@ -519,10 +574,10 @@ mod tests {
         // Read data back
         let mut source = ParquetSource::new(file_path.to_str().unwrap()).unwrap();
         source.connect().await.unwrap();
-        
+
         let read_schema = source.infer_schema(100).await.unwrap();
         assert_eq!(read_schema.columns.len(), 2);
-        
+
         let read_rows = source.read_batch(100).await.unwrap();
         assert_eq!(read_rows.len(), 2);
     }
