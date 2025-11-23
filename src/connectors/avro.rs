@@ -1,7 +1,4 @@
-use apache_avro::{
-    types::Value as AvroValue, Reader, Schema as AvroSchema,
-    Writer,
-};
+use apache_avro::{types::Value as AvroValue, Reader, Schema as AvroSchema, Writer};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde_json::{json, Value as JsonValue};
@@ -112,10 +109,8 @@ impl AvroSource {
             AvroValue::Union(_, boxed_value) => Self::avro_value_to_value(boxed_value),
             AvroValue::Array(values) => {
                 // Convert array to JSON string for now
-                let json_values: std::result::Result<Vec<JsonValue>, _> = values
-                    .iter()
-                    .map(Self::avro_value_to_json_value)
-                    .collect();
+                let json_values: std::result::Result<Vec<JsonValue>, _> =
+                    values.iter().map(Self::avro_value_to_json_value).collect();
                 match json_values {
                     Ok(vals) => Ok(Value::String(
                         serde_json::to_string(&vals).unwrap_or_default(),

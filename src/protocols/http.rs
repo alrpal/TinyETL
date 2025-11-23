@@ -77,9 +77,7 @@ impl HttpProtocol {
             tempfile::NamedTempFile::new().map_err(TinyEtlError::Io)?
         };
 
-        temp_file
-            .write_all(&content)
-            .map_err(TinyEtlError::Io)?;
+        temp_file.write_all(&content).map_err(TinyEtlError::Io)?;
 
         temp_file.flush().map_err(TinyEtlError::Io)?;
 

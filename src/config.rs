@@ -26,8 +26,7 @@ pub struct TargetConfig {
     pub extra_params: HashMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OptionsConfig {
     pub batch_size: Option<usize>,
     pub infer_schema: Option<bool>,
@@ -176,7 +175,6 @@ impl YamlConfig {
         Ok(result)
     }
 }
-
 
 impl std::fmt::Display for LogLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -9,8 +9,7 @@ use crate::{
 };
 
 /// Configuration for data transformation
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub enum TransformConfig {
     /// Path to a Lua file containing a transform function
     File(String),
@@ -22,7 +21,6 @@ pub enum TransformConfig {
     #[default]
     None,
 }
-
 
 /// Row transformer using Lua scripting
 #[derive(Debug)]
