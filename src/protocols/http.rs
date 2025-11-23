@@ -25,6 +25,7 @@ impl HttpProtocol {
     }
 
     /// Download a file from an HTTP/HTTPS URL to a temporary file
+    #[allow(dead_code)]
     async fn download_to_temp(&self, url: &Url) -> Result<NamedTempFile> {
         self.download_to_temp_with_type(url, None).await
     }

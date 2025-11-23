@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::TimeZone;
 use rust_decimal::Decimal;
 use sqlx::{postgres::PgConnectOptions, Column, PgPool, Row as SqlxRow};
 use std::str::FromStr;
@@ -283,17 +284,14 @@ impl PostgresSource {
             }
         } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDateTime>, _>(col_name) {
             match val {
-                Some(dt) => Ok(Value::Date(chrono::DateTime::from_utc(dt, chrono::Utc))),
+                Some(dt) => Ok(Value::Date(chrono::Utc.from_utc_datetime(&dt))),
                 None => Ok(Value::Null),
             }
         } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDate>, _>(col_name) {
             match val {
                 Some(date) => {
                     let datetime = date.and_hms_opt(0, 0, 0).unwrap();
-                    Ok(Value::Date(chrono::DateTime::from_utc(
-                        datetime,
-                        chrono::Utc,
-                    )))
+                    Ok(Value::Date(chrono::Utc.from_utc_datetime(&datetime)))
                 }
                 None => Ok(Value::Null),
             }

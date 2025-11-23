@@ -65,7 +65,7 @@ impl Source for SqliteSource {
         }
     }
 
-    async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
+    async fn infer_schema(&mut self, _sample_size: usize) -> Result<Schema> {
         if self.pool.is_none() {
             self.connect().await?;
         }

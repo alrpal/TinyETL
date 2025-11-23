@@ -162,7 +162,6 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
 
 /// New protocol-aware factory functions that handle modern connection strings
 /// Use these for new protocol support (snowflake://, onelake://, etc.)
-
 /// Create a source using the new protocol abstraction
 pub async fn create_source_from_url(connection_string: &str) -> Result<Box<dyn Source>> {
     create_source_from_url_with_type(connection_string, None).await

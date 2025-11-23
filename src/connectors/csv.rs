@@ -247,7 +247,7 @@ impl CsvTarget {
         })
     }
 
-    fn value_to_string(&self, value: &Value) -> String {
+    fn value_to_string(value: &Value) -> String {
         match value {
             Value::String(s) => s.clone(),
             Value::Integer(i) => i.to_string(),
@@ -297,19 +297,6 @@ impl Target for CsvTarget {
 
         let mut written_count = 0;
 
-        // Helper function to convert Value to String
-        let value_to_string = |value: &Value| -> String {
-            match value {
-                Value::String(s) => s.clone(),
-                Value::Integer(i) => i.to_string(),
-                Value::Decimal(d) => d.to_string(),
-                Value::Boolean(b) => b.to_string(),
-                Value::Date(dt) => dt.to_rfc3339(),
-                Value::Json(j) => serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string()),
-                Value::Null => String::new(),
-            }
-        };
-
         if let Some(ref mut writer) = self.writer {
             for row in rows {
                 // Use the stored column order from the schema
@@ -317,13 +304,21 @@ impl Target for CsvTarget {
                     // Use schema-defined column order
                     self.column_order
                         .iter()
-                        .map(|key| row.get(key).map(value_to_string).unwrap_or_default())
+                        .map(|key| {
+                            row.get(key)
+                                .map(CsvTarget::value_to_string)
+                                .unwrap_or_default()
+                        })
                         .collect()
                 } else {
                     // Fallback for when schema wasn't used (maintain old behavior)
                     let keys: Vec<_> = row.keys().cloned().collect();
                     keys.iter()
-                        .map(|key| row.get(key).map(value_to_string).unwrap_or_default())
+                        .map(|key| {
+                            row.get(key)
+                                .map(CsvTarget::value_to_string)
+                                .unwrap_or_default()
+                        })
                         .collect()
                 };
 
@@ -539,22 +534,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_csv_target_value_to_string() {
-        let target = CsvTarget::new("/tmp/test.csv").unwrap();
-
         assert_eq!(
-            target.value_to_string(&Value::String("test".to_string())),
+            CsvTarget::value_to_string(&Value::String("test".to_string())),
             "test"
         );
-        assert_eq!(target.value_to_string(&Value::Integer(42)), "42");
+        assert_eq!(CsvTarget::value_to_string(&Value::Integer(42)), "42");
         assert_eq!(
-            target.value_to_string(&Value::Decimal(Decimal::new(314, 2))),
+            CsvTarget::value_to_string(&Value::Decimal(Decimal::new(314, 2))),
             "3.14"
         );
-        assert_eq!(target.value_to_string(&Value::Boolean(true)), "true");
-        assert_eq!(target.value_to_string(&Value::Null), "");
+        assert_eq!(CsvTarget::value_to_string(&Value::Boolean(true)), "true");
+        assert_eq!(CsvTarget::value_to_string(&Value::Null), "");
 
         let dt = chrono::Utc::now();
-        assert!(target.value_to_string(&Value::Date(dt)).contains("T"));
+        assert!(CsvTarget::value_to_string(&Value::Date(dt)).contains("T"));
     }
 
     #[tokio::test]

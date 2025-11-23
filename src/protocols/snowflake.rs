@@ -396,8 +396,8 @@ impl SnowflakeTarget {
             let temp_path = temp_file.path().to_string_lossy().to_string();
 
             info!(
-                "Simulating import from temporary Parquet file to Snowflake table {}",
-                self.connection.table
+                "Simulating import from temporary Parquet file {} to Snowflake table {}",
+                temp_path, self.connection.table
             );
 
             // In production, you would:
@@ -495,7 +495,10 @@ impl Target for SnowflakeTarget {
     async fn exists(&self, table_name: &str) -> Result<bool> {
         // Mock implementation
         // In production, you would query INFORMATION_SCHEMA.TABLES
-        warn!("Mock implementation: Assuming table does not exist");
+        info!(
+            "Mock Snowflake exists() check for table {} - assuming it does not exist",
+            table_name
+        );
         Ok(false)
     }
 

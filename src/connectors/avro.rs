@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 
 use crate::{

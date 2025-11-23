@@ -148,7 +148,7 @@ impl Source for OdbcSource {
         Ok(())
     }
 
-    async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
+    async fn infer_schema(&mut self, _sample_size: usize) -> Result<Schema> {
         if self.connection.is_none() {
             self.connect().await?;
         }
@@ -512,7 +512,7 @@ impl Target for OdbcTarget {
         // Optimize chunk size - use larger chunks for better performance
         let max_params = 1900;
         let params_per_row = schema.columns.len();
-        let chunk_size = (max_params / params_per_row).max(1).min(500);
+        let chunk_size = (max_params / params_per_row).clamp(1, 500);
 
         let mut total_inserted = 0;
 

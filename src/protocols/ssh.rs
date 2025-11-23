@@ -95,6 +95,7 @@ impl SshProtocol {
     }
 
     /// Upload a file via SCP (for target operations)
+    #[allow(dead_code)]
     async fn upload_via_scp(&self, url: &Url, local_path: &str) -> Result<()> {
         let host = url.host_str().ok_or_else(|| {
             TinyEtlError::Configuration("SSH URL must specify a host".to_string())
@@ -176,7 +177,7 @@ impl Protocol for SshProtocol {
         create_source(&temp_path)
     }
 
-    async fn create_target(&self, url: &Url) -> Result<Box<dyn Target>> {
+    async fn create_target(&self, _url: &Url) -> Result<Box<dyn Target>> {
         // For SSH targets, we'll create a local temporary file target
         // and then upload it after writing is complete
         // This is a simplified implementation - a full implementation would

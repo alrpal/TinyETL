@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 use serde_json;
 use sqlx::{Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
@@ -12,7 +12,6 @@ use crate::{
 };
 
 pub struct MysqlSource {
-    connection_string: String,
     database_url: String,
     table_name: String,
     pool: Option<MySqlPool>,
@@ -25,7 +24,6 @@ impl MysqlSource {
         let (db_url, table_name) = Self::parse_connection_string(connection_string)?;
 
         Ok(Self {
-            connection_string: connection_string.to_string(),
             database_url: db_url,
             table_name,
             pool: None,
@@ -156,14 +154,14 @@ impl MysqlSource {
             }
         } else if let Ok(val) = row.try_get::<Option<NaiveDateTime>, _>(col_name) {
             match val {
-                Some(dt) => Ok(Value::Date(DateTime::from_utc(dt, Utc))),
+                Some(dt) => Ok(Value::Date(Utc.from_utc_datetime(&dt))),
                 None => Ok(Value::Null),
             }
         } else if let Ok(val) = row.try_get::<Option<NaiveDate>, _>(col_name) {
             match val {
                 Some(date) => {
                     let datetime = date.and_hms_opt(0, 0, 0).unwrap();
-                    Ok(Value::Date(DateTime::from_utc(datetime, Utc)))
+                    Ok(Value::Date(Utc.from_utc_datetime(&datetime)))
                 }
                 None => Ok(Value::Null),
             }
@@ -298,7 +296,6 @@ impl Source for MysqlSource {
 }
 
 pub struct MysqlTarget {
-    connection_string: String,
     database_url: String,
     table_name: String,
     pool: Option<MySqlPool>,
@@ -310,7 +307,6 @@ impl MysqlTarget {
         let (db_url, table_name) = Self::parse_connection_string(connection_string)?;
 
         Ok(Self {
-            connection_string: connection_string.to_string(),
             database_url: db_url,
             table_name,
             pool: None,
@@ -330,9 +326,13 @@ impl MysqlTarget {
             // Extract database name from mysql://user:pass@host:port/dbname
             let url = Url::parse(connection_string)
                 .map_err(|e| TinyEtlError::Configuration(format!("Invalid MySQL URL: {}", e)))?;
-            let db_name = url.path().trim_start_matches('/');
-            let default_table = if db_name.is_empty() { "data" } else { "data" };
-            Ok((connection_string.to_string(), default_table.to_string()))
+            let db_name = url.path().trim_start_matches('/').to_string();
+            let default_table = if db_name.is_empty() {
+                "data".to_string()
+            } else {
+                format!("{}_data", db_name)
+            };
+            Ok((connection_string.to_string(), default_table))
         }
     }
 
@@ -1204,10 +1204,7 @@ mod tests {
             target.database_url,
             "mysql://admin:secret@db.example.com:3306/production"
         );
-        assert_eq!(
-            target.connection_string,
-            "mysql://admin:secret@db.example.com:3306/production#logs"
-        );
+        assert_eq!(target.table_name, "logs");
     }
 
     #[test]

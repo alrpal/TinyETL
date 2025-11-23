@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use base64::{engine::general_purpose, Engine as _};
+use chrono::{DateTime, Utc};
 use duckdb::{types::ValueRef, Connection};
 use rust_decimal::Decimal;
 use std::path::PathBuf;
@@ -126,7 +128,7 @@ impl Source for DuckdbSource {
         Ok(())
     }
 
-    async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
+    async fn infer_schema(&mut self, _sample_size: usize) -> Result<Schema> {
         if self.connection.is_none() {
             self.connect().await?;
         }
@@ -272,21 +274,15 @@ impl Source for DuckdbSource {
                             // Convert DuckDB decimal to rust_decimal
                             Value::String(d.to_string())
                         }
-                        ValueRef::Timestamp(unit, value) => {
+                        ValueRef::Timestamp(_unit, value) => {
                             // DuckDB timestamp is stored as microseconds since epoch
                             // Convert to a timestamp string in ISO 8601 format
-                            use chrono::{DateTime, NaiveDateTime, Utc};
-
                             let micros = value;
                             let seconds = micros / 1_000_000;
                             let nanos = ((micros % 1_000_000) * 1000) as u32;
 
-                            match NaiveDateTime::from_timestamp_opt(seconds, nanos) {
-                                Some(naive_dt) => {
-                                    let dt =
-                                        DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc);
-                                    Value::String(dt.to_rfc3339())
-                                }
+                            match DateTime::<Utc>::from_timestamp(seconds, nanos) {
+                                Some(dt) => Value::String(dt.to_rfc3339()),
                                 None => Value::Null,
                             }
                         }
@@ -296,7 +292,7 @@ impl Source for DuckdbSource {
                         },
                         ValueRef::Blob(bytes) => {
                             // Convert blob to base64 string
-                            Value::String(base64::encode(bytes))
+                            Value::String(general_purpose::STANDARD.encode(bytes))
                         }
                         ValueRef::Date32(_) => {
                             // Get as string

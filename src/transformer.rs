@@ -324,7 +324,7 @@ impl Transformer {
     }
 
     /// Convert a Row to a Lua table
-    fn row_to_lua_table(&self, row: &Row) -> Result<Table> {
+    fn row_to_lua_table(&self, row: &Row) -> Result<Table<'_>> {
         let table = self
             .lua
             .create_table()

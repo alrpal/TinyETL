@@ -68,7 +68,7 @@ impl TransferEngine {
             let sample_batch = source.read_batch(1).await?;
 
             if !sample_batch.is_empty() {
-                let transformed_sample = transformer.transform_batch(&sample_batch)?;
+                transformer.transform_batch(&sample_batch)?;
                 if let Some(transform_schema) = transformer.get_inferred_schema() {
                     info!(
                         "→ Schema updated by transformations: {} columns",
@@ -213,7 +213,7 @@ impl TransferEngine {
         source.reset().await?;
         let sample_data = source.read_batch(preview_rows).await?;
 
-        let (final_schema, final_data) = if transformer.is_enabled() && !sample_data.is_empty() {
+        let (_final_schema, final_data) = if transformer.is_enabled() && !sample_data.is_empty() {
             println!("\nApplying transformations...");
             let transformed_data = transformer.transform_batch(&sample_data)?;
 

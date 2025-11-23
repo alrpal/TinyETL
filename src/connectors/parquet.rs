@@ -3,7 +3,6 @@ use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
-use parquet::file::reader::FileReader;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -288,7 +287,7 @@ impl Source for ParquetSource {
 
         // If requested batch size is smaller than the record batch, we need to split it
         if rows.len() > batch_size {
-            let remaining_rows = rows.split_off(batch_size);
+            rows.truncate(batch_size);
             // For simplicity, we'll just return the first batch_size rows
             // In a more sophisticated implementation, you'd store the remaining rows
             // and return them in subsequent calls

@@ -6,7 +6,10 @@ use url::Url;
 pub fn check_and_warn_about_password_in_url(url: &str, source_name: &str) {
     if let Ok(parsed_url) = Url::parse(url) {
         if !parsed_url.password().unwrap_or("").is_empty() {
-            warn!("Warning: Using passwords in CLI parameters is insecure. Consider using --source-secret-id / --dest-secret-id.");
+            warn!(
+                "Warning: Using passwords in CLI parameters for {} is insecure. Consider using --source-secret-id / --dest-secret-id.",
+                source_name
+            );
         }
     }
     // Also check for common password patterns in connection strings
@@ -14,7 +17,10 @@ pub fn check_and_warn_about_password_in_url(url: &str, source_name: &str) {
         || url.contains("pwd=")
         || url.contains(":") && url.contains("@")
     {
-        warn!("Warning: Using passwords in CLI parameters is insecure. Consider using --source-secret-id / --dest-secret-id.");
+        warn!(
+            "Warning: Using passwords in CLI parameters for {} is insecure. Consider using --source-secret-id / --dest-secret-id.",
+            source_name
+        );
     }
 }
 

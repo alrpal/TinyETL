@@ -22,7 +22,7 @@ pub trait Protocol: Send + Sync {
     async fn create_source_with_type(
         &self,
         url: &Url,
-        source_type: Option<&str>,
+        _source_type: Option<&str>,
     ) -> Result<Box<dyn Source>> {
         // Default implementation ignores the type hint
         self.create_source(url).await

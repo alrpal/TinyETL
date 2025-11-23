@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use futures_util::stream::TryStreamExt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -278,7 +278,7 @@ impl Source for MssqlSource {
                                 Value::Boolean(v)
                             } else if let Ok(Some(v)) = row.try_get::<NaiveDateTime, usize>(i) {
                                 // Convert NaiveDateTime to DateTime<Utc>
-                                Value::Date(DateTime::from_utc(v, Utc))
+                                Value::Date(Utc.from_utc_datetime(&v))
                             } else {
                                 Value::Null
                             }
@@ -367,6 +367,7 @@ impl MssqlTarget {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn format_value_for_insert(value: &Value, expected_type: &DataType) -> String {
         match value {
             Value::Null => "NULL".to_string(),
@@ -666,13 +667,11 @@ impl Target for MssqlTarget {
             TinyEtlError::Connection(format!("Failed to check table existence: {}", e))
         })?;
 
-        if let Some(item) = stream.try_next().await.map_err(|e| {
+        if let Some(tiberius::QueryItem::Row(row)) = stream.try_next().await.map_err(|e| {
             TinyEtlError::Connection(format!("Failed to fetch existence result: {}", e))
         })? {
-            if let tiberius::QueryItem::Row(row) = item {
-                if let Ok(Some(count)) = row.try_get::<i32, usize>(0) {
-                    return Ok(count > 0);
-                }
+            if let Ok(Some(count)) = row.try_get::<i32, usize>(0) {
+                return Ok(count > 0);
             }
         }
 
