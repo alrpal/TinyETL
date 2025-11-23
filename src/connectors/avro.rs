@@ -930,6 +930,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::approx_constant)]
     async fn test_avro_value_to_value() {
         // Test basic types
         assert_eq!(
@@ -1101,6 +1102,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::approx_constant)]
     async fn test_value_to_avro_value() {
         // Test basic conversions with nullable=true
         assert_eq!(

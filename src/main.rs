@@ -95,12 +95,6 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_main_function_exists() {
-        // Basic test to ensure main function compiles
-        assert!(true);
-    }
-
-    #[test]
     fn test_cli_parsing() {
         // Test that Cli can be created from command line args
         let cli = Cli::try_parse_from([
