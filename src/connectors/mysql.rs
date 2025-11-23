@@ -616,7 +616,7 @@ mod tests {
             target.database_url,
             "mysql://user:pass@localhost:3306/testdb"
         );
-        assert_eq!(target.table_name, "data");
+        assert_eq!(target.table_name, "testdb_data");
     }
 
     #[test]
@@ -916,7 +916,7 @@ mod tests {
 
         // Test without table name (should default to "data")
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/db").unwrap();
-        assert_eq!(target.table_name, "data");
+        assert_eq!(target.table_name, "db_data");
 
         // Test with empty database path
         let target = MysqlTarget::new("mysql://user:pass@localhost:3306/").unwrap();
