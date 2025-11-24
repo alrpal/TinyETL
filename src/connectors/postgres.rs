@@ -1,13 +1,13 @@
 use async_trait::async_trait;
-use sqlx::{PgPool, Row as SqlxRow, Column, postgres::PgConnectOptions, Postgres};
-use std::str::FromStr;
-use chrono::{DateTime, Utc};
+use chrono::TimeZone;
 use rust_decimal::Decimal;
+use sqlx::{postgres::PgConnectOptions, Column, PgPool, Row as SqlxRow};
+use std::str::FromStr;
 
 use crate::{
+    connectors::{Source, Target},
+    schema::{DataType, Row, Schema, SchemaInferer, Value},
     Result, TinyEtlError,
-    schema::{Schema, Row, Value, Column as SchemaColumn, DataType, SchemaInferer},
-    connectors::{Source, Target}
 };
 
 pub struct PostgresSource {
@@ -26,7 +26,8 @@ impl PostgresSource {
             let parts: Vec<&str> = connection_string.split('#').collect();
             if parts.len() != 2 {
                 return Err(TinyEtlError::Configuration(
-                    "PostgreSQL connection string format: postgres://user:pass@host:port/db#table".to_string()
+                    "PostgreSQL connection string format: postgres://user:pass@host:port/db#table"
+                        .to_string(),
                 ));
             }
             (parts[0], parts[1])
@@ -67,31 +68,36 @@ impl PostgresSource {
 #[async_trait]
 impl Source for PostgresSource {
     async fn connect(&mut self) -> Result<()> {
-        let options = PgConnectOptions::from_str(&self.connection_string)
-            .map_err(|e| TinyEtlError::Connection(format!("Invalid PostgreSQL connection string: {}", e)))?;
-        
-        let pool = PgPool::connect_with(options)
-            .await
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
-        
+        let options = PgConnectOptions::from_str(&self.connection_string).map_err(|e| {
+            TinyEtlError::Connection(format!("Invalid PostgreSQL connection string: {}", e))
+        })?;
+
+        let pool = PgPool::connect_with(options).await.map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to connect to PostgreSQL: {}", e))
+        })?;
+
         self.pool = Some(pool);
         Ok(())
     }
 
     async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
-        let pool = self.pool.as_ref()
+        let pool = self
+            .pool
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
 
         let query = if let Some(ref custom_query) = self.query {
-            format!("SELECT * FROM ({}) AS subquery LIMIT {}", custom_query, sample_size)
+            format!(
+                "SELECT * FROM ({}) AS subquery LIMIT {}",
+                custom_query, sample_size
+            )
         } else {
             format!("SELECT * FROM {} LIMIT {}", self.table_name, sample_size)
         };
 
-        let rows = sqlx::query(&query)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e)))?;
+        let rows = sqlx::query(&query).fetch_all(pool).await.map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e))
+        })?;
 
         if rows.is_empty() {
             return Ok(Schema {
@@ -107,14 +113,14 @@ impl Source for PostgresSource {
             let mut schema_row = Row::new();
             for column in row.columns() {
                 let col_name = column.name();
-                let value = self.extract_value(&row, column)?;
+                let value = self.extract_value(row, column)?;
                 schema_row.insert(col_name.to_string(), value);
             }
             schema_rows.push(schema_row);
         }
 
         let mut schema = SchemaInferer::infer_from_rows(&schema_rows)?;
-        
+
         // Get estimated row count
         if let Ok(count_result) = self.estimated_row_count().await {
             schema.estimated_rows = count_result;
@@ -124,15 +130,21 @@ impl Source for PostgresSource {
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
-        let pool = self.pool.as_ref()
+        let pool = self
+            .pool
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
 
         let query = if let Some(ref custom_query) = self.query {
-            format!("SELECT * FROM ({}) AS subquery OFFSET {} LIMIT {}", 
-                    custom_query, self.current_offset, batch_size)
+            format!(
+                "SELECT * FROM ({}) AS subquery OFFSET {} LIMIT {}",
+                custom_query, self.current_offset, batch_size
+            )
         } else {
-            format!("SELECT * FROM {} OFFSET {} LIMIT {}", 
-                    self.table_name, self.current_offset, batch_size)
+            format!(
+                "SELECT * FROM {} OFFSET {} LIMIT {}",
+                self.table_name, self.current_offset, batch_size
+            )
         };
 
         let rows = sqlx::query(&query)
@@ -156,7 +168,9 @@ impl Source for PostgresSource {
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
-        let pool = self.pool.as_ref()
+        let pool = self
+            .pool
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
 
         let count_query = if self.query.is_some() {
@@ -164,7 +178,10 @@ impl Source for PostgresSource {
             // the entire query, so we return None
             return Ok(None);
         } else {
-            format!("SELECT reltuples::BIGINT AS estimate FROM pg_class WHERE relname = '{}'", self.table_name)
+            format!(
+                "SELECT reltuples::BIGINT AS estimate FROM pg_class WHERE relname = '{}'",
+                self.table_name
+            )
         };
 
         match sqlx::query_scalar::<_, i64>(&count_query)
@@ -180,7 +197,10 @@ impl Source for PostgresSource {
                     .await
                 {
                     Ok(count) => Ok(Some(count as usize)),
-                    Err(e) => Err(TinyEtlError::DataTransfer(format!("Failed to get row count: {}", e))),
+                    Err(e) => Err(TinyEtlError::DataTransfer(format!(
+                        "Failed to get row count: {}",
+                        e
+                    ))),
                 }
             }
         }
@@ -202,9 +222,13 @@ impl Source for PostgresSource {
 }
 
 impl PostgresSource {
-    fn extract_value(&self, row: &sqlx::postgres::PgRow, column: &sqlx::postgres::PgColumn) -> Result<Value> {
+    fn extract_value(
+        &self,
+        row: &sqlx::postgres::PgRow,
+        column: &sqlx::postgres::PgColumn,
+    ) -> Result<Value> {
         let col_name = column.name();
-        
+
         // Try different PostgreSQL types in order of likelihood
         if let Ok(val) = row.try_get::<Option<String>, _>(col_name) {
             match val {
@@ -234,7 +258,7 @@ impl PostgresSource {
                         Ok(d) => Ok(Value::Decimal(d)),
                         Err(_) => Ok(Value::String(f.to_string())),
                     }
-                },
+                }
                 None => Ok(Value::Null),
             }
         } else if let Ok(val) = row.try_get::<Option<f32>, _>(col_name) {
@@ -245,7 +269,7 @@ impl PostgresSource {
                         Ok(d) => Ok(Value::Decimal(d)),
                         Err(_) => Ok(Value::String(f.to_string())),
                     }
-                },
+                }
                 None => Ok(Value::Null),
             }
         } else if let Ok(val) = row.try_get::<Option<bool>, _>(col_name) {
@@ -260,15 +284,15 @@ impl PostgresSource {
             }
         } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDateTime>, _>(col_name) {
             match val {
-                Some(dt) => Ok(Value::Date(chrono::DateTime::from_utc(dt, chrono::Utc))),
+                Some(dt) => Ok(Value::Date(chrono::Utc.from_utc_datetime(&dt))),
                 None => Ok(Value::Null),
             }
         } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDate>, _>(col_name) {
             match val {
                 Some(date) => {
                     let datetime = date.and_hms_opt(0, 0, 0).unwrap();
-                    Ok(Value::Date(chrono::DateTime::from_utc(datetime, chrono::Utc)))
-                },
+                    Ok(Value::Date(chrono::Utc.from_utc_datetime(&datetime)))
+                }
                 None => Ok(Value::Null),
             }
         } else {
@@ -291,7 +315,8 @@ impl PostgresTarget {
             let parts: Vec<&str> = connection_string.split('#').collect();
             if parts.len() != 2 {
                 return Err(TinyEtlError::Configuration(
-                    "PostgreSQL connection string format: postgres://user:pass@host:port/db#table".to_string()
+                    "PostgreSQL connection string format: postgres://user:pass@host:port/db#table"
+                        .to_string(),
                 ));
             }
             (parts[0].to_string(), Some(parts[1].to_string()))
@@ -311,24 +336,29 @@ impl PostgresTarget {
 #[async_trait]
 impl Target for PostgresTarget {
     async fn connect(&mut self) -> Result<()> {
-        let options = PgConnectOptions::from_str(&self.connection_string)
-            .map_err(|e| TinyEtlError::Connection(format!("Invalid PostgreSQL connection string: {}", e)))?;
-        
-        let pool = PgPool::connect_with(options)
-            .await
-            .map_err(|e| TinyEtlError::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
-        
+        let options = PgConnectOptions::from_str(&self.connection_string).map_err(|e| {
+            TinyEtlError::Connection(format!("Invalid PostgreSQL connection string: {}", e))
+        })?;
+
+        let pool = PgPool::connect_with(options).await.map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to connect to PostgreSQL: {}", e))
+        })?;
+
         self.pool = Some(pool);
         Ok(())
     }
 
     async fn create_table(&mut self, table_name: &str, schema: &Schema) -> Result<()> {
-        let pool = self.pool.as_ref()
+        let pool = self
+            .pool
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
 
         // Determine the actual table name to use
         let actual_table_name = if table_name.is_empty() {
-            self.table_name.clone().unwrap_or_else(|| "data".to_string())
+            self.table_name
+                .clone()
+                .unwrap_or_else(|| "data".to_string())
         } else {
             table_name.to_string()
         };
@@ -338,22 +368,26 @@ impl Target for PostgresTarget {
         self.schema = Some(schema.clone());
 
         let mut create_sql = format!("CREATE TABLE IF NOT EXISTS \"{}\" (", actual_table_name);
-        
-        let column_defs: Vec<String> = schema.columns.iter().map(|col| {
-            let pg_type = match col.data_type {
-                DataType::String => "TEXT",
-                DataType::Integer => "BIGINT",
-                DataType::Decimal => "DECIMAL",
-                DataType::Boolean => "BOOLEAN",
-                DataType::Date | DataType::DateTime => "TIMESTAMP WITH TIME ZONE",
-                DataType::Json => "JSONB", // PostgreSQL native JSON type
-                DataType::Null => "TEXT", // Default to TEXT for null columns
-            };
-            
-            let nullable = if col.nullable { "" } else { " NOT NULL" };
-            format!("\"{}\" {}{}", col.name, pg_type, nullable)
-        }).collect();
-        
+
+        let column_defs: Vec<String> = schema
+            .columns
+            .iter()
+            .map(|col| {
+                let pg_type = match col.data_type {
+                    DataType::String => "TEXT",
+                    DataType::Integer => "BIGINT",
+                    DataType::Decimal => "DECIMAL",
+                    DataType::Boolean => "BOOLEAN",
+                    DataType::Date | DataType::DateTime => "TIMESTAMP WITH TIME ZONE",
+                    DataType::Json => "JSONB", // PostgreSQL native JSON type
+                    DataType::Null => "TEXT",  // Default to TEXT for null columns
+                };
+
+                let nullable = if col.nullable { "" } else { " NOT NULL" };
+                format!("\"{}\" {}{}", col.name, pg_type, nullable)
+            })
+            .collect();
+
         create_sql.push_str(&column_defs.join(", "));
         create_sql.push(')');
 
@@ -366,36 +400,44 @@ impl Target for PostgresTarget {
     }
 
     async fn write_batch(&mut self, rows: &[Row]) -> Result<usize> {
-        let pool = self.pool.as_ref()
+        let pool = self
+            .pool
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
-            
-        let table_name = self.table_name.as_ref()
+
+        let table_name = self
+            .table_name
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Configuration("Table not created".to_string()))?;
-            
-        let schema = self.schema.as_ref()
+
+        let schema = self
+            .schema
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Configuration("Schema not set".to_string()))?;
 
         if rows.is_empty() {
             return Ok(0);
         }
 
-        // Build INSERT statement with quoted column names  
-        let column_names: Vec<String> = schema.columns.iter()
+        // Build INSERT statement with quoted column names
+        let column_names: Vec<String> = schema
+            .columns
+            .iter()
             .map(|c| format!("\"{}\"", c.name))
             .collect();
-        
+
         let mut total_written = 0;
-        
+
         // Process in chunks to avoid parameter limit (PostgreSQL has 65535 parameter limit)
         // With 12 columns, we can do ~5000 rows per batch, but start conservatively
         let max_rows_per_batch = 65535 / schema.columns.len().max(1);
         let chunk_size = max_rows_per_batch.min(1000); // Reduced from 5000 to 1000
-        
+
         for chunk in rows.chunks(chunk_size) {
             // Build VALUES placeholders for multiple rows: ($1, $2, $3), ($4, $5, $6), ...
             let mut placeholders = Vec::with_capacity(chunk.len());
             let mut param_count = 1;
-            
+
             for _ in 0..chunk.len() {
                 let row_placeholders: Vec<String> = (0..schema.columns.len())
                     .map(|_| {
@@ -406,17 +448,17 @@ impl Target for PostgresTarget {
                     .collect();
                 placeholders.push(format!("({})", row_placeholders.join(", ")));
             }
-            
+
             let insert_sql = format!(
                 "INSERT INTO \"{}\" ({}) VALUES {}",
                 table_name,
                 column_names.join(", "),
                 placeholders.join(", ")
             );
-            
+
             // Build query and bind all values
             let mut query = sqlx::query(&insert_sql);
-            
+
             for row in chunk {
                 for col in &schema.columns {
                     let value = row.get(&col.name).unwrap_or(&Value::Null);
@@ -426,27 +468,27 @@ impl Target for PostgresTarget {
                             // PostgreSQL is stricter - strip ALL null bytes
                             let s: String = d.to_string().chars().filter(|&c| c != '\0').collect();
                             query.bind(s)
-                        },
+                        }
                         Value::String(s) => {
                             // PostgreSQL doesn't allow null bytes - filter them out completely
                             let cleaned: String = s.chars().filter(|&c| c != '\0').collect();
                             query.bind(cleaned)
-                        },
+                        }
                         Value::Boolean(b) => query.bind(b),
                         Value::Date(d) => query.bind(d),
                         Value::Json(j) => {
                             // PostgreSQL accepts JSONB directly
                             query.bind(serde_json::to_value(j).unwrap_or(serde_json::Value::Null))
-                        },
+                        }
                         Value::Null => query.bind(None::<String>),
                     };
                 }
             }
-            
-            query.execute(pool)
-                .await
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to insert batch: {}", e)))?;
-                
+
+            query.execute(pool).await.map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to insert batch: {}", e))
+            })?;
+
             total_written += chunk.len();
         }
 
@@ -459,26 +501,33 @@ impl Target for PostgresTarget {
     }
 
     async fn exists(&self, table_name: &str) -> Result<bool> {
-        let pool = self.pool.as_ref()
+        let pool = self
+            .pool
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
 
-        let exists_query = "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)";
-        
+        let exists_query =
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)";
+
         let exists: bool = sqlx::query_scalar(exists_query)
             .bind(table_name)
             .fetch_one(pool)
             .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to check table existence: {}", e)))?;
+            .map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to check table existence: {}", e))
+            })?;
 
         Ok(exists)
     }
 
     async fn truncate(&mut self, table_name: &str) -> Result<()> {
-        let pool = self.pool.as_ref()
+        let pool = self
+            .pool
+            .as_ref()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
 
         let truncate_query = format!("TRUNCATE TABLE \"{}\"", table_name);
-        
+
         sqlx::query(&truncate_query)
             .execute(pool)
             .await
@@ -496,58 +545,85 @@ impl Target for PostgresTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_postgres_source_new() {
         let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table");
         assert!(source.is_ok());
-        
+
         let source = source.unwrap();
-        assert_eq!(source.connection_string, "postgres://user:pass@localhost:5432/db");
+        assert_eq!(
+            source.connection_string,
+            "postgres://user:pass@localhost:5432/db"
+        );
         assert_eq!(source.table_name, "table");
     }
-    
+
     #[test]
     fn test_postgres_source_new_without_table() {
         let result = PostgresSource::new("postgres://user:pass@localhost:5432/db");
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_postgres_source_with_query() {
-        let source = PostgresSource::with_query("postgres://user:pass@localhost:5432/db", "SELECT * FROM table WHERE id > 10");
+        let source = PostgresSource::with_query(
+            "postgres://user:pass@localhost:5432/db",
+            "SELECT * FROM table WHERE id > 10",
+        );
         assert!(source.is_ok());
-        
+
         let source = source.unwrap();
-        assert_eq!(source.connection_string, "postgres://user:pass@localhost:5432/db");
+        assert_eq!(
+            source.connection_string,
+            "postgres://user:pass@localhost:5432/db"
+        );
         assert!(source.query.is_some());
         assert_eq!(source.query.unwrap(), "SELECT * FROM table WHERE id > 10");
     }
-    
+
     #[test]
     fn test_postgres_target_new() {
         let target = PostgresTarget::new("postgres://user:pass@localhost:5432/db");
         assert!(target.is_ok());
-        
+
         let target = target.unwrap();
-        assert_eq!(target.connection_string, "postgres://user:pass@localhost:5432/db");
+        assert_eq!(
+            target.connection_string,
+            "postgres://user:pass@localhost:5432/db"
+        );
     }
-    
+
     #[test]
     fn test_postgres_target_new_strips_table() {
         let target = PostgresTarget::new("postgres://user:pass@localhost:5432/db#table");
         assert!(target.is_ok());
-        
+
         let target = target.unwrap();
-        assert_eq!(target.connection_string, "postgres://user:pass@localhost:5432/db");
+        assert_eq!(
+            target.connection_string,
+            "postgres://user:pass@localhost:5432/db"
+        );
     }
 
     #[test]
     fn test_postgres_source_connection_string_parsing() {
         let test_cases = vec![
-            ("postgres://user:pass@localhost:5432/mydb#mytable", "postgres://user:pass@localhost:5432/mydb", "mytable"),
-            ("postgres://admin:secret@db.example.com/production#users", "postgres://admin:secret@db.example.com/production", "users"),
-            ("postgres://user:pass@127.0.0.1:5433/testdb#schema.table", "postgres://user:pass@127.0.0.1:5433/testdb", "schema.table"),
+            (
+                "postgres://user:pass@localhost:5432/mydb#mytable",
+                "postgres://user:pass@localhost:5432/mydb",
+                "mytable",
+            ),
+            (
+                "postgres://admin:secret@db.example.com/production#users",
+                "postgres://admin:secret@db.example.com/production",
+                "users",
+            ),
+            (
+                "postgres://user:pass@127.0.0.1:5433/testdb#schema.table",
+                "postgres://user:pass@127.0.0.1:5433/testdb",
+                "schema.table",
+            ),
         ];
 
         for (input, expected_conn, expected_table) in test_cases {
@@ -583,10 +659,14 @@ mod tests {
     fn test_postgres_with_query_strips_table() {
         let source = PostgresSource::with_query(
             "postgres://user:pass@localhost:5432/db#ignored_table",
-            "SELECT * FROM custom_view"
-        ).unwrap();
-        
-        assert_eq!(source.connection_string, "postgres://user:pass@localhost:5432/db");
+            "SELECT * FROM custom_view",
+        )
+        .unwrap();
+
+        assert_eq!(
+            source.connection_string,
+            "postgres://user:pass@localhost:5432/db"
+        );
         assert_eq!(source.table_name, "");
         assert_eq!(source.query, Some("SELECT * FROM custom_view".to_string()));
     }
@@ -595,17 +675,21 @@ mod tests {
     fn test_postgres_with_query_no_table() {
         let source = PostgresSource::with_query(
             "postgres://user:pass@localhost:5432/db",
-            "SELECT id, name FROM users WHERE active = true"
-        ).unwrap();
-        
-        assert_eq!(source.connection_string, "postgres://user:pass@localhost:5432/db");
+            "SELECT id, name FROM users WHERE active = true",
+        )
+        .unwrap();
+
+        assert_eq!(
+            source.connection_string,
+            "postgres://user:pass@localhost:5432/db"
+        );
         assert!(source.query.is_some());
     }
 
     #[test]
     fn test_postgres_source_initial_state() {
         let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
-        
+
         assert_eq!(source.current_offset, 0);
         assert_eq!(source.total_rows, None);
         assert!(source.pool.is_none());
@@ -615,7 +699,7 @@ mod tests {
     #[test]
     fn test_postgres_target_with_table() {
         let target = PostgresTarget::new("postgres://user:pass@localhost:5432/db#orders").unwrap();
-        
+
         assert_eq!(target.table_name, Some("orders".to_string()));
         assert!(target.pool.is_none());
         assert!(target.schema.is_none());
@@ -624,7 +708,7 @@ mod tests {
     #[test]
     fn test_postgres_target_without_table() {
         let target = PostgresTarget::new("postgres://user:pass@localhost:5432/db").unwrap();
-        
+
         assert_eq!(target.table_name, None);
     }
 
@@ -637,16 +721,40 @@ mod tests {
     #[test]
     fn test_postgres_data_type_mapping() {
         // Test that we map DataType correctly to PostgreSQL types
-        use crate::schema::{Schema, Column, DataType};
-        
+        use crate::schema::{Column, DataType, Schema};
+
         let schema = Schema {
             columns: vec![
-                Column { name: "id".to_string(), data_type: DataType::Integer, nullable: false },
-                Column { name: "name".to_string(), data_type: DataType::String, nullable: true },
-                Column { name: "price".to_string(), data_type: DataType::Decimal, nullable: true },
-                Column { name: "active".to_string(), data_type: DataType::Boolean, nullable: false },
-                Column { name: "created_at".to_string(), data_type: DataType::DateTime, nullable: true },
-                Column { name: "birth_date".to_string(), data_type: DataType::Date, nullable: true },
+                Column {
+                    name: "id".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: DataType::String,
+                    nullable: true,
+                },
+                Column {
+                    name: "price".to_string(),
+                    data_type: DataType::Decimal,
+                    nullable: true,
+                },
+                Column {
+                    name: "active".to_string(),
+                    data_type: DataType::Boolean,
+                    nullable: false,
+                },
+                Column {
+                    name: "created_at".to_string(),
+                    data_type: DataType::DateTime,
+                    nullable: true,
+                },
+                Column {
+                    name: "birth_date".to_string(),
+                    data_type: DataType::Date,
+                    nullable: true,
+                },
             ],
             estimated_rows: None,
             primary_key_candidate: None,
@@ -664,17 +772,18 @@ mod tests {
 
     #[test]
     fn test_postgres_source_has_more_with_total() {
-        let mut source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
-        
+        let mut source =
+            PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
+
         // When total_rows is set and current_offset < total
         source.total_rows = Some(100);
         source.current_offset = 50;
         assert!(source.has_more());
-        
+
         // When current_offset == total
         source.current_offset = 100;
         assert!(!source.has_more());
-        
+
         // When current_offset > total
         source.current_offset = 150;
         assert!(!source.has_more());
@@ -683,22 +792,23 @@ mod tests {
     #[test]
     fn test_postgres_source_has_more_without_total() {
         let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
-        
+
         // When total_rows is None, always return true
         assert!(source.has_more());
     }
 
     #[test]
     fn test_postgres_connection_string_with_schema_qualified_table() {
-        let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#public.users").unwrap();
-        
+        let source =
+            PostgresSource::new("postgres://user:pass@localhost:5432/db#public.users").unwrap();
+
         assert_eq!(source.table_name, "public.users");
     }
 
     #[test]
     fn test_postgres_multiple_hash_error() {
         let result = PostgresSource::new("postgres://user:pass@localhost:5432/db#table1#table2");
-        
+
         assert!(result.is_err());
         match result {
             Err(TinyEtlError::Configuration(msg)) => {
@@ -711,7 +821,7 @@ mod tests {
     #[test]
     fn test_postgres_target_invalid_multiple_hash() {
         let result = PostgresTarget::new("postgres://user:pass@localhost:5432/db#table1#table2");
-        
+
         assert!(result.is_err());
         match result {
             Err(TinyEtlError::Configuration(msg)) => {
@@ -723,9 +833,9 @@ mod tests {
 
     #[test]
     fn test_postgres_value_types() {
-        use std::collections::HashMap;
-        use chrono::{DateTime, Utc};
+        use chrono::Utc;
         use rust_decimal::Decimal;
+        use std::collections::HashMap;
 
         // Test creating a row with all value types
         let mut row: HashMap<String, Value> = HashMap::new();
@@ -748,19 +858,19 @@ mod tests {
     fn test_postgres_chunk_size_calculation() {
         // Test that chunk size calculation is reasonable
         let max_params = 65535;
-        
+
         // With 10 columns
         let cols = 10;
         let max_rows = max_params / cols;
         assert_eq!(max_rows, 6553);
         assert!(max_rows.min(1000) == 1000); // Should be clamped to 1000
-        
+
         // With 1 column
         let cols = 1;
         let max_rows = max_params / cols;
         assert_eq!(max_rows, 65535);
         assert!(max_rows.min(1000) == 1000); // Should be clamped to 1000
-        
+
         // With 100 columns
         let cols = 100;
         let max_rows = max_params / cols;
@@ -773,7 +883,7 @@ mod tests {
         // PostgreSQL doesn't allow null bytes in strings
         let input = "hello\0world";
         let cleaned: String = input.chars().filter(|&c| c != '\0').collect();
-        
+
         assert_eq!(cleaned, "helloworld");
         assert!(!cleaned.contains('\0'));
     }
@@ -781,11 +891,11 @@ mod tests {
     #[test]
     fn test_postgres_decimal_to_string() {
         use rust_decimal::Decimal;
-        
+
         let dec = Decimal::new(12345, 2); // 123.45
         let s = dec.to_string();
         assert_eq!(s, "123.45");
-        
+
         // Test that we can filter null bytes from decimal strings too
         let cleaned: String = s.chars().filter(|&c| c != '\0').collect();
         assert_eq!(cleaned, "123.45");
@@ -799,7 +909,8 @@ mod tests {
 
     #[test]
     fn test_postgres_connection_with_host() {
-        let source = PostgresSource::new("postgres://user:pass@db.example.com:5432/db#table").unwrap();
+        let source =
+            PostgresSource::new("postgres://user:pass@db.example.com:5432/db#table").unwrap();
         assert!(source.connection_string.contains("db.example.com"));
     }
 
@@ -807,8 +918,14 @@ mod tests {
     fn test_postgres_table_name_extraction() {
         let test_cases = vec![
             ("postgres://user:pass@localhost/db#users", "users"),
-            ("postgres://user:pass@localhost/db#public.orders", "public.orders"),
-            ("postgres://user:pass@localhost/db#schema_name.table_name", "schema_name.table_name"),
+            (
+                "postgres://user:pass@localhost/db#public.orders",
+                "public.orders",
+            ),
+            (
+                "postgres://user:pass@localhost/db#schema_name.table_name",
+                "schema_name.table_name",
+            ),
         ];
 
         for (conn_str, expected_table) in test_cases {

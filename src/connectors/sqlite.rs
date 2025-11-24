@@ -1,13 +1,12 @@
-use std::path::PathBuf;
-use std::str::FromStr;
 use async_trait::async_trait;
-use sqlx::{SqlitePool, Row as SqlxRow, Column, sqlite::SqliteConnectOptions};
 use rust_decimal::Decimal;
+use sqlx::{sqlite::SqliteConnectOptions, Column, Row as SqlxRow, SqlitePool};
+use std::path::PathBuf;
 
 use crate::{
+    connectors::{Source, Target},
+    schema::{Column as SchemaColumn, DataType, Row, Schema, Value},
     Result, TinyEtlError,
-    schema::{Schema, Row, Value, Column as SchemaColumn, DataType, SchemaInferer},
-    connectors::{Source, Target}
 };
 
 pub struct SqliteSource {
@@ -26,13 +25,13 @@ impl SqliteSource {
             let parts: Vec<&str> = connection_string.split('#').collect();
             if parts.len() != 2 {
                 return Err(TinyEtlError::Configuration(
-                    "SQLite connection string format: file.db#table".to_string()
+                    "SQLite connection string format: file.db#table".to_string(),
                 ));
             }
             (parts[0].trim_start_matches("sqlite:"), parts[1])
         } else {
             return Err(TinyEtlError::Configuration(
-                "SQLite source requires table specification: file.db#table".to_string()
+                "SQLite source requires table specification: file.db#table".to_string(),
             ));
         };
 
@@ -59,20 +58,20 @@ impl Source for SqliteSource {
                 let db_path = self.connection_string.trim_start_matches("sqlite:");
                 Err(TinyEtlError::Connection(format!(
                     "Failed to connect to SQLite database '{}': {}. Make sure the file exists and is readable.", 
-                    db_path, 
+                    db_path,
                     e
                 )))
             }
         }
     }
 
-    async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
+    async fn infer_schema(&mut self, _sample_size: usize) -> Result<Schema> {
         if self.pool.is_none() {
             self.connect().await?;
         }
 
         let pool = self.pool.as_ref().unwrap();
-        
+
         // Get table info for column definitions
         let table_info = sqlx::query(&format!("PRAGMA table_info(\"{}\")", self.table_name))
             .fetch_all(pool)
@@ -83,7 +82,7 @@ impl Source for SqliteSource {
             let name: String = row.get(1);
             let sql_type: String = row.get(2);
             let not_null: bool = row.get(3);
-            
+
             let data_type = match sql_type.to_uppercase().as_str() {
                 "INTEGER" | "INT" => DataType::Integer,
                 "REAL" | "FLOAT" | "DOUBLE" | "NUMERIC" | "DECIMAL" => DataType::Decimal,
@@ -102,11 +101,14 @@ impl Source for SqliteSource {
         }
 
         // Get estimated row count
-        let count_result = sqlx::query(&format!("SELECT COUNT(*) as count FROM \"{}\"", self.table_name))
-            .fetch_one(pool)
-            .await?;
+        let count_result = sqlx::query(&format!(
+            "SELECT COUNT(*) as count FROM \"{}\"",
+            self.table_name
+        ))
+        .fetch_one(pool)
+        .await?;
         let estimated_rows: i64 = count_result.get("count");
-        
+
         // Store total rows for pagination
         self.total_rows = Some(estimated_rows as usize);
 
@@ -123,25 +125,25 @@ impl Source for SqliteSource {
         }
 
         let pool = self.pool.as_ref().unwrap();
-        
+
         // Use LIMIT and OFFSET for proper pagination
         let query = format!(
-            "SELECT * FROM \"{}\" LIMIT {} OFFSET {}", 
+            "SELECT * FROM \"{}\" LIMIT {} OFFSET {}",
             self.table_name, batch_size, self.current_offset
         );
         let rows = sqlx::query(&query).fetch_all(pool).await?;
-        
+
         // Update offset for next batch
         self.current_offset += rows.len();
-        
+
         let mut result_rows = Vec::new();
         for row in rows {
             let mut data_row = Row::new();
-            
+
             // Get column info
             for (i, column) in row.columns().iter().enumerate() {
                 let column_name = column.name();
-                
+
                 // This is a simplified value extraction - in practice we'd need proper type handling
                 let value = if let Ok(val) = row.try_get::<Option<String>, _>(i) {
                     match val {
@@ -161,16 +163,16 @@ impl Source for SqliteSource {
                                 Ok(d) => Value::Decimal(d),
                                 Err(_) => Value::String(f.to_string()),
                             }
-                        },
+                        }
                         None => Value::Null,
                     }
                 } else {
                     Value::Null
                 };
-                
+
                 data_row.insert(column_name.to_string(), value);
             }
-            
+
             result_rows.push(data_row);
         }
 
@@ -179,9 +181,12 @@ impl Source for SqliteSource {
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
         if let Some(pool) = &self.pool {
-            let count_result = sqlx::query(&format!("SELECT COUNT(*) as count FROM {}", self.table_name))
-                .fetch_one(pool)
-                .await?;
+            let count_result = sqlx::query(&format!(
+                "SELECT COUNT(*) as count FROM {}",
+                self.table_name
+            ))
+            .fetch_one(pool)
+            .await?;
             let count: i64 = count_result.get("count");
             Ok(Some(count as usize))
         } else {
@@ -216,17 +221,18 @@ impl SqliteTarget {
     pub fn new(connection_string: &str) -> Result<Self> {
         // Parse connection string - support multiple formats:
         // - "file.db" or "file.db#table" (legacy)
-        // - "sqlite:file.db" or "sqlite:file.db#table" 
+        // - "sqlite:file.db" or "sqlite:file.db#table"
         // - "sqlite://file.db" or "sqlite://file.db#table"
         let normalized = connection_string
             .trim_start_matches("sqlite://")
             .trim_start_matches("sqlite:");
-            
+
         let (db_path, table) = if normalized.contains('#') {
             let parts: Vec<&str> = normalized.split('#').collect();
             if parts.len() != 2 {
                 return Err(TinyEtlError::Configuration(
-                    "SQLite connection string format: file.db#table or sqlite://file.db#table".to_string()
+                    "SQLite connection string format: file.db#table or sqlite://file.db#table"
+                        .to_string(),
                 ));
             }
             (parts[0], parts[1])
@@ -241,7 +247,7 @@ impl SqliteTarget {
             table_name: table.to_string(),
         })
     }
-    
+
     fn get_db_path(&self) -> Result<PathBuf> {
         let path_str = self.connection_string.trim_start_matches("sqlite:");
         Ok(PathBuf::from(path_str))
@@ -269,25 +275,23 @@ impl Target for SqliteTarget {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         // SQLite will automatically create the database file if it doesn't exist
         // when we connect to it, so we don't need to create it manually
         let connect_options = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true);
-            
+
         match SqlitePool::connect_with(connect_options).await {
             Ok(pool) => {
                 self.pool = Some(pool);
                 Ok(())
             }
-            Err(e) => {
-                Err(TinyEtlError::Connection(format!(
-                    "Failed to connect to SQLite database '{}': {}. Check file path and permissions.", 
-                    db_path.display(), 
-                    e
-                )))
-            }
+            Err(e) => Err(TinyEtlError::Connection(format!(
+                "Failed to connect to SQLite database '{}': {}. Check file path and permissions.",
+                db_path.display(),
+                e
+            ))),
         }
     }
 
@@ -297,7 +301,7 @@ impl Target for SqliteTarget {
         }
 
         let pool = self.pool.as_ref().unwrap();
-        
+
         // Determine the actual table name to use
         let actual_table_name = if table_name.is_empty() {
             self.table_name.clone()
@@ -309,11 +313,15 @@ impl Target for SqliteTarget {
         self.table_name = actual_table_name.clone();
 
         // Build CREATE TABLE statement with IF NOT EXISTS (append-first philosophy)
-        let column_definitions: Vec<String> = schema.columns.iter().map(|col| {
-            let sqlite_type = self.map_data_type_to_sqlite(&col.data_type);
-            let nullable = if col.nullable { "" } else { " NOT NULL" };
-            format!("\"{}\" {}{}", col.name, sqlite_type, nullable)
-        }).collect();
+        let column_definitions: Vec<String> = schema
+            .columns
+            .iter()
+            .map(|col| {
+                let sqlite_type = self.map_data_type_to_sqlite(&col.data_type);
+                let nullable = if col.nullable { "" } else { " NOT NULL" };
+                format!("\"{}\" {}{}", col.name, sqlite_type, nullable)
+            })
+            .collect();
 
         // Use CREATE TABLE IF NOT EXISTS to support append-first philosophy
         let create_sql = format!(
@@ -336,20 +344,21 @@ impl Target for SqliteTarget {
         }
 
         let pool = self.pool.as_ref().unwrap();
-        
+
         // Get column names from first row
         let columns: Vec<String> = rows[0].keys().cloned().collect();
-        
+
         // Quote column names to handle reserved keywords
-        let quoted_columns: Vec<String> = columns.iter().map(|col| format!("\"{}\"", col)).collect();
-        
+        let quoted_columns: Vec<String> =
+            columns.iter().map(|col| format!("\"{}\"", col)).collect();
+
         // SQLite has a limit of ~999 variables, so we need to chunk our inserts
         // Calculate max rows per chunk based on column count
         let max_variables = 900; // Use 900 to be safe
         let max_rows_per_chunk = max_variables / columns.len();
-        
+
         let mut total_written = 0;
-        
+
         // Process rows in chunks
         for chunk in rows.chunks(max_rows_per_chunk) {
             // Create batch insert with multiple value groups for this chunk
@@ -357,7 +366,7 @@ impl Target for SqliteTarget {
             let value_groups: Vec<String> = (0..chunk.len())
                 .map(|_| format!("({})", placeholders_per_row))
                 .collect();
-            
+
             let insert_sql = format!(
                 "INSERT INTO \"{}\" ({}) VALUES {}",
                 self.table_name,
@@ -366,7 +375,7 @@ impl Target for SqliteTarget {
             );
 
             let mut query = sqlx::query(&insert_sql);
-            
+
             // Bind all values in row order for this chunk
             for row in chunk {
                 for column in &columns {
@@ -378,19 +387,20 @@ impl Target for SqliteTarget {
                             // Convert Decimal to f64 for SQLite binding
                             let f: f64 = (*d).try_into().unwrap_or(0.0);
                             query.bind(f)
-                        },
+                        }
                         Value::Boolean(b) => query.bind(*b),
                         Value::Date(dt) => query.bind(dt.to_rfc3339()),
-                        Value::Json(j) => query.bind(serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string())),
+                        Value::Json(j) => query
+                            .bind(serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string())),
                         Value::Null => query.bind(None::<String>),
                     };
                 }
             }
-            
+
             let result = query.execute(pool).await?;
             total_written += result.rows_affected() as usize;
         }
-        
+
         Ok(total_written)
     }
 
@@ -407,12 +417,11 @@ impl Target for SqliteTarget {
                 table_name
             };
 
-            let result = sqlx::query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
-            )
-            .bind(actual_table_name)
-            .fetch_optional(pool)
-            .await?;
+            let result =
+                sqlx::query("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+                    .bind(actual_table_name)
+                    .fetch_optional(pool)
+                    .await?;
 
             Ok(result.is_some())
         } else {
@@ -444,7 +453,6 @@ impl Target for SqliteTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn test_sqlite_source_new() {
@@ -462,7 +470,7 @@ mod tests {
     async fn test_sqlite_target_new() {
         let target = SqliteTarget::new("test.db#users");
         assert!(target.is_ok());
-        
+
         let target2 = SqliteTarget::new("test.db");
         assert!(target2.is_ok());
     }
