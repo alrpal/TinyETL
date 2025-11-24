@@ -497,6 +497,34 @@ end
 tinyetl data.csv output.db --transform-file transform.lua
 ```
 
+#### YAML Configuration (New Format)
+
+Starting with version 0.9.0, TinyETL supports an enhanced YAML format for transformations with better type safety and clarity. The new format uses a tagged union structure:
+
+```yaml
+# Multi-line script (best for complex logic)
+transform:
+  type: script
+  value: |
+    full_name = row.first_name .. ' ' .. row.last_name
+    total_amount = row.quantity * row.unit_price
+    profit = total_amount * 0.3
+
+# Inline expressions (simple one-liners)
+transform:
+  type: inline
+  value: "total=row.qty * row.price; profit=total - row.cost"
+
+# External Lua file (reusable transformations)
+transform:
+  type: file
+  value: "transform.lua"
+
+
+```
+
+**Backwards Compatibility**: Old YAML configs without the `type` field are no longer supported.
+
 #### Transformation Rules
 
 1. **Schema Inference**: The output schema is determined by the first transformed row
@@ -804,7 +832,11 @@ options:
   skip_existing: false            # Skip if target exists
   source_type: "csv"              # Force source file type
   truncate: false                 # Truncate target before writing
-  transform:                      # Inline Lua script transformation
+  
+  # Transform configuration supports multiple formats:
+  
+  # 1. Multi-line script (recommended for complex transformations)
+  transform:
     type: script
     value: |
       -- Calculate derived fields
@@ -812,10 +844,19 @@ options:
       annual_salary = row.monthly_salary * 12
       hire_year = tonumber(string.sub(row.hire_date, 1, 4))
 
-# The "transform" key can also specify a Lua script file, as follows:
-#  transform:
-#    type: file
-#    value: "transform.lua"
+  # 2. Inline single-line expressions (for simple transformations)
+  # transform:
+  #   type: inline
+  #   value: "total=row.quantity * row.price; profit=total - row.cost"
+
+  # 3. External Lua file (for reusable transformation logic)
+  # transform:
+  #   type: file
+  #   value: "transform.lua"
+
+  # 4. No transformation (default)
+  # transform:
+  #   type: none
 ```
 
 ### Environment Variables
