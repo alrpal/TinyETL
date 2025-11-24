@@ -1,5 +1,4 @@
 use crate::transformer::TransformConfig;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +26,6 @@ impl Default for Config {
             target: String::new(),
             infer_schema: true,
             schema_file: None,
-            batch_size: 1_000, // Reduced from 10k to 1k for better memory usage with transactions
             batch_size: 1_000, // Reduced from 10k to 1k for better memory usage with transactions
             preview: None,
             dry_run: false,

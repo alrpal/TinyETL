@@ -6,7 +6,6 @@ use tracing::{debug, warn};
 
 use crate::{
     schema::{Column, Row, Schema, SchemaInferer, Value},
-    schema::{Column, Row, Schema, SchemaInferer, Value},
     Result, TinyEtlError,
 };
 
@@ -71,13 +70,9 @@ impl Transformer {
                 "Transform file not found: {}",
                 path
             )));
-            return Err(TinyEtlError::Configuration(format!(
-                "Transform file not found: {}",
-                path
-            )));
         }
 
-        let lua_code = std::fs::read_to_string(path).map_err(|e| {
+        let _lua_code = std::fs::read_to_string(path).map_err(|e| {
             TinyEtlError::Configuration(format!("Failed to read transform file {}: {}", path, e))
         })?;
         let lua_code = std::fs::read_to_string(path).map_err(|e| {
@@ -151,10 +146,6 @@ impl Transformer {
         self.lua
             .load(&lua_code)
             .exec()
-
-        self.lua
-            .load(&lua_code)
-            .exec()
             .map_err(|e| TinyEtlError::Configuration(format!("Failed to execute script: {}", e)))?;
 
         let globals = self.lua.globals();
@@ -188,9 +179,6 @@ impl Transformer {
             return Err(TinyEtlError::Configuration(
                 "No valid expressions provided".to_string(),
             ));
-            return Err(TinyEtlError::Configuration(
-                "No valid expressions provided".to_string(),
-            ));
         }
 
         let mut lua_code = String::new();
@@ -207,14 +195,7 @@ impl Transformer {
                 let col_name = assignment[..equals_pos].trim();
                 let expression = assignment[equals_pos + 1..].trim();
 
-
                 // Validate column name
-                if col_name.is_empty() || !col_name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                {
-                    return Err(TinyEtlError::Configuration(format!(
-                        "Invalid column name: {}",
-                        col_name
-                    )));
                 if col_name.is_empty() || !col_name.chars().all(|c| c.is_alphanumeric() || c == '_')
                 {
                     return Err(TinyEtlError::Configuration(format!(
@@ -225,10 +206,6 @@ impl Transformer {
 
                 lua_code.push_str(&format!("  result['{}'] = {}\n", col_name, expression));
             } else {
-                return Err(TinyEtlError::Configuration(format!(
-                    "Invalid expression format (missing '='): {}",
-                    assignment
-                )));
                 return Err(TinyEtlError::Configuration(format!(
                     "Invalid expression format (missing '='): {}",
                     assignment
@@ -255,9 +232,6 @@ impl Transformer {
             return Err(TinyEtlError::Configuration(
                 "No valid assignments provided in script".to_string(),
             ));
-            return Err(TinyEtlError::Configuration(
-                "No valid assignments provided in script".to_string(),
-            ));
         }
 
         let mut lua_code = String::new();
@@ -275,14 +249,7 @@ impl Transformer {
                 let col_name = line[..equals_pos].trim();
                 let expression = line[equals_pos + 1..].trim();
 
-
                 // Validate variable/column name
-                if col_name.is_empty() || !col_name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                {
-                    return Err(TinyEtlError::Configuration(format!(
-                        "Invalid variable/column name: {}",
-                        col_name
-                    )));
                 if col_name.is_empty() || !col_name.chars().all(|c| c.is_alphanumeric() || c == '_')
                 {
                     return Err(TinyEtlError::Configuration(format!(
@@ -297,10 +264,6 @@ impl Transformer {
                 lua_code.push_str(&format!("  local {} = {}\n", col_name, expression));
                 lua_code.push_str(&format!("  result['{}'] = {}\n", col_name, col_name));
             } else {
-                return Err(TinyEtlError::Configuration(format!(
-                    "Invalid line format (missing '='): {}",
-                    line
-                )));
                 return Err(TinyEtlError::Configuration(format!(
                     "Invalid line format (missing '='): {}",
                     line
@@ -359,15 +322,9 @@ impl Transformer {
             return Err(TinyEtlError::Configuration(
                 "No transform function loaded".to_string(),
             ));
-            return Err(TinyEtlError::Configuration(
-                "No transform function loaded".to_string(),
-            ));
         }
 
         let globals = self.lua.globals();
-        let transform_fn: Function = globals.get("transform").map_err(|e| {
-            TinyEtlError::Transform(format!("Failed to get transform function: {}", e))
-        })?;
         let transform_fn: Function = globals.get("transform").map_err(|e| {
             TinyEtlError::Transform(format!("Failed to get transform function: {}", e))
         })?;
@@ -375,11 +332,7 @@ impl Transformer {
         // Convert Row to Lua table
         let lua_row = self.row_to_lua_table(row)?;
 
-
         // Call the transform function
-        let result: LuaValue = transform_fn.call(lua_row).map_err(|e| {
-            TinyEtlError::Transform(format!("Lua transform function failed: {}", e))
-        })?;
         let result: LuaValue = transform_fn.call(lua_row).map_err(|e| {
             TinyEtlError::Transform(format!("Lua transform function failed: {}", e))
         })?;
@@ -400,14 +353,11 @@ impl Transformer {
             _ => Err(TinyEtlError::Transform(
                 "Transform function must return a table or nil".to_string(),
             )),
-            _ => Err(TinyEtlError::Transform(
-                "Transform function must return a table or nil".to_string(),
-            )),
         }
     }
 
     /// Convert a Row to a Lua table
-    fn row_to_lua_table(&self, row: &Row) -> Result<Table> {
+    fn row_to_lua_table(&self, row: &Row) -> Result<Table<'_>> {
         let table = self
             .lua
             .create_table()
@@ -422,14 +372,13 @@ impl Transformer {
                     let f: f64 = (*d).try_into().unwrap_or(0.0);
                     LuaValue::Number(f)
                 }
-                }
+                
                 Value::Boolean(b) => LuaValue::Boolean(*b),
                 Value::Date(dt) => LuaValue::String(self.lua.create_string(&dt.to_rfc3339())?),
                 Value::Json(j) => {
                     // Convert JSON to Lua string representation
                     let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
                     LuaValue::String(self.lua.create_string(&json_str)?)
-                }
                 }
                 Value::Null => LuaValue::Nil,
             };
@@ -447,15 +396,9 @@ impl Transformer {
             let (key, lua_value) = pair.map_err(|e| {
                 TinyEtlError::Transform(format!("Failed to iterate Lua table: {}", e))
             })?;
-            let (key, lua_value) = pair.map_err(|e| {
-                TinyEtlError::Transform(format!("Failed to iterate Lua table: {}", e))
-            })?;
 
             let value = match lua_value {
                 LuaValue::String(s) => {
-                    let str_val = s.to_str().map_err(|e| {
-                        TinyEtlError::Transform(format!("Failed to convert Lua string: {}", e))
-                    })?;
                     let str_val = s.to_str().map_err(|e| {
                         TinyEtlError::Transform(format!("Failed to convert Lua string: {}", e))
                     })?;
@@ -469,14 +412,9 @@ impl Transformer {
                         Err(_) => Value::String(f.to_string()),
                     }
                 }
-                }
                 LuaValue::Boolean(b) => Value::Boolean(b),
                 LuaValue::Nil => Value::Null,
                 _ => {
-                    warn!(
-                        "Unsupported Lua value type for column '{}', converting to string",
-                        key
-                    );
                     warn!(
                         "Unsupported Lua value type for column '{}', converting to string",
                         key
@@ -524,16 +462,12 @@ impl Transformer {
 
     /// Validate and filter a row based on the inferred schema
     fn validate_and_filter_row(&self, mut row: Row) -> Result<Row> {
-        let schema = self
-            .inferred_schema
-            .as_ref()
+        
         let schema = self
             .inferred_schema
             .as_ref()
             .ok_or_else(|| TinyEtlError::Transform("Schema not inferred yet".to_string()))?;
 
-        let expected_columns: std::collections::HashSet<_> =
-            schema.columns.iter().map(|c| c.name.clone()).collect();
         let expected_columns: std::collections::HashSet<_> =
             schema.columns.iter().map(|c| c.name.clone()).collect();
 
@@ -702,15 +636,11 @@ mod tests {
 
     #[test]
     fn test_inline_expressions() {
-        let config = TransformConfig::Inline(
+        let _config = TransformConfig::Inline(
             "full_name=row.first_name .. ' ' .. row.last_name; age_next_year=row.age + 1"
                 .to_string(),
         );
-        let config = TransformConfig::Inline(
-            "full_name=row.first_name .. ' ' .. row.last_name; age_next_year=row.age + 1"
-                .to_string(),
-        );
-        let mut transformer = Transformer::new(&config).unwrap();
+        let mut transformer = Transformer::new(&_config).unwrap();
         assert!(transformer.is_enabled());
 
         let mut row = HashMap::new();
@@ -841,7 +771,7 @@ years_service = current_year - hire_year
         let mut transformer = Transformer::new(&config).unwrap();
 
         let row = HashMap::new();
-        let result = transformer.transform_batch(&[row]).unwrap();
+        let _result = transformer.transform_batch(&[row]).unwrap();
 
         let schema = transformer.get_inferred_schema().unwrap();
         assert_eq!(schema.columns.len(), 2);
@@ -861,10 +791,6 @@ years_service = current_year - hire_year
             .unwrap_err()
             .to_string()
             .contains("Transform file not found"));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Transform file not found"));
     }
 
     #[test]
@@ -872,10 +798,6 @@ years_service = current_year - hire_year
         let config = TransformConfig::Inline("invalid syntax without equals".to_string());
         let result = Transformer::new(&config);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid expression format"));
         assert!(result
             .unwrap_err()
             .to_string()
@@ -891,10 +813,6 @@ years_service = current_year - hire_year
             .unwrap_err()
             .to_string()
             .contains("Invalid column name"));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid column name"));
     }
 
     #[test]
@@ -902,10 +820,6 @@ years_service = current_year - hire_year
         let config = TransformConfig::Inline("".to_string());
         let result = Transformer::new(&config);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No valid expressions provided"));
         assert!(result
             .unwrap_err()
             .to_string()
@@ -942,15 +856,11 @@ years_service = current_year - hire_year
         let config = TransformConfig::Inline(
             "int_col=42; float_col=3.14; bool_col=true; str_col='hello'".to_string(),
         );
-        let config = TransformConfig::Inline(
-            "int_col=42; float_col=3.14; bool_col=true; str_col='hello'".to_string(),
-        );
         let mut transformer = Transformer::new(&config).unwrap();
 
         let row = HashMap::new();
         let result = transformer.transform_batch(&[row]).unwrap();
         assert_eq!(result.len(), 1);
-
 
         let transformed = &result[0];
         assert_eq!(transformed.get("int_col"), Some(&Value::Integer(42)));
@@ -958,15 +868,7 @@ years_service = current_year - hire_year
             transformed.get("float_col"),
             Some(&Value::Decimal(Decimal::new(314, 2)))
         );
-        assert_eq!(
-            transformed.get("float_col"),
-            Some(&Value::Decimal(Decimal::new(314, 2)))
-        );
         assert_eq!(transformed.get("bool_col"), Some(&Value::Boolean(true)));
-        assert_eq!(
-            transformed.get("str_col"),
-            Some(&Value::String("hello".to_string()))
-        );
         assert_eq!(
             transformed.get("str_col"),
             Some(&Value::String("hello".to_string()))
@@ -1075,10 +977,8 @@ years_service = current_year - hire_year
     }
 
     #[test]
-    #[test]
     fn test_lua_file_transformation() {
         use std::fs;
-        use std::path::Path;
 
         // Create a temporary Lua file
         let lua_content = r#"
@@ -1166,21 +1066,14 @@ end
             .to_string()
             .contains("must contain a 'transform' function"));
 
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("must contain a 'transform' function"));
-
         let _ = fs::remove_file(temp_file);
     }
 
     #[test]
     fn test_multiple_batch_transforms() {
-        let config =
+        let _config =
             TransformConfig::Inline("counter=1; batch_col=row.input or 'default'".to_string());
-        let config =
-            TransformConfig::Inline("counter=1; batch_col=row.input or 'default'".to_string());
-        let mut transformer = Transformer::new(&config).unwrap();
+        let mut transformer = Transformer::new(&_config).unwrap();
 
 
         // First batch
@@ -1190,8 +1083,7 @@ end
 
 
         // Second batch
-        let mut row2 = HashMap::new();
-        let mut row2 = HashMap::new();
+        let mut row2: HashMap<String, Value> = HashMap::new();
         row2.insert("input".to_string(), Value::String("second".to_string()));
         let result2 = transformer.transform_batch(&[row2]).unwrap();
 
@@ -1207,9 +1099,6 @@ end
 
     #[test]
     fn test_mixed_value_types_in_lua() {
-        let config = TransformConfig::Inline(
-            "mixed=type(row.value) == 'number' and row.value * 2 or 'not_number'".to_string(),
-        );
         let config = TransformConfig::Inline(
             "mixed=type(row.value) == 'number' and row.value * 2 or 'not_number'".to_string(),
         );
@@ -1239,7 +1128,7 @@ end
 
     #[test]
     fn test_default_implementation() {
-        let config = TransformConfig::default();
+        let config = TransformConfig::None;
         let transformer = Transformer::new(&config).unwrap();
         assert!(!transformer.is_enabled());
     }
@@ -1258,13 +1147,8 @@ end
             .unwrap_err()
             .to_string()
             .contains("No transform function loaded"));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No transform function loaded"));
     }
 
-    #[test]
     #[test]
     fn test_transform_function_returns_nil() {
         use std::fs;
@@ -1350,11 +1234,6 @@ end
 
         let result = transformer.transform_batch(&[row]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Transform function must return a table or nil"));
-
         assert!(result
             .unwrap_err()
             .to_string()
@@ -1533,7 +1412,6 @@ end
                     data_type: DataType::String,
                     nullable: true,
                 },
-                },
             ],
             estimated_rows: Some(1000),
             primary_key_candidate: Some("id".to_string()),
@@ -1551,11 +1429,9 @@ end
 
     #[test]
     fn test_schema_merge_with_inferred_schema() {
-        let config =
+        let _config =
             TransformConfig::Inline("derived_col=row.value * 2; new_str='constant'".to_string());
-        let config =
-            TransformConfig::Inline("derived_col=row.value * 2; new_str='constant'".to_string());
-        let mut transformer = Transformer::new(&config).unwrap();
+        let mut transformer = Transformer::new(&_config).unwrap();
 
 
         // Process a row to infer schema

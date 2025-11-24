@@ -1,5 +1,35 @@
 [
   {
+    "doc": "{\"active\":true,\"age\":30,\"city\":\"New York\",\"tags\":[\"developer\",\"manager\"]}",
+    "id": "1",
+    "name": "Alice Johnson",
+    "url": "https://example.com/user1"
+  },
+  {
+    "doc": "{\"active\":true,\"age\":25,\"city\":\"San Francisco\",\"tags\":[\"designer\",\"frontend\"]}",
+    "id": "2",
+    "name": "Bob Smith",
+    "url": "https://example.com/user2"
+  },
+  {
+    "doc": "{\"active\":false,\"age\":35,\"city\":\"Boston\",\"tags\":[\"backend\",\"architect\"]}",
+    "id": "3",
+    "name": "Carol Davis",
+    "url": "https://example.com/user3"
+  },
+  {
+    "doc": "{\"active\":true,\"age\":28,\"city\":\"Seattle\",\"tags\":[\"devops\",\"security\"]}",
+    "id": "4",
+    "name": "David Wilson",
+    "url": "https://example.com/user4"
+  },
+  {
+    "doc": "{\"active\":true,\"age\":32,\"city\":\"Austin\",\"tags\":[\"data\",\"analytics\"]}",
+    "id": "5",
+    "name": "Eve Martinez",
+    "url": "https://example.com/user5"
+  },
+  {
     "doc": {
       "active": true,
       "age": 30,

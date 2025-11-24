@@ -1,7 +1,6 @@
 use crate::config::{Config, LogLevel};
 use crate::transformer::TransformConfig;
 use clap::{Parser, Subcommand};
-use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "tinyetl")]
@@ -248,20 +247,10 @@ mod tests {
             "5000",
             "--preview",
             "10",
-            "--batch-size",
-            "5000",
-            "--preview",
-            "10",
             "--dry-run",
             "--log-level",
             "warn",
-            "--log-level",
-            "warn",
             "--skip-existing",
-            "--source-type",
-            "json",
-        ])
-        .unwrap();
             "--source-type",
             "json",
         ])
@@ -289,12 +278,6 @@ mod tests {
             "5",
         ])
         .unwrap();
-            "--batch-size",
-            "2000",
-            "--preview",
-            "5",
-        ])
-        .unwrap();
 
         let config: Config = cli.into();
         assert_eq!(config.source, "input.csv");
@@ -309,7 +292,6 @@ mod tests {
         let result = Cli::try_parse_from(["tinyetl"]);
         assert!(result.is_ok());
 
-
         // But should fail when trying to convert to Config without source/target
         // This would panic when converting to Config, but that's expected behavior
     }
@@ -320,8 +302,6 @@ mod tests {
             "tinyetl",
             "source.csv",
             "target.db",
-            "--log-level",
-            "invalid",
             "--log-level",
             "invalid",
         ]);
@@ -335,10 +315,6 @@ mod tests {
             "tinyetl",
             "https://example.com/api/data",
             "output.csv",
-            "--source-type",
-            "json",
-        ])
-        .unwrap();
             "--source-type",
             "json",
         ])

@@ -1,8 +1,6 @@
 use clap::Parser;
 use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
-use tracing::{error, info};
-use tracing_subscriber::{fmt, EnvFilter};
 
 use tinyetl::{
     cli::Cli,
@@ -195,7 +193,6 @@ fn setup_logging(config: &Config) {
             match config.log_level {
                 tinyetl::config::LogLevel::Info => "info",
                 tinyetl::config::LogLevel::Warn => "warn",
-                tinyetl::config::LogLevel::Warn => "warn",
                 tinyetl::config::LogLevel::Error => "error",
             }
         ))
@@ -214,7 +211,6 @@ async fn create_connectors(
     let processed_target = process_connection_string(
         &config.target,
         config.dest_secret_id.as_ref(),
-        "destination",
         "destination",
     )?;
 
@@ -235,9 +231,6 @@ async fn execute_transfer(
         Ok(stats) => {
             if config.preview.is_none() && !config.dry_run {
                 info!("Transfer completed successfully!");
-                info!(
-                    "Processed {} rows in {:.2}s ({:.0} rows/sec)",
-                    stats.total_rows,
                 info!(
                     "Processed {} rows in {:.2}s ({:.0} rows/sec)",
                     stats.total_rows,
@@ -274,8 +267,7 @@ mod tests {
             "tinyetl",
             "test.csv",      // positional source
             "test.db#table", // positional target
-            "test.csv",      // positional source
-            "test.db#table", // positional target
+          
         ]);
         assert!(cli.is_ok());
 
@@ -290,13 +282,6 @@ mod tests {
     fn test_cli_to_config_conversion() {
         let cli = Cli::try_parse_from([
             "tinyetl",
-            "input.csv",   // positional source
-            "output.json", // positional target
-            "--batch-size",
-            "100",
-        ])
-        .unwrap();
-
             "input.csv",   // positional source
             "output.json", // positional target
             "--batch-size",
@@ -322,13 +307,6 @@ mod tests {
         ])
         .unwrap();
 
-            "test.csv",  // positional source
-            "test.json", // positional target
-            "--preview",
-            "5",
-        ])
-        .unwrap();
-
         let config: Config = cli.into();
         assert_eq!(config.preview, Some(5));
     }
@@ -340,12 +318,7 @@ mod tests {
             "tinyetl",
             "test.csv",  // positional source
             "test.json", // positional target
-            "test.csv",  // positional source
-            "test.json", // positional target
             "--dry-run",
-        ])
-        .unwrap();
-
         ])
         .unwrap();
 
@@ -358,13 +331,6 @@ mod tests {
     fn test_cli_with_transform() {
         let cli = Cli::try_parse_from([
             "tinyetl",
-            "test.csv",  // positional source
-            "test.json", // positional target
-            "--transform-file",
-            "transform.lua",
-        ])
-        .unwrap();
-
             "test.csv",  // positional source
             "test.json", // positional target
             "--transform-file",
@@ -420,7 +386,6 @@ mod tests {
             match config_info.log_level {
                 tinyetl::config::LogLevel::Info => "info",
                 tinyetl::config::LogLevel::Warn => "warn",
-                tinyetl::config::LogLevel::Warn => "warn",
                 tinyetl::config::LogLevel::Error => "error",
             }
         ));
@@ -441,7 +406,6 @@ mod tests {
             "sqlx=warn,tinyetl={}",
             match config_warn.log_level {
                 tinyetl::config::LogLevel::Info => "info",
-                tinyetl::config::LogLevel::Warn => "warn",
                 tinyetl::config::LogLevel::Warn => "warn",
                 tinyetl::config::LogLevel::Error => "error",
             }
@@ -472,8 +436,6 @@ mod tests {
     }
 
     #[test]
-
-    #[test]
     fn test_binary_missing_args() {
         let output = Command::new("cargo")
             .args(["run", "--"])
@@ -488,8 +450,6 @@ mod tests {
             assert!(stderr.contains("required") || stderr.contains("argument"));
         }
     }
-
-    #[tokio::test]
 
     #[tokio::test]
     async fn test_source_connector_creation_nonexistent_file() {
@@ -531,7 +491,6 @@ mod tests {
         assert!(!config.dry_run);
         assert_eq!(config.log_level, tinyetl::config::LogLevel::Info);
         match config.transform {
-            tinyetl::transformer::TransformConfig::None => {} // Expected
             tinyetl::transformer::TransformConfig::None => {} // Expected
             _ => panic!("Expected None transform config by default"),
         }
