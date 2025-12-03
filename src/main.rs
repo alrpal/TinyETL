@@ -111,9 +111,17 @@ version: 1
 
 source:
   uri: "employees.csv"            # or database connection string
+  # options:                      # Optional source-specific options
+  #   header.User-Agent: "TinyETL/0.9.0"
+  #   header.Accept: "text/csv"
+  #   auth.basic.username: "user"
+  #   auth.basic.password: "${PASSWORD}"
+  #   auth.bearer: "${BEARER_TOKEN}"
 
 target:
   uri: "employees_output.json"    # or database connection string
+  # options:                      # Optional target-specific options
+  #   header.X-Custom: "value"
 
 # The "options" key and all other keys beneath "options" can be omitted.
 # Sensible default values will be used for omitted keys.

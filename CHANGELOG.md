@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2024-12-03
+
+### Added
+- **Source and Target Options in YAML Configuration**: YAML configs can now specify connector-specific options under `source.options` and `target.options` sections
+  - Allows passing protocol-specific configuration without cluttering the main options section
+  - Options are passed to the respective protocol handlers for specialized processing
+  - Particularly useful for HTTP sources with custom headers and authentication
+  
+- **HTTP Protocol Options Support**: HTTP/HTTPS sources now support comprehensive options
+  - **Custom Headers**: Add custom HTTP headers with `header.HeaderName` syntax
+    - Example: `header.User-Agent: "TinyETL/0.10.0"`
+    - Example: `header.Accept: "text/csv"`
+    - Example: `header.X-API-Version: "v2"`
+  - **Basic Authentication**: Configure using `auth.basic.username` and `auth.basic.password` options
+  - **Bearer Token Authentication**: Configure using `auth.bearer` option
+  - Supports environment variable substitution for sensitive values (e.g., `auth.bearer: "${BEARER_TOKEN}"`)
+  - Headers and authentication automatically logged (credentials masked) for debugging
+
+### Enhanced
+- **Protocol Abstraction**: All protocols now support the options parameter throughout the API
+  - `Protocol::create_source()` accepts options HashMap
+  - `Protocol::create_target()` accepts options HashMap  
+  - File protocol: Options parameter available for future extensions
+  - SSH protocol: Options parameter available for future extensions
+  - Snowflake protocol: Options parameter available for future extensions
+  
+- **Default Configuration Template**: Updated `generate-default-config` output to include examples of source and target options
+  - Shows commented examples of HTTP authentication methods
+  - Demonstrates custom header configuration
+  - Includes environment variable usage examples
+
+### Examples
+- Added Example 18: HTTP with Authentication demonstrating various authentication methods
+  - `config.yaml` - Basic authentication example
+  - `bearer_config.yaml` - Bearer token authentication
+  - `custom_headers_config.yaml` - Custom HTTP headers
+  - `public_config.yaml` - Public endpoint with optional headers
+  - Includes test HTTP server setup via Docker Compose
+
+### Documentation
+- Updated YAML configuration format to show source/target options structure
+- Added inline documentation for HTTP authentication options
+- Enhanced default config template with practical examples
+
 ## [0.9.0] - 2024-11-24
 
 ### BREAKING CHANGES

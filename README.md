@@ -3,7 +3,7 @@
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/alrpal/tinyetl/actions)
 [![Coverage](https://img.shields.io/badge/coverage-60%25-brightgreen)](https://github.com/alrpal/tinyetl/actions)
-[![Version](https://img.shields.io/badge/version-0.8.0-blue)](https://github.com/alrpal/tinyetl/releases)
+[![Version](https://img.shields.io/badge/version-0.10.0-blue)](https://github.com/alrpal/tinyetl/releases)
 [![Rust Edition](https://img.shields.io/badge/rust-2021-orange)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
 [![Binary Size](https://img.shields.io/badge/binary-15MB-green)](https://github.com/alrpal/tinyetl/releases)
 
@@ -223,10 +223,11 @@ TinyETL supports two main categories of data sources and targets:
   tinyetl /path/to/file.parquet data.csv
   tinyetl data.avro output.json
   ```
-- **HTTP/HTTPS** - Download from web servers
+- **HTTP/HTTPS** - Download from web servers (supports authentication and custom headers via YAML config)
   ```bash
   tinyetl "https://example.com/data.csv" output.parquet
   tinyetl "https://api.example.com/export" data.csv --source-type=csv
+  # For authenticated APIs, use YAML config (see HTTP Source Options section)
   ```
 - **SSH/SCP** - Secure file transfer
   ```bash
@@ -237,6 +238,9 @@ TinyETL supports two main categories of data sources and targets:
 **Protocol Features:**
 - **file://** - Local file system (default for simple paths)
 - **http://** and **https://** - Web downloads with progress tracking
+  - Supports Basic and Bearer token authentication
+  - Custom HTTP headers via YAML configuration
+  - Environment variable substitution for secure credential management
 - **ssh://** - Secure shell file transfer using SCP
 - **--source-type** parameter for format override (useful for URLs without clear extensions)
 
@@ -815,9 +819,19 @@ version: 1
 
 source:
   uri: "employees.csv"            # or database connection string
+  # Optional source-specific options (e.g., for HTTP sources)
+  # options:
+  #   header.User-Agent: "TinyETL/0.10.0"
+  #   header.Accept: "text/csv"
+  #   auth.basic.username: "user"
+  #   auth.basic.password: "${PASSWORD}"
+  #   auth.bearer: "${BEARER_TOKEN}"
 
 target:
   uri: "employees_output.json"    # or database connection string
+  # Optional target-specific options
+  # options:
+  #   header.X-Custom: "value"
 
 # The "options" key and all other keys beneath "options" can be omitted.
 # Sensible default values will be used for omitted keys.
@@ -858,6 +872,55 @@ options:
   # transform:
   #   type: none
 ```
+
+### Source and Target Options
+
+TinyETL supports connector-specific options that can be passed to sources and targets. These options are particularly useful for HTTP sources that require authentication or custom headers.
+
+#### HTTP Source Options
+
+When reading from HTTP/HTTPS URLs, you can specify authentication and custom headers:
+
+```yaml
+version: 1
+
+source:
+  uri: "http://api.example.com/data.csv"
+  options:
+    # Custom headers (prefix with "header.")
+    header.User-Agent: "TinyETL/0.10.0"
+    header.Accept: "text/csv"
+    header.X-API-Version: "v2"
+    
+    # Basic authentication
+    auth.basic.username: "myuser"
+    auth.basic.password: "${API_PASSWORD}"
+    
+    # OR Bearer token authentication
+    # auth.bearer: "${API_TOKEN}"
+
+target:
+  uri: "output.json"
+
+options:
+  batch_size: 1000
+```
+
+**Available HTTP Options:**
+- `header.{HeaderName}` - Add custom HTTP headers (e.g., `header.User-Agent`, `header.Accept`)
+- `auth.basic.username` - Username for HTTP Basic authentication
+- `auth.basic.password` - Password for HTTP Basic authentication  
+- `auth.bearer` - Bearer token for token-based authentication
+
+**Security Best Practice:** Use environment variables for sensitive values like passwords and tokens:
+```yaml
+source:
+  uri: "https://api.example.com/data"
+  options:
+    auth.bearer: "${API_TOKEN}"  # Read from environment variable
+```
+
+See [Example 18: HTTP with Authentication](examples/18_http_with_auth/) for complete working examples.
 
 ### Environment Variables
 
