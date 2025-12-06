@@ -31,7 +31,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
    *Note: Auto-inferred schemas default all columns to nullable for safety*
 
 ✅ **Lua transformations** — powerful data transformations  
-✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, DuckDB, MSSQL, ODBC. Coming soon: Snowflake, Databricks, OneLake
+✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, CrateDB, DuckDB, MSSQL, ODBC. Coming soon: Snowflake, Databricks, OneLake
 
 ✅ **Cross-platform** — Linux, macOS, Windows ready
 
@@ -250,6 +250,7 @@ TinyETL supports two main categories of data sources and targets:
 - **SQLite** - Embedded database
 - **PostgreSQL** - Advanced open-source database
 - **MySQL** - Popular relational database
+- **CrateDB** - Distributed analytical database optimized for OLAP workloads
 - **DuckDB** - Embedded analytical database optimized for OLAP workloads
 - **ODBC** - Universal database connectivity (SQL Server, Oracle, DB2, and more)
 
@@ -266,6 +267,10 @@ tinyetl data.csv "postgresql://user:@localhost/mydb#customers"
 # MySQL
 tinyetl "mysql://user:@localhost:3306/mydb#products" output.json
 tinyetl data.csv "mysql://user:@localhost:3306/mydb#sales"
+
+# CrateDB
+tinyetl "postgresql://crate:@localhost/doc#orders" output.parquet
+tinyetl data.csv "postgresql://crate:@localhost/doc#customers"
 
 # DuckDB
 tinyetl "products.duckdb#inventory" output.csv
@@ -342,6 +347,16 @@ tinyetl data.csv /path/to/database.db   # Creates table named 'database'
 tinyetl data.csv "sqlite:///path/to/database.db#custom_table"
 ```
 
+**CrateDB:**
+```bash
+# Basic format
+postgresql://username:password@hostname:port/schema#table_name
+
+# Examples
+tinyetl data.csv "postgresql://user:@localhost/doc#customers"
+tinyetl data.csv "postgresql://admin:@db.example.com:5432/analytics#sales_data"
+```
+
 **DuckDB:**
 ```bash
 # File path (table name inferred from filename without extension)
@@ -394,7 +409,7 @@ tinyetl data.csv "odbc://Driver={IBM DB2 ODBC DRIVER};Database=sample;Hostname=l
 - For MySQL and ODBC databases, the database must exist before running TinyETL
 - DuckDB is optimized for analytical (OLAP) workloads and offers better performance than SQLite for aggregations
 - Connection strings should be quoted to prevent shell interpretation
-- Default ports: PostgreSQL (5432), MySQL (3306)
+- Default ports: PostgreSQL (5432), CrateDB (5432), MySQL (3306)
 
 ### Secure Password Management
 
@@ -420,7 +435,7 @@ tinyetl "postgres://user@prod.example.com/db#orders" \
 - Format: `TINYETL_SECRET_{protocol}_{type}` or `TINYETL_SECRET_{protocol}`
 - Examples:
   - `TINYETL_SECRET_mysql_dest` - for MySQL destination connections
-  - `TINYETL_SECRET_postgres_source` - for PostgreSQL source connections  
+  - `TINYETL_SECRET_postgres_source` - for PostgreSQL and CrateDB source connections
   - `TINYETL_SECRET_mysql` - generic MySQL password (works for both source/dest)
 
 
