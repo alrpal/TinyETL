@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_create_unsupported_source() {
-        let source = create_source("test.xlsx");
+        let source = create_source("test.unsupported");
         assert!(source.is_err());
     }
 
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_create_unsupported_target() {
-        let target = create_target("output.xlsx");
+        let target = create_target("output.unsupported");
         assert!(target.is_err());
     }
 

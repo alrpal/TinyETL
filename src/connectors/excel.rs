@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use calamine::{open_workbook, DataType as ExcelDataType, Reader, Xlsx};
+use calamine::{open_workbook, Data as ExcelData, Reader, Xlsx};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,17 +38,17 @@ impl ExcelSource {
         })
     }
 
-    fn excel_value_to_value(&self, excel_val: &ExcelDataType) -> Value {
+    fn excel_value_to_value(&self, excel_val: &ExcelData) -> Value {
         match excel_val {
-            ExcelDataType::Int(i) => Value::Integer(*i),
-            ExcelDataType::Float(f) => {
+            ExcelData::Int(i) => Value::Integer(*i),
+            ExcelData::Float(f) => {
                 // Try to convert to Decimal for precision
                 match Decimal::try_from(*f) {
                     Ok(d) => Value::Decimal(d),
                     Err(_) => Value::String(f.to_string()),
                 }
             }
-            ExcelDataType::String(s) => {
+            ExcelData::String(s) => {
                 // Try to parse as date/datetime first
                 if let Some(date_value) = DateParser::try_parse(s) {
                     date_value
@@ -56,19 +56,28 @@ impl ExcelSource {
                     Value::String(s.clone())
                 }
             }
-            ExcelDataType::Bool(b) => Value::Boolean(*b),
-            ExcelDataType::DateTime(dt) => {
+            ExcelData::Bool(b) => Value::Boolean(*b),
+            ExcelData::DateTime(dt) => {
                 // Excel stores dates as f64 (days since 1900-01-01)
                 // Convert to string representation
                 Value::String(format!("{}", dt))
             }
-            ExcelDataType::Error(e) => {
+            ExcelData::DateTimeIso(dt) => {
+                // ISO 8601 datetime string
+                Value::String(dt.clone())
+            }
+            ExcelData::DurationIso(d) => {
+                // ISO 8601 duration string
+                Value::String(d.clone())
+            }
+            ExcelData::Error(_e) => {
                 // Treat errors as null
                 Value::Null
             }
-            ExcelDataType::Empty => Value::Null,
+            ExcelData::Empty => Value::Null,
         }
     }
+
 
     fn load_data(&mut self) -> Result<()> {
         if !self.file_path.exists() {
@@ -100,9 +109,6 @@ impl ExcelSource {
 
         let range = workbook
             .worksheet_range(&sheet_name)
-            .ok_or_else(|| {
-                TinyEtlError::Configuration(format!("Sheet '{}' not found in Excel file", sheet_name))
-            })?
             .map_err(|e| {
                 TinyEtlError::Configuration(format!("Failed to read sheet '{}': {}", sheet_name, e))
             })?;
@@ -114,9 +120,9 @@ impl ExcelSource {
             self.headers = header_row
                 .iter()
                 .map(|cell| match cell {
-                    ExcelDataType::String(s) => s.clone(),
-                    ExcelDataType::Int(i) => i.to_string(),
-                    ExcelDataType::Float(f) => f.to_string(),
+                    ExcelData::String(s) => s.clone(),
+                    ExcelData::Int(i) => i.to_string(),
+                    ExcelData::Float(f) => f.to_string(),
                     _ => "Column".to_string(),
                 })
                 .collect();
@@ -261,19 +267,19 @@ impl ExcelTarget {
         })
     }
 
-    fn value_to_excel_value(&self, value: &Value) -> ExcelDataType {
+    #[allow(dead_code)]
+    fn value_to_excel_value(&self, value: &Value) -> ExcelData {
         match value {
-            Value::String(s) => ExcelDataType::String(s.clone()),
-            Value::Integer(i) => ExcelDataType::Int(*i),
+            Value::String(s) => ExcelData::String(s.clone()),
+            Value::Integer(i) => ExcelData::Int(*i),
             Value::Decimal(d) => {
                 // Convert Decimal to f64 for Excel
-                ExcelDataType::Float(d.to_string().parse::<f64>().unwrap_or(0.0))
+                ExcelData::Float(d.to_string().parse::<f64>().unwrap_or(0.0))
             }
-            Value::Boolean(b) => ExcelDataType::Bool(*b),
-            Value::Date(d) => ExcelDataType::String(d.to_string()),
-            Value::DateTime(dt) => ExcelDataType::String(dt.to_rfc3339()),
-            Value::Json(j) => ExcelDataType::String(j.to_string()),
-            Value::Null => ExcelDataType::Empty,
+            Value::Boolean(b) => ExcelData::Bool(*b),
+            Value::Date(d) => ExcelData::String(d.to_string()),
+            Value::Json(j) => ExcelData::String(j.to_string()),
+            Value::Null => ExcelData::Empty,
         }
     }
 }
@@ -368,16 +374,6 @@ impl Target for ExcelTarget {
                                         TinyEtlError::DataTransfer(format!("Failed to write date: {}", e))
                                     })?;
                             }
-                            Value::DateTime(dt) => {
-                                sheet
-                                    .write_string(excel_row, excel_col, &dt.to_rfc3339(), None)
-                                    .map_err(|e| {
-                                        TinyEtlError::DataTransfer(format!(
-                                            "Failed to write datetime: {}",
-                                            e
-                                        ))
-                                    })?;
-                            }
                             Value::Json(j) => {
                                 sheet
                                     .write_string(excel_row, excel_col, &j.to_string(), None)
@@ -428,7 +424,6 @@ impl Target for ExcelTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn test_excel_source_parsing() {
@@ -460,23 +455,23 @@ mod tests {
         let source = ExcelSource::new("test.xlsx").unwrap();
 
         // Test integer conversion
-        let int_val = source.excel_value_to_value(&ExcelDataType::Int(42));
+        let int_val = source.excel_value_to_value(&ExcelData::Int(42));
         assert!(matches!(int_val, Value::Integer(42)));
 
         // Test float conversion
-        let float_val = source.excel_value_to_value(&ExcelDataType::Float(3.14));
+        let float_val = source.excel_value_to_value(&ExcelData::Float(3.14));
         assert!(matches!(float_val, Value::Decimal(_)));
 
         // Test string conversion
-        let str_val = source.excel_value_to_value(&ExcelDataType::String("test".to_string()));
+        let str_val = source.excel_value_to_value(&ExcelData::String("test".to_string()));
         assert!(matches!(str_val, Value::String(_)));
 
         // Test boolean conversion
-        let bool_val = source.excel_value_to_value(&ExcelDataType::Bool(true));
+        let bool_val = source.excel_value_to_value(&ExcelData::Bool(true));
         assert!(matches!(bool_val, Value::Boolean(true)));
 
         // Test empty conversion
-        let null_val = source.excel_value_to_value(&ExcelDataType::Empty);
+        let null_val = source.excel_value_to_value(&ExcelData::Empty);
         assert!(matches!(null_val, Value::Null));
     }
 }

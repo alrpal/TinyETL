@@ -17,7 +17,7 @@
 		"ghcr.io/devcontainers-extra/features/apt-packages:1": {
 			"clean_ppas": true,
 			"preserve_apt_list": true,
-			"packages": "build-essential,libssl-dev,unixodbc-dev,pkg-config",
+			"packages": "build-essential,libssl-dev,unixodbc-dev,pkg-config,llvm-dev,libclang-dev,clang",
 			"ppas": "ppa:deadsnakes/ppa"
 		}
 	}
