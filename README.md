@@ -31,9 +31,9 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
    *Note: Auto-inferred schemas default all columns to nullable for safety*
 
 ✅ **Lua transformations** — powerful data transformations  
-✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, DuckDB, MSSQL, ODBC. Coming soon: Snowflake, Databricks, OneLake
+✅ **Universal connectivity** — CSV, JSON, Excel, Parquet, Avro, MySQL, PostgreSQL, SQLite, DuckDB, MSSQL, ODBC. Coming soon: Snowflake, Databricks, OneLake
 
-✅ **Cross-platform** — Linux, macOS, Windows ready
+✅ **Cross-platform** — Linux, macOS, Windows
 
 ## Quick Install
 
@@ -106,6 +106,7 @@ tinyetl --version
 # File format conversion (auto-detects schemas)
 tinyetl data.csv output.parquet
 tinyetl data.json analysis.db
+tinyetl data.xlsx data.csv
 
 # Database to database 
 tinyetl "postgresql://user:@host/db#users" "mysql://user:@host/db#users"
@@ -169,6 +170,7 @@ tinyetl data.csv output.parquet
 tinyetl data.csv output.avro
 tinyetl data.json output.csv
 tinyetl data.avro output.json
+tinyetl data.xlsx data.csv
 
 # Download from web
 tinyetl "https://example.com/data.csv" output.json
@@ -212,6 +214,7 @@ TinyETL supports two main categories of data sources and targets:
 **File Formats:**
 - **CSV** - Comma-separated values
 - **JSON** - JavaScript Object Notation (array of objects)
+-- **Excel** - Excel
 - **Parquet** - Columnar storage format
 - **Avro** - Binary serialization format with schema evolution
 

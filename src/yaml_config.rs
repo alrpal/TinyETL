@@ -48,11 +48,11 @@ impl YamlConfig {
     pub fn from_config(config: Config) -> Self {
         YamlConfig {
             version: 1,
-            source: SourceOrTargetConfig { 
+            source: SourceOrTargetConfig {
                 uri: config.source,
                 options: config.source_options,
             },
-            target: SourceOrTargetConfig { 
+            target: SourceOrTargetConfig {
                 uri: config.target,
                 options: config.target_options,
             },

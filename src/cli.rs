@@ -310,7 +310,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-
     #[test]
     fn test_http_source_with_type() {
         let cli = Cli::try_parse_from([

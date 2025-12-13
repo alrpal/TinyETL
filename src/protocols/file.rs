@@ -55,7 +55,7 @@ impl FileProtocol {
 #[async_trait]
 impl Protocol for FileProtocol {
     async fn create_source(
-        &self, 
+        &self,
         url: &Url,
         _options: &HashMap<String, String>,
     ) -> Result<Box<dyn Source>> {
@@ -66,7 +66,7 @@ impl Protocol for FileProtocol {
     }
 
     async fn create_target(
-        &self, 
+        &self,
         url: &Url,
         _options: &HashMap<String, String>,
     ) -> Result<Box<dyn Target>> {
