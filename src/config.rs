@@ -66,7 +66,6 @@ impl std::fmt::Display for LogLevel {
 impl std::str::FromStr for LogLevel {
     type Err = &'static str;
 
-
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "info" => Ok(LogLevel::Info),
@@ -81,7 +80,6 @@ impl std::str::FromStr for LogLevel {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_default_config() {
         let config = Config::default();
@@ -93,7 +91,6 @@ mod tests {
         assert!(matches!(config.log_level, LogLevel::Info));
     }
 
-
     #[test]
     fn test_log_level_parsing() {
         assert!(matches!("info".parse::<LogLevel>(), Ok(LogLevel::Info)));
@@ -101,7 +98,6 @@ mod tests {
         assert!(matches!("Error".parse::<LogLevel>(), Ok(LogLevel::Error)));
         assert!("invalid".parse::<LogLevel>().is_err());
     }
-
 
     #[test]
     fn test_log_level_display() {

@@ -78,7 +78,6 @@ impl ExcelSource {
         }
     }
 
-
     fn load_data(&mut self) -> Result<()> {
         if !self.file_path.exists() {
             return Err(TinyEtlError::Connection(format!(
@@ -107,11 +106,9 @@ impl ExcelSource {
                 .clone()
         };
 
-        let range = workbook
-            .worksheet_range(&sheet_name)
-            .map_err(|e| {
-                TinyEtlError::Configuration(format!("Failed to read sheet '{}': {}", sheet_name, e))
-            })?;
+        let range = workbook.worksheet_range(&sheet_name).map_err(|e| {
+            TinyEtlError::Configuration(format!("Failed to read sheet '{}': {}", sheet_name, e))
+        })?;
 
         let mut rows_iter = range.rows();
 
@@ -212,7 +209,12 @@ impl Source for ExcelSource {
             self.connect().await?;
         }
 
-        let sample_data = self.data.iter().take(sample_size).cloned().collect::<Vec<_>>();
+        let sample_data = self
+            .data
+            .iter()
+            .take(sample_size)
+            .cloned()
+            .collect::<Vec<_>>();
         self.infer_schema_with_order(&sample_data)
     }
 
@@ -298,8 +300,7 @@ impl Target for ExcelTarget {
 
     async fn write_batch(&mut self, rows: &[Row]) -> Result<usize> {
         // Accumulate rows for writing at finalize
-        self.accumulated_rows
-            .extend(rows.iter().cloned());
+        self.accumulated_rows.extend(rows.iter().cloned());
         Ok(rows.len())
     }
 
@@ -314,9 +315,14 @@ impl Target for ExcelTarget {
             ))
         })?;
 
-        let mut sheet = workbook.add_worksheet(Some(&self.sheet_name)).map_err(|e| {
-            TinyEtlError::Connection(format!("Failed to create worksheet '{}': {}", self.sheet_name, e))
-        })?;
+        let mut sheet = workbook
+            .add_worksheet(Some(&self.sheet_name))
+            .map_err(|e| {
+                TinyEtlError::Connection(format!(
+                    "Failed to create worksheet '{}': {}",
+                    self.sheet_name, e
+                ))
+            })?;
 
         if let Some(ref schema) = self.schema {
             // Write headers
@@ -337,48 +343,64 @@ impl Target for ExcelTarget {
                     if let Some(value) = row.get(&column.name) {
                         match value {
                             Value::String(s) => {
-                                sheet.write_string(excel_row, excel_col, s, None).map_err(|e| {
-                                    TinyEtlError::DataTransfer(format!("Failed to write string: {}", e))
-                                })?;
+                                sheet
+                                    .write_string(excel_row, excel_col, s, None)
+                                    .map_err(|e| {
+                                        TinyEtlError::DataTransfer(format!(
+                                            "Failed to write string: {}",
+                                            e
+                                        ))
+                                    })?;
                             }
                             Value::Integer(i) => {
-                                sheet.write_number(excel_row, excel_col, *i as f64, None).map_err(
-                                    |e| {
+                                sheet
+                                    .write_number(excel_row, excel_col, *i as f64, None)
+                                    .map_err(|e| {
                                         TinyEtlError::DataTransfer(format!(
                                             "Failed to write integer: {}",
                                             e
                                         ))
-                                    },
-                                )?;
+                                    })?;
                             }
                             Value::Decimal(d) => {
                                 let f = d.to_string().parse::<f64>().unwrap_or(0.0);
-                                sheet.write_number(excel_row, excel_col, f, None).map_err(|e| {
-                                    TinyEtlError::DataTransfer(format!("Failed to write decimal: {}", e))
-                                })?;
+                                sheet
+                                    .write_number(excel_row, excel_col, f, None)
+                                    .map_err(|e| {
+                                        TinyEtlError::DataTransfer(format!(
+                                            "Failed to write decimal: {}",
+                                            e
+                                        ))
+                                    })?;
                             }
                             Value::Boolean(b) => {
-                                sheet.write_boolean(excel_row, excel_col, *b, None).map_err(
-                                    |e| {
+                                sheet
+                                    .write_boolean(excel_row, excel_col, *b, None)
+                                    .map_err(|e| {
                                         TinyEtlError::DataTransfer(format!(
                                             "Failed to write boolean: {}",
                                             e
                                         ))
-                                    },
-                                )?;
+                                    })?;
                             }
                             Value::Date(d) => {
                                 sheet
                                     .write_string(excel_row, excel_col, &d.to_string(), None)
                                     .map_err(|e| {
-                                        TinyEtlError::DataTransfer(format!("Failed to write date: {}", e))
+                                        TinyEtlError::DataTransfer(format!(
+                                            "Failed to write date: {}",
+                                            e
+                                        ))
                                     })?;
                             }
                             Value::Json(j) => {
                                 sheet
                                     .write_string(excel_row, excel_col, &j.to_string(), None)
                                     .map_err(|e| {
-                                        TinyEtlError::DataTransfer(format!("Failed to write json: {}", e))
+                                        TinyEtlError::DataTransfer(format!(
+                                            "Failed to write json: {}",
+                                            e
+                                        ))
                                     })?;
                             }
                             Value::Null => {
