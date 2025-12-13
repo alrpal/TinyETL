@@ -10,6 +10,7 @@ echo ""
 
 # Navigate to the project root
 cd "$(dirname "$0")/../.."
+PROJECT_ROOT="$(pwd)"
 
 # Build if needed
 if [ ! -f "target/release/tinyetl" ] && [ ! -f "target/debug/tinyetl" ]; then
@@ -18,9 +19,9 @@ if [ ! -f "target/release/tinyetl" ] && [ ! -f "target/debug/tinyetl" ]; then
 fi
 
 # Use release build if available, otherwise debug
-TINYETL="./target/release/tinyetl"
+TINYETL="$PROJECT_ROOT/target/release/tinyetl"
 if [ ! -f "$TINYETL" ]; then
-    TINYETL="./target/debug/tinyetl"
+    TINYETL="$PROJECT_ROOT/target/debug/tinyetl"
 fi
 
 cd examples/19_excel_support
