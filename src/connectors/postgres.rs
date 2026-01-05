@@ -376,7 +376,7 @@ impl Target for PostgresTarget {
                 let pg_type = match col.data_type {
                     DataType::String => "TEXT",
                     DataType::Integer => "BIGINT",
-                    DataType::Decimal => "DECIMAL",
+                    DataType::Decimal => "DECIMAL(18,6)",
                     DataType::Boolean => "BOOLEAN",
                     DataType::Date | DataType::DateTime => "TIMESTAMP WITH TIME ZONE",
                     DataType::Json => "JSONB", // PostgreSQL native JSON type
@@ -507,7 +507,7 @@ impl Target for PostgresTarget {
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
 
         let exists_query =
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)";
+            "SELECT EXISTS (SELECT * FROM information_schema.tables WHERE table_name = $1)";
 
         let exists: bool = sqlx::query_scalar(exists_query)
             .bind(table_name)
