@@ -48,37 +48,55 @@ else
         exit 1
     fi
     
+    # Run a query and print only its single scalar result
+    # (NOCOUNT suppresses the "(1 rows affected)" footer, -h -1 drops the header)
+    sql_scalar() {
+        docker exec tinyetl-mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P TestPass123! -C -d testdb -h -1 \
+            -Q "SET NOCOUNT ON; $1" | tr -d ' \r' | grep -v '^$' | tail -1
+    }
+
+    # Row count of dbo.customers, or 0 if the table doesn't exist yet
+    count_customers() {
+        sql_scalar "IF OBJECT_ID('dbo.customers', 'U') IS NULL SELECT 0 ELSE SELECT COUNT(*) FROM dbo.customers"
+    }
+
+    # TinyETL appends to an existing table, so the expected count after the run is
+    # whatever is already there plus the number of data rows in the CSV.
+    CSV_ROWS=$(tail -n +2 customers.csv | grep -c .)
+    BEFORE_COUNT=$(count_customers)
+    if ! [[ "$BEFORE_COUNT" =~ ^[0-9]+$ ]]; then
+        echo "❌ FAIL: Could not read the current row count (got: '$BEFORE_COUNT')"
+        exit 1
+    fi
+    EXPECTED_COUNT=$((BEFORE_COUNT + CSV_ROWS))
+    echo "Existing rows in dbo.customers: $BEFORE_COUNT; CSV rows: $CSV_ROWS; expected after transfer: $EXPECTED_COUNT"
+
     # Run actual data transfer
     echo "Transferring data to MSSQL..."
-    ../../target/release/tinyetl customers.csv "mssql://SA:TestPass123!@localhost:1433/testdb#customers"
-    
-    if [ $? -eq 0 ]; then
+    if ../../target/release/tinyetl customers.csv "mssql://SA:TestPass123!@localhost:1433/testdb#customers"; then
         echo "✅ PASS: Data transfer completed successfully"
-        
+
         # Verify the data was inserted
         echo "Verifying data in MSSQL..."
-        
-        # First check if the table exists
-        TABLE_EXISTS=$(docker exec tinyetl-mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P TestPass123! -C -d testdb -Q "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'customers'" -h -1 | tr -d ' \r\n' | tail -1)
-        
+
+        TABLE_EXISTS=$(sql_scalar "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'customers'")
         if [ "$TABLE_EXISTS" = "0" ]; then
             echo "❌ FAIL: Table 'customers' does not exist in testdb"
             echo "Available tables:"
             docker exec tinyetl-mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P TestPass123! -C -d testdb -Q "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
             exit 1
         fi
-        
-        ROW_COUNT=$(docker exec tinyetl-mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P TestPass123! -C -d testdb -Q "SELECT COUNT(*) FROM dbo.customers" -h -1 | tr -d ' \r\n' | tail -1)
-        
-        if [ "$ROW_COUNT" = "6" ]; then
-            echo "✅ PASS: All 6 rows successfully inserted into MSSQL"
-            
+
+        ROW_COUNT=$(count_customers)
+        if [ "$ROW_COUNT" = "$EXPECTED_COUNT" ]; then
+            echo "✅ PASS: $CSV_ROWS rows appended to MSSQL ($BEFORE_COUNT -> $ROW_COUNT)"
+
             # Show sample data
             echo ""
             echo "Sample data from MSSQL table:"
             docker exec tinyetl-mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P TestPass123! -C -d testdb -Q "SELECT TOP 3 customer_id, first_name, last_name, email FROM dbo.customers ORDER BY customer_id"
         else
-            echo "❌ FAIL: Expected 6 rows, but found $ROW_COUNT"
+            echo "❌ FAIL: Expected $EXPECTED_COUNT rows ($BEFORE_COUNT existing + $CSV_ROWS new), but found $ROW_COUNT"
             exit 1
         fi
     else

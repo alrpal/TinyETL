@@ -17,7 +17,7 @@ chmod +x run_all_examples.sh
 TinyETL now supports two layers:
 
 1. **Connectors**: Handle data format (CSV, JSON, Parquet, SQLite, Postgres)
-2. **Protocols**: Handle transport/authentication (file://, snowflake://, future: databricks://, onelake://)
+2. **Protocols**: Handle transport/authentication (file://, http(s)://, ssh://, s3://, snowflake:// (mock), future: databricks://, onelake://)
 
 This separation allows you to read from Snowflake and write to local Parquet, or read CSV and write to Snowflake, etc.
 
@@ -84,6 +84,20 @@ tinyetl input.csv "snowflake://user:pass@account.region.cloud/db/schema?warehous
 - Temporary file handling
 - Mock data import simulation
 
+### 19_s3
+**Read and write Amazon S3**
+
+```bash
+tinyetl run upload_config.yaml     # employees.csv -> s3://$TINYETL_S3_BUCKET/tinyetl-example/employees.parquet
+tinyetl run download_config.yaml   # that object -> output_employees.json
+```
+
+- Round-trips data through a real bucket, as Parquet (YAML configs) and CSV (plain CLI)
+- Writes the CSV object twice to confirm overwriting
+- Needs `TINYETL_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION`, exported or in a `.env` file at the repo root; skips itself otherwise
+
+See [`19_s3/README.md`](19_s3/README.md) for the setup.
+
 ## Protocol Architecture
 
 ### Current Implementation Status
@@ -91,6 +105,9 @@ tinyetl input.csv "snowflake://user:pass@account.region.cloud/db/schema?warehous
 | Protocol | Status | Description |
 |----------|--------|-------------|
 | `file://` | ✅ Production | Local file system operations |
+| `http://`, `https://` | ✅ Production | Web downloads (read only), with basic/bearer auth and custom headers |
+| `ssh://` | ✅ Production | SCP file transfer (read only) |
+| `s3://` | ✅ Production | Amazon S3 and S3-compatible stores, read and write (see `19_s3`) |
 | `snowflake://` | 🔄 Mock | Cloud data warehouse (Snowflake) |
 | `databricks://` | 📋 Planned | Databricks lakehouse platform |
 | `onelake://` | 📋 Planned | Microsoft OneLake |
@@ -166,7 +183,7 @@ Each example includes validation to ensure:
 1. **Real Snowflake Integration**: Replace mock with actual Snowflake connector
 2. **Databricks Support**: Add databricks:// protocol
 3. **Microsoft OneLake**: Add onelake:// protocol  
-4. **AWS S3/Glue**: Add s3:// and glue:// protocols
+4. **AWS Glue**: Add glue:// protocol
 5. **BigQuery**: Add bigquery:// protocol
 6. **Streaming Sources**: Kafka, Kinesis protocols
 7. **Authentication Methods**: OAuth, service accounts, etc.

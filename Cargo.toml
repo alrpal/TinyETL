@@ -48,6 +48,7 @@ base64 = "0.21"
 duckdb = { version = "1.4.1", features = ["bundled"] }
 odbc-api = { version = "8.0", features = ["narrow"] }
 hex = "0.4"
+object_store = { version = "0.12.5", features = ["aws"] }
 
 [dev-dependencies]
 tempfile = "3.8"

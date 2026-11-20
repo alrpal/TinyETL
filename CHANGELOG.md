@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **S3 Protocol**: `s3://bucket/path/file.ext` as both a source and a target for CSV, JSON, Parquet and Avro files
+  - Works with Amazon S3 and S3-compatible stores (e.g. Cloudflare R2) via the `endpoint` option
+  - Credentials from `AWS_*` environment variables, IAM roles, or per-endpoint YAML options (`region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`, `allow_http`, `path_style`)
+  - First remote protocol that supports writing: the output is staged locally and uploaded when the transfer completes
+- `examples/19_s3`: round trip against a real bucket (skipped unless `TINYETL_S3_BUCKET` and AWS credentials are set)
+
 ## [0.10.0] - 2024-12-03
 
 ### Added
