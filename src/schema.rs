@@ -60,11 +60,16 @@ impl DataType {
     }
 }
 
+fn default_nullable() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaFileColumn {
     pub name: String,
     #[serde(rename = "type")]
     pub data_type: String,
+    #[serde(default = "default_nullable")]
     pub nullable: bool,
     pub pattern: Option<String>,
     pub default: Option<String>,
@@ -903,6 +908,14 @@ mod tests {
 
         // NULL fits everywhere
         assert_eq!(Value::Null.coerce_to(&DataType::Integer), Value::Null);
+    }
+
+    #[test]
+    fn test_schema_file_nullable_defaults_to_true() {
+        let file: SchemaFile =
+            serde_yaml::from_str("columns:\n  - name: id\n    type: Integer\n").unwrap();
+        file.validate().unwrap();
+        assert!(file.columns[0].nullable);
     }
 
     #[test]

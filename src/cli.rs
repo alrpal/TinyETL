@@ -42,7 +42,7 @@ pub struct Cli {
     #[arg(long, default_value = "info")]
     pub log_level: LogLevel,
 
-    /// Skip rows already in target if primary key detected
+    /// Not implemented yet; has no effect
     #[arg(long)]
     pub skip_existing: bool,
 
@@ -58,7 +58,7 @@ pub struct Cli {
     #[arg(long, value_name = "EXPRESSIONS")]
     pub transform: Option<String>,
 
-    /// Force source file type (csv, json, parquet) - useful for HTTP URLs without clear extensions
+    /// Force source file type (csv, json, parquet, avro, xlsx, ...) - useful for URLs without clear extensions
     #[arg(long, value_name = "TYPE")]
     pub source_type: Option<String>,
 
@@ -113,7 +113,7 @@ pub enum Commands {
         #[arg(long, default_value = "info")]
         log_level: LogLevel,
 
-        /// Skip rows already in target if primary key detected
+        /// Not implemented yet; has no effect
         #[arg(long)]
         skip_existing: bool,
 
@@ -129,7 +129,7 @@ pub enum Commands {
         #[arg(long, value_name = "EXPRESSIONS")]
         transform: Option<String>,
 
-        /// Force source file type (csv, json, parquet)
+        /// Force source file type (csv, json, parquet, avro, xlsx, ...)
         #[arg(long, value_name = "TYPE")]
         source_type: Option<String>,
 

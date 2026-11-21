@@ -123,8 +123,9 @@ version: 1
 
 source:
   uri: "employees.csv"            # or database connection string
-  # options:                      # Optional source-specific options
-  #   header.User-Agent: "TinyETL/0.9.0"
+  # Optional source-specific options (e.g., for HTTP sources)
+  # options:
+  #   header.User-Agent: "TinyETL/0.11.0"
   #   header.Accept: "text/csv"
   #   auth.basic.username: "user"
   #   auth.basic.password: "${PASSWORD}"
@@ -132,7 +133,8 @@ source:
 
 target:
   uri: "employees_output.json"    # or database connection string
-  # options:                      # Optional target-specific options
+  # Optional target-specific options
+  # options:
   #   region: "us-east-1"         # e.g. S3 target (s3://bucket/path/file.parquet)
   #   access_key_id: "${AWS_ACCESS_KEY_ID}"
   #   secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
@@ -147,10 +149,14 @@ options:
   preview: 10                     # Show N rows without transfer
   dry_run: false                  # Validate without transferring
   log_level: info                 # info, warn, error (lowercase in YAML)
-  skip_existing: false            # Skip if target exists
+  skip_existing: false            # Not implemented yet; has no effect
   source_type: "csv"              # Force source file type
   truncate: false                 # Truncate target before writing
-  transform:                      # Inline Lua script transformation
+
+  # Transform configuration supports multiple formats:
+
+  # 1. Multi-line script (recommended for complex transformations)
+  transform:
     type: script
     value: |
       -- Calculate derived fields
@@ -158,10 +164,19 @@ options:
       annual_salary = row.monthly_salary * 12
       hire_year = tonumber(string.sub(row.hire_date, 1, 4))
 
-# The "transform" key can also specify a Lua script file, as follows:
-#  transform:
-#    type: file
-#    value: "transform.lua"
+  # 2. Inline single-line expressions (for simple transformations)
+  # transform:
+  #   type: inline
+  #   value: "total=row.quantity * row.price; profit=total - row.cost"
+
+  # 3. External Lua file (for reusable transformation logic)
+  # transform:
+  #   type: file
+  #   value: "transform.lua"
+
+  # 4. No transformation (default)
+  # transform:
+  #   type: none
 "#;
 
     println!("{}", default_config);

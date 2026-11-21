@@ -393,6 +393,8 @@ impl Source for AvroSource {
 pub struct AvroTarget {
     file_path: PathBuf,
     schema: Option<AvroSchema>,
+    /// TinyETL's columns, in the Avro schema's field order
+    columns: Vec<crate::schema::Column>,
     buffer: Vec<Row>,
 }
 
@@ -401,6 +403,7 @@ impl AvroTarget {
         Ok(Self {
             file_path: PathBuf::from(file_path),
             schema: None,
+            columns: Vec::new(),
             buffer: Vec::new(),
         })
     }
@@ -536,6 +539,10 @@ impl AvroTarget {
             (Value::Integer(i), DataType::String) => AvroValue::String(i.to_string()),
             (Value::Decimal(d), DataType::String) => AvroValue::String(d.to_string()),
             (Value::Boolean(b), DataType::String) => AvroValue::String(b.to_string()),
+            (Value::Date(dt), DataType::String) => AvroValue::String(dt.to_rfc3339()),
+            // JSON is stored as text
+            (Value::Json(j), DataType::Json | DataType::String) => AvroValue::String(j.to_string()),
+            (Value::String(s), DataType::Json) => AvroValue::String(s.clone()),
             _ => {
                 return Err(TinyEtlError::DataTransfer(format!(
                     "Cannot convert value {:?} to Avro type {:?}",
@@ -563,6 +570,7 @@ impl Target for AvroTarget {
     async fn create_table(&mut self, _table_name: &str, schema: &Schema) -> Result<()> {
         let avro_schema = Self::schema_to_avro_schema(schema)?;
         self.schema = Some(avro_schema);
+        self.columns = schema.columns.clone();
         Ok(())
     }
 
@@ -592,36 +600,17 @@ impl Target for AvroTarget {
         let mut writer = Writer::new(schema, buf_writer);
 
         for row in &self.buffer {
-            let mut record_fields = Vec::new();
-
-            // Extract fields from schema to maintain order
-            let schema_json: JsonValue =
-                serde_json::from_str(&schema.canonical_form()).map_err(|e| {
-                    TinyEtlError::DataTransfer(format!("Failed to parse schema: {}", e))
-                })?;
-
-            if let JsonValue::Object(obj) = &schema_json {
-                if let Some(JsonValue::Array(fields)) = obj.get("fields") {
-                    for field in fields {
-                        if let JsonValue::Object(field_obj) = field {
-                            let field_name = field_obj
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown");
-
-                            let default_type = JsonValue::String("string".to_string());
-                            let field_type = field_obj.get("type").unwrap_or(&default_type);
-                            let data_type = AvroSource::avro_type_to_schema_type(field_type);
-                            let nullable = AvroSource::is_nullable(field_type);
-
-                            let value = row.get(field_name).unwrap_or(&Value::Null);
-                            let avro_value =
-                                Self::value_to_avro_value(value, &data_type, nullable)?;
-
-                            record_fields.push((field_name.to_string(), avro_value));
-                        }
-                    }
-                }
+            // Column types come from TinyETL's schema: the Avro schema's canonical form drops
+            // logical types (date, timestamp-millis), so it can't be used to pick conversions
+            let mut record_fields = Vec::with_capacity(self.columns.len());
+            for column in &self.columns {
+                let value = row.get(&column.name).unwrap_or(&Value::Null);
+                // A Null-typed column is written as a nullable string (see schema_to_avro_schema)
+                let avro_value = match column.data_type {
+                    DataType::Null => Self::value_to_avro_value(value, &DataType::String, true)?,
+                    ref data_type => Self::value_to_avro_value(value, data_type, column.nullable)?,
+                };
+                record_fields.push((column.name.clone(), avro_value));
             }
 
             let record = AvroValue::Record(record_fields);
@@ -1001,6 +990,47 @@ mod tests {
         assert_eq!(target.file_path.to_string_lossy(), "output.avro");
         assert!(target.schema.is_none());
         assert!(target.buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_avro_writes_timestamps_dates_and_json() {
+        use chrono::{TimeZone, Utc};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("typed.avro");
+        let path = path.to_str().unwrap();
+        let column = |name: &str, data_type| Column {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+        };
+        let schema = Schema {
+            columns: vec![
+                column("at", DataType::DateTime),
+                column("day", DataType::Date),
+                column("doc", DataType::Json),
+                column("empty", DataType::Null),
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        let at = Utc.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap();
+        let row: Row = HashMap::from([
+            ("at".to_string(), Value::Date(at)),
+            ("day".to_string(), Value::Date(at)),
+            ("doc".to_string(), Value::Json(serde_json::json!({"a": 1}))),
+            ("empty".to_string(), Value::Null),
+        ]);
+
+        let mut target = AvroTarget::new(path).unwrap();
+        target.create_table("t", &schema).await.unwrap();
+        target.write_batch(&[row]).await.unwrap();
+        target.finalize().await.unwrap();
+
+        let mut source = AvroSource::new(path).unwrap();
+        source.connect().await.unwrap();
+        let rows = source.read_batch(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["at"], Value::Date(at));
     }
 
     #[tokio::test]

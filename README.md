@@ -1,11 +1,10 @@
 # TinyETL
 **Fast, zero-config ETL in a single binary**
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/alrpal/tinyetl/actions)
-[![Coverage](https://img.shields.io/badge/coverage-60%25-brightgreen)](https://github.com/alrpal/tinyetl/actions)
+[![CI](https://github.com/alrpal/TinyETL/actions/workflows/pr.yaml/badge.svg?branch=master)](https://github.com/alrpal/TinyETL/actions/workflows/pr.yaml)
 [![Version](https://img.shields.io/badge/version-0.11.0-blue)](https://github.com/alrpal/tinyetl/releases)
-[![Rust Edition](https://img.shields.io/badge/rust-2021-orange)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
-[![Binary Size](https://img.shields.io/badge/binary-15MB-green)](https://github.com/alrpal/tinyetl/releases)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org/tools/install)
+[![Download size](https://img.shields.io/badge/download-~20MB-green)](https://github.com/alrpal/tinyetl/releases)
 
 ![TinyETL Demo](examples/tinyetl_preview2-normal-framerate.gif)
 
@@ -16,8 +15,11 @@ Transform and move data between any format or database **instantly**. No depende
 tinyetl "mysql://user:@host/db#orders" orders.parquet \
   --transform "total_usd=row.amount * row.exchange_rate"
 
-# Stream 100k+ rows/sec from CSV → SQLite
-tinyetl large_dataset.csv results.db --batch-size 50000
+# Load a CSV into Snowflake (staged and loaded with COPY INTO)
+tinyetl orders.csv "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#orders"
+
+# Excel sheet → Parquet on S3
+tinyetl "budget.xlsx#Q4" s3://my-bucket/finance/q4.parquet
 
 # Download & convert web data
 tinyetl "https://api.data.gov/export.json" analysis.parquet
@@ -25,8 +27,8 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 
 ## Why TinyETL?
 
-✅ **Single 15 MB binary** — no dependencies, no installation headaches  
-✅ **180k+ rows/sec streaming** — handles massive datasets efficiently  
+✅ **Single binary** — about a 20 MB download (50 MB unpacked), with no runtime dependencies: no Python, no JVM, no shared libraries to install  
+✅ **Fast** — 150k–380k rows/sec for a 1M-row CSV on a laptop (see [Performance](#performance))  
 ✅ **Zero configuration** — automatic schema detection and table creation (override with schema and config files in yaml)  
    *Note: Auto-inferred schemas default all columns to nullable for safety*
 
@@ -48,44 +50,36 @@ The Linux binary needs glibc 2.35 or later (Ubuntu 22.04+, Debian 12+, Fedora 36
 
 Each download is a single self-contained binary with nothing else to install. The Linux and macOS binaries include the unixODBC driver manager (LGPL-2.1-or-later); see [License](#license).
 
-<!--
-**Linux x64:**
+**Linux x86_64** (use `tinyetl-linux-aarch64` for ARM64):
 ```bash
-curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-linux-x64.tar.gz | tar xz
-chmod +x tinyetl
-sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
+mkdir tinyetl && cd tinyetl
+curl -L https://github.com/alrpal/TinyETL/releases/latest/download/tinyetl-linux-x86_64.tar.gz | tar xz
+sudo mv tinyetl /usr/local/bin/   # optional: put it on your PATH
 ```
 
-**macOS Apple Silicon:**
+**macOS Apple Silicon** (use `tinyetl-macos-intel-x86_64` for Intel Macs):
 ```bash
-curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-macos-apple-silicon.tar.gz | tar xz
-chmod +x tinyetl
-sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
+mkdir tinyetl && cd tinyetl
+curl -L https://github.com/alrpal/TinyETL/releases/latest/download/tinyetl-macos-apple-silicon-aarch64.tar.gz | tar xz
+sudo mv tinyetl /usr/local/bin/
+```
+The binary isn't notarized by Apple. If you downloaded it with a browser and macOS blocks it, run `xattr -d com.apple.quarantine tinyetl` (files fetched with `curl` aren't affected).
+
+**Windows x86_64** (use `tinyetl-windows-aarch64` for ARM64):
+```powershell
+Invoke-WebRequest -Uri "https://github.com/alrpal/TinyETL/releases/latest/download/tinyetl-windows-x86_64.zip" -OutFile "tinyetl.zip"
+Expand-Archive -Path "tinyetl.zip" -DestinationPath "tinyetl"
+# then add the tinyetl folder to your PATH
 ```
 
-**Windows x64:**
-```powershell
-# Download and extract using PowerShell
-Invoke-WebRequest -Uri "https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-windows-x64.zip" -OutFile "tinyetl.zip"
-Expand-Archive -Path "tinyetl.zip" -DestinationPath "."
-# Move tinyetl.exe to a directory in your PATH
-```
-
-**Windows ARM64:**
-```powershell
-# Download and extract using PowerShell  
-Invoke-WebRequest -Uri "https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-windows-arm64.zip" -OutFile "tinyetl.zip"
-Expand-Archive -Path "tinyetl.zip" -DestinationPath "."
-# Move tinyetl.exe to a directory in your PATH
-```
--->
+Each archive also contains `LICENSE`, `THIRD_PARTY_LICENSES.md` and a `licenses/` folder.
 
 **Or install with Cargo** (builds from source):
 ```bash
 cargo install tinyetl
 ```
 
-Building from source needs Rust 1.94 or later (`rustup update`) and a C/C++ compiler. The bundled unixODBC (and, on Linux, OpenSSL) are compiled from source, so no system libraries are needed:
+Building from source needs Rust 1.94 or later (`rustup update`) and a C/C++ compiler. The bundled C libraries (DuckDB, SQLite, Lua, unixODBC, AWS-LC, and OpenSSL on Linux) are compiled from source, so no system libraries are needed. A clean build takes several minutes, mostly DuckDB:
 - Debian/Ubuntu: `sudo apt install build-essential perl` (`perl` is used to build OpenSSL)
 - macOS: `xcode-select --install`
 
@@ -108,8 +102,8 @@ tinyetl "postgresql://user:@host/db#users" "mysql://user:@host/db#users"
 # Transform while transferring
 tinyetl sales.csv results.db --transform "profit=row.revenue - row.costs; margin=profit/revenue"
 
-# Process large datasets efficiently  
-tinyetl huge_dataset.csv output.parquet --batch-size 100000
+# Load a large file in big batches (memory stays flat)
+tinyetl huge_dataset.csv "analytics.duckdb#events" --batch-size 100000
 
 # Download and convert web data
 tinyetl "https://example.com/api/export" local_data.json --source-type=csv
@@ -122,11 +116,20 @@ tinyetl run my_etl_job.yaml
 <div style="overflow-x: auto;">
 
 ```
-Usage: tinyetl [OPTIONS] <SOURCE> <TARGET>
+A tiny ETL tool for moving data between sources
 
-Direct Transfer:
-  <SOURCE>  Source connection string (file path or connection string)
-  <TARGET>  Target connection string (file path or connection string)
+Usage: tinyetl [OPTIONS] [SOURCE] [TARGET]
+       tinyetl <COMMAND>
+
+Commands:
+  run                      Run a job from a YAML configuration file
+  generate-default-config  Generate a default YAML configuration example and output to STDOUT
+  generate-config          Generate a YAML configuration file from CLI arguments and output to STDOUT
+  help                     Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [SOURCE]  Source connection string (file path or connection string)
+  [TARGET]  Target connection string (file path or connection string)
 
 Options:
       --infer-schema             Auto-detect columns and types
@@ -135,22 +138,15 @@ Options:
       --preview <N>              Show first N rows and inferred schema without copying
       --dry-run                  Validate source/target without transferring data
       --log-level <LOG_LEVEL>    Log level: info, warn, error [default: info]
-      --skip-existing            Skip rows already in target if primary key detected
+      --skip-existing            Not implemented yet; has no effect
       --truncate                 Truncate target before writing (overrides append-first behavior)
       --transform-file <FILE>    Path to Lua file containing a 'transform' function
       --transform <EXPRESSIONS>  Inline transformation expressions (semicolon-separated, e.g., "new_col=row.old_col * 2; name=row.first .. ' ' .. row.last")
-      --source-type <TYPE>       Force source file type (csv, json, parquet) - useful for HTTP URLs without clear extensions
+      --source-type <TYPE>       Force source file type (csv, json, parquet, avro, xlsx, ...) - useful for URLs without clear extensions
       --source-secret-id <ID>    Secret ID for source password (resolves to TINYETL_SECRET_{id})
       --dest-secret-id <ID>      Secret ID for destination password (resolves to TINYETL_SECRET_{id})
   -h, --help                     Print help
   -V, --version                  Print version
-
-Config File Mode:
-  run <CONFIG_FILE>  Run ETL job from YAML configuration file
-  
-Config File Generation Modes:
-  generate-config [OPTIONS] <SOURCE> <TARGET>  Generate a YAML configuration file from CLI arguments and output to STDOUT
-  generate-default-config                      Generate a default YAML configuration example and output to STDOUT
 ```
 
 </div>
@@ -179,19 +175,19 @@ tinyetl data.csv "postgresql://user:pass@localhost/mydb#customers"
 tinyetl data.csv "mysql://user:pass@localhost:3306/mydb#customers"
 tinyetl "sqlite:///source.db#users" output.csv
 
+# Cloud storage and warehouses
+tinyetl s3://my-bucket/raw/orders.csv orders.parquet
+tinyetl orders.parquet "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#orders"
+
 # Data inspection and validation
-tinyetl data.csv output.db --preview 10
-tinyetl data.csv output.db --dry-run
+tinyetl data.csv output.db --preview 10     # show rows and the inferred schema
+tinyetl data.csv output.db --dry-run        # check connections and schema only
 
-# Advanced options
+# Replace a table's rows instead of appending
+tinyetl data.csv output.db --truncate
+
+# Custom batch size
 tinyetl data.csv output.db --batch-size 5000
-tinyetl data.csv output.db --preview 10
-
-# Transfer with custom batch size
-tinyetl data.csv output.db --batch-size 5000
-
-# Dry run to validate without transferring
-tinyetl data.csv output.db --dry-run
 
 # Apply inline transformations
 tinyetl data.csv output.db --transform "full_name=row.first_name .. ' ' .. row.last_name; age_next_year=row.age + 1"
@@ -256,7 +252,8 @@ TinyETL supports two main categories of data sources and targets:
 - **SQLite** - Embedded database
 - **PostgreSQL** - Advanced open-source database
 - **MySQL** - Popular relational database
-- **CrateDB** - Distributed analytical database optimized for OLAP workloads
+- **SQL Server** - Native driver (`mssql://`), no ODBC driver needed
+- **CrateDB** - Distributed SQL database, through `postgresql://` URLs
 - **DuckDB** - Embedded analytical database optimized for OLAP workloads
 - **ODBC** - Any database with an ODBC driver (tested: SQL Server, PostgreSQL, MySQL/MariaDB, SQLite)
 - **Snowflake** - Cloud data warehouse; bulk loads through stage + `COPY INTO`
@@ -274,6 +271,10 @@ tinyetl data.csv "postgresql://user:@localhost/mydb#customers"
 # MySQL
 tinyetl "mysql://user:@localhost:3306/mydb#products" output.json
 tinyetl data.csv "mysql://user:@localhost:3306/mydb#sales"
+
+# SQL Server (native)
+tinyetl "mssql://sa:pass@localhost:1433/mydb#orders" output.parquet
+tinyetl data.csv "mssql://sa:pass@localhost:1433/mydb#customers"
 
 # CrateDB
 tinyetl "postgresql://crate:@localhost/doc#orders" output.parquet
@@ -362,6 +363,17 @@ tinyetl data.csv /path/to/database.db   # Creates table named 'database'
 tinyetl data.csv "sqlite:///path/to/database.db#custom_table"
 ```
 
+**SQL Server (native):**
+```bash
+# Basic format (username and password are required)
+mssql://username:password@hostname:port/database#table_name
+
+# Examples
+tinyetl data.csv "mssql://sa:MyPass123@localhost:1433/mydb#customers"
+tinyetl "mssql://sa:MyPass123@localhost:1433/mydb#orders" orders.csv
+```
+Tables are in the login's default schema (usually `dbo`); `schema.table` names aren't supported by the native connector yet. For other schemas, Windows authentication or other driver features, use `odbc://` with Microsoft's ODBC driver (below).
+
 **CrateDB:**
 ```bash
 # Basic format
@@ -371,6 +383,7 @@ postgresql://username:password@hostname:port/schema#table_name
 tinyetl data.csv "postgresql://user:@localhost/doc#customers"
 tinyetl data.csv "postgresql://admin:@db.example.com:5432/analytics#sales_data"
 ```
+TinyETL detects CrateDB and creates decimal columns as `NUMERIC(38,10)`, since CrateDB needs a precision and scale.
 
 **DuckDB:**
 ```bash
@@ -471,8 +484,8 @@ YAML options for Snowflake endpoints (under `source.options` / `target.options`)
 See [`examples/22_snowflake`](examples/22_snowflake/) for a complete setup, from creating a key pair to a test run.
 
 **Important Notes:**
-- Table names are automatically created if they don't exist
-- For MySQL and ODBC databases, the database must exist before running TinyETL
+- Tables are created if they don't exist; the database (and schema) must already exist
+- Existing tables are appended to; `--truncate` replaces their rows
 - DuckDB is optimized for analytical (OLAP) workloads and offers better performance than SQLite for aggregations
 - Connection strings should be quoted to prevent shell interpretation
 - Default ports: PostgreSQL (5432), CrateDB (5432), MySQL (3306)
@@ -497,12 +510,7 @@ tinyetl "postgres://user@prod.example.com/db#orders" \
         --dest-secret-id dev_db
 ```
 
-**Environment Variable Pattern:**
-- Format: `TINYETL_SECRET_{protocol}_{type}` or `TINYETL_SECRET_{protocol}`
-- Examples:
-  - `TINYETL_SECRET_mysql_dest` - for MySQL destination connections
-  - `TINYETL_SECRET_postgres_source` - for PostgreSQL and CrateDB source connections
-  - `TINYETL_SECRET_mysql` - generic MySQL password (works for both source/dest)
+**How it works:** `--source-secret-id ID` reads the environment variable `TINYETL_SECRET_ID` and sets it as the password in the source URL (`--dest-secret-id` does the same for the target). The ID is any name you choose, such as `prod_db`. It works for URL-style connection strings (`postgres://`, `mysql://`, `mssql://`, `snowflake://`); for `odbc://`, put the password in the connection string or a DSN, and for S3 use the AWS variables.
 
 
 #### Security Warnings
@@ -512,7 +520,7 @@ TinyETL automatically detects when passwords are included in CLI parameters and 
 ```bash
 # This will show a security warning:
 tinyetl data.csv "mysql://user:password123@localhost/db#table"
-Warning: Using passwords in CLI parameters is insecure. Consider using --source-secret-id / --dest-secret-id.
+WARN Warning: Using passwords in CLI parameters for target is insecure. Consider using --source-secret-id / --dest-secret-id.
 ```
 
 **Security Best Practices:**
@@ -618,16 +626,17 @@ transform:
 4. **New Columns**: New columns returned by transform are added to the target schema  
 5. **Column Filtering**: For Lua files, only columns returned by the transform function are kept
 6. **Row Filtering**: Return `nil` or empty table `{}` from Lua functions to filter out rows
-7. **Type Safety**: Lua values are automatically converted to appropriate SQL types
-7. **Error Handling**: Transformation errors stop the process with clear error messages
+7. **Type Conversion**: Lua values are converted back to TinyETL types (see below)
+8. **Error Handling**: Transformation errors stop the process with clear error messages
 
 #### Available Data Types
 
 - **Strings**: `"text"` or `'text'`
-- **Numbers**: `42`, `3.14` (integers become INTEGER, decimals become REAL)
+- **Numbers**: `42`, `3.14` (Lua integers become integers, other numbers become decimals)
 - **Booleans**: `true`, `false`
 - **Null**: `nil` (becomes NULL in target)
-- **Dates**: Input as RFC3339 strings, can be manipulated as strings
+- **Dates**: Passed to Lua as RFC 3339 strings (`2024-01-15T10:30:00+00:00`), returned as strings
+- **JSON**: Passed to Lua as JSON text
 
 #### Lua Built-ins Available
 
@@ -700,9 +709,9 @@ columns:
     nullable: false
     
   - name: "email"
-    type: "Text"
+    type: "String"
     nullable: false
-    pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    pattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     
   - name: "age"
     type: "Integer" 
@@ -721,34 +730,36 @@ columns:
   - name: "created_at"
     type: "DateTime"
     nullable: true
-    pattern: "^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
 ```
 
 #### Supported Data Types
 
-- **Text** - String values, supports regex pattern validation
-- **Integer** - Whole numbers (32-bit signed integers)  
-- **Decimal** - High-precision decimal numbers using `rust_decimal`
-- **Boolean** - True/false values (accepts: true, false, 1, 0, yes, no)
-- **DateTime** - ISO 8601 date-time strings, supports pattern validation
+Type names are case-insensitive:
+
+- **String** - Text values, supports regex pattern validation
+- **Integer** - Whole numbers (64-bit signed)
+- **Decimal** - Exact decimal numbers (`rust_decimal`, up to 28 significant digits)
+- **Boolean** - `true` / `false`
+- **Date**, **DateTime** - Dates and timestamps (values are UTC)
+- **Json** - JSON values; text in a Json column is parsed as JSON
 
 #### Schema Field Properties
 
 | Property | Type | Required | Description |
 |----------|------|----------|-------------|
 | `name` | String | ✅ | Column name (must match source data) |
-| `type` | String | ✅ | Data type: Text, Integer, Decimal, Boolean, DateTime |
+| `type` | String | ✅ | Data type: String, Integer, Decimal, Boolean, Date, DateTime, Json |
 | `nullable` | Boolean | ❌ | Allow null/empty values (default: true) |
 | `pattern` | String | ❌ | Regex pattern for validation (Text/DateTime types) |
 | `default` | Any | ❌ | Default value when field is missing or null |
 
 #### Validation Behavior
 
-**Type Conversion:**
-- Automatic conversion from string representations to target types
-- Boolean parsing: `"true"`, `"1"`, `"yes"` → `true`; `"false"`, `"0"`, `"no"` → `false`
-- Integer parsing: `"123"` → `123`
-- Decimal parsing: `"123.45"` → `123.45` (high precision)
+**Type Checking:**
+- Each value must already have the column's type. CSV values are typed as they're read: whole numbers, decimals, `true`/`false` and dates are recognized; anything else is text
+- Text in a `Json` column is parsed as JSON
+- A mismatch (`yes` in a Boolean column, `abc` in an Integer column) stops the transfer with the column name
 
 **Null Handling:**
 - Missing fields use `default` value if specified
@@ -758,7 +769,7 @@ columns:
 **Pattern Validation:**
 - Regex patterns applied to Text and DateTime fields
 - Validation failures stop processing with clear error messages
-- Use double backslashes `` for regex escapes in YAML
+- Write patterns in single quotes (`pattern: '^\d{4}$'`): in double-quoted YAML strings, `\d` is an invalid escape
 
 **Error Handling:**
 - Schema validation errors halt processing immediately
@@ -775,23 +786,23 @@ columns:
     nullable: false
     
   - name: "full_name"
-    type: "Text"
+    type: "String"
     nullable: false
     
   - name: "email"
-    type: "Text"
+    type: "String"
     nullable: false
-    pattern: "^[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}$"
+    pattern: '^[\w\.-]+@[\w\.-]+\.[a-zA-Z]{2,}$'
     
   - name: "phone"
-    type: "Text"
+    type: "String"
     nullable: true
-    pattern: "^\+?[1-9]\d{1,14}$"  # E.164 format
+    pattern: '^\+?[1-9]\d{1,14}$'  # E.164 format
     
   - name: "registration_date"
     type: "DateTime"
     nullable: false
-    pattern: "^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
     
   - name: "is_premium"
     type: "Boolean"
@@ -808,9 +819,9 @@ columns:
 ```yaml
 columns:
   - name: "order_id"
-    type: "Text"
+    type: "String"
     nullable: false
-    pattern: "^ORD-\d{8}$"  # Format: ORD-12345678
+    pattern: '^ORD-\d{8}$'  # Format: ORD-12345678
     
   - name: "quantity"
     type: "Integer"
@@ -928,7 +939,7 @@ options:
   preview: 10                     # Show N rows without transfer
   dry_run: false                  # Validate without transferring
   log_level: info                 # info, warn, error (lowercase in YAML)
-  skip_existing: false            # Skip if target exists
+  skip_existing: false            # Not implemented yet; has no effect
   source_type: "csv"              # Force source file type
   truncate: false                 # Truncate target before writing
   
@@ -1009,7 +1020,7 @@ See [Example 18: HTTP with Authentication](examples/18_http_with_auth/) for comp
 
 #### S3 Options
 
-`s3://bucket/path/file.ext` works as both a source and a target for CSV, JSON, Parquet and Avro files:
+`s3://bucket/path/file.ext` works as both a source and a target for CSV, JSON, Parquet, Avro and Excel (`.xlsx`) files:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -1149,36 +1160,51 @@ tinyetl "https://api.example.com/export" local_data.db
 ### Sample Output
 
 ```
-→ Connecting to source: sales.csv
-→ Inferring schema...
-→ 8 columns detected
-→ Transformation enabled
-→ Connecting to target: local.db#sales
-→ Schema updated by transformations: 12 columns
-→ Copying 100,000 rows
-████████████ 100% (145k rows/sec)
-→ Done in 2.3s
+$ tinyetl sales.csv "sales.db#sales" --transform "total=row.amount * row.quantity"
+INFO tinyetl::transfer: → Connecting to source: sales.csv
+INFO tinyetl::transfer: → Connecting to target: sales.db#sales
+INFO tinyetl::transfer: → Inferring schema from source...
+INFO tinyetl::transfer: → 8 columns detected
+INFO tinyetl::transfer: → Transformation enabled
+INFO tinyetl::transfer: → Schema updated by transformations: 9 columns
+INFO tinyetl::transfer: → Creating target table: sales
+INFO tinyetl::transfer: → Copying 100000 rows
+INFO tinyetl::transfer: → Done in 1.0s
+INFO tinyetl: Transfer completed successfully!
+INFO tinyetl: Processed 100000 rows in 0.98s (101586 rows/sec)
 ```
 
-### Performance Goals
+(Timestamps trimmed. A progress bar is shown while copying.)
 
-- Handle datasets up to 5 million rows efficiently
-- Maintain low memory footprint through streaming
-- Achieve transfer speeds of 180k+ rows per second for typical datasets
-- Cross-platform compatibility (Linux, macOS, Windows)
+### Performance
+
+A 1,000,000-row, 8-column CSV (83 MB) converted on an Apple M4 Pro with the default batch size:
+
+| Target | Time | Rows/sec | Peak memory |
+|---|---|---|---|
+| CSV | 2.6 s | 383k | 107 MB |
+| DuckDB | 3.1 s | 331k | 185 MB |
+| Parquet | 3.7 s | 289k | 1.4 GB |
+| JSON | 4.5 s | 236k | 2.3 GB |
+| Avro | 4.6 s | 217k | 1.3 GB |
+| Excel (.xlsx) | 5.3 s | 190k | 107 MB |
+| SQLite | 6.7 s | 151k | 118 MB |
+
+Sources are read in batches, and CSV, Excel and database targets write each batch as it arrives, so their memory use stays flat. The Parquet, JSON and Avro targets currently hold all rows in memory until the end, so for very large exports prefer CSV or a database (or split the input). Network databases and warehouses depend mostly on the server and the network.
 
 ### Roadmap
 
-**MVP (Current Focus):**
-- Core CSV, JSON, SQLite connectors ✅
-- MySQL and PostgreSQL connectors ✅
-- Schema inference ✅
-- Lua-based data transformations ✅
-- Batch processing ✅
-- Basic CLI interface ✅
-- YAML configuration files ✅
+**Done:**
+- Files: CSV, JSON, Parquet, Avro, Excel ✅
+- Databases: SQLite, DuckDB, PostgreSQL, MySQL, SQL Server, CrateDB, any ODBC driver ✅
+- Snowflake (staged bulk loads) ✅
+- Remote files over HTTP(S), SSH and S3 ✅
+- Schema inference, schema files, Lua transforms, YAML jobs ✅
 
-**Future Enhancements:**
+**Next:**
+- Streaming Parquet, JSON and Avro writes (bounded memory)
+- Databricks and OneLake
+- `--skip-existing` (the flag exists but has no effect yet)
 - Advanced transformation functions and libraries
 - Multi-file processing with glob patterns
 - Advanced schema mapping
@@ -1187,8 +1213,9 @@ tinyetl "https://api.example.com/export" local_data.db
 ### Contributors
 
 Special thanks to:
-- Michael Descy @mjdescy 
-- Chris Riccomini @criccomini 
+- Michael Descy @mjdescy (Excel)
+- Chris Riccomini @criccomini
+- Andreas Motl @amotl (CrateDB)
 
 for contributing to TinyETL!
 
@@ -1199,7 +1226,7 @@ This project is licensed under a modified Apache License 2.0 - see the [LICENSE]
 
 Commercial use is explicitly allowed with the exception of reselling TinyETL in a cloud SaaS format, please contact licensing@tinyetl.com for additional commercial licensing terms.
 
-**Bundled third-party libraries:** to keep the binary free of runtime dependencies, the Linux and macOS binaries statically link the [unixODBC](https://www.unixodbc.org/) driver manager (2.3.14), licensed under the GNU LGPL v2.1 or later, and the Linux binary also includes OpenSSL (Apache License 2.0). They are not covered by TinyETL's license, and the commercial terms above do not apply to them. Their license texts ship with every download, and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) explains where to get their source and how to rebuild TinyETL against a modified unixODBC.
+**Bundled third-party libraries:** to keep the binary free of runtime dependencies, the Linux and macOS binaries statically link the [unixODBC](https://www.unixodbc.org/) driver manager (2.3.14), licensed under the GNU LGPL v2.1 or later, the Linux binary also includes OpenSSL (Apache License 2.0), and every binary includes AWS-LC (ISC/Apache-2.0, used for TLS by the Snowflake client). They are not covered by TinyETL's license, and the commercial terms above do not apply to them. Their license texts ship with every download, and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) explains where to get their source and how to rebuild TinyETL against a modified unixODBC.
 
 
 ---

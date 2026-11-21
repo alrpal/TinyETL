@@ -220,6 +220,6 @@ jobs:
         body: |
           ### License notice
 
-          The Linux and macOS binaries include the [unixODBC](https://www.unixodbc.org/) driver manager (version 2.3.14), statically linked and licensed under the **GNU LGPL v2.1 or later**. The Linux binary also includes OpenSSL (Apache License 2.0). TinyETL itself is licensed under Apache 2.0; the LGPL applies only to unixODBC, and the additional commercial terms in `LICENSE` do not apply to the bundled libraries. License texts are included in each download (`THIRD_PARTY_LICENSES.md` and `licenses/`). See [THIRD_PARTY_LICENSES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_LICENSES.md) for source and relinking information.
+          The Linux and macOS binaries include the [unixODBC](https://www.unixodbc.org/) driver manager (version 2.3.14), statically linked and licensed under the **GNU LGPL v2.1 or later**. The Linux binary also includes OpenSSL (Apache License 2.0), and every binary includes AWS-LC (ISC/Apache-2.0). TinyETL itself is licensed under Apache 2.0; the LGPL applies only to unixODBC, and the additional commercial terms in `LICENSE` do not apply to the bundled libraries. License texts are included in each download (`THIRD_PARTY_LICENSES.md` and `licenses/`). See [THIRD_PARTY_LICENSES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_LICENSES.md) for source and relinking information.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
