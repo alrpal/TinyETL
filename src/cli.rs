@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_basic_cli_parsing() {
-        let cli = Cli::try_parse_from(&["tinyetl", "source.csv", "target.db#table"]).unwrap();
+        let cli = Cli::try_parse_from(["tinyetl", "source.csv", "target.db#table"]).unwrap();
 
         assert_eq!(cli.source, Some("source.csv".to_string()));
         assert_eq!(cli.target, Some("target.db#table".to_string()));
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_config_file_parsing() {
-        let cli = Cli::try_parse_from(&["tinyetl", "run", "my_job.yaml"]).unwrap();
+        let cli = Cli::try_parse_from(["tinyetl", "run", "my_job.yaml"]).unwrap();
 
         assert!(cli.is_config_mode());
         assert_eq!(cli.get_config_file(), Some("my_job.yaml"));
@@ -310,7 +310,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-
     #[test]
     fn test_http_source_with_type() {
         let cli = Cli::try_parse_from([
@@ -332,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_generate_default_config_parsing() {
-        let cli = Cli::try_parse_from(&["tinyetl", "generate-default-config"]).unwrap();
+        let cli = Cli::try_parse_from(["tinyetl", "generate-default-config"]).unwrap();
 
         assert!(cli.is_generate_default_config_mode());
         assert!(!cli.is_config_mode());

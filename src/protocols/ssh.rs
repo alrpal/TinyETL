@@ -168,7 +168,7 @@ impl SshProtocol {
 #[async_trait]
 impl Protocol for SshProtocol {
     async fn create_source(
-        &self, 
+        &self,
         url: &Url,
         _options: &HashMap<String, String>,
     ) -> Result<Box<dyn Source>> {
@@ -187,7 +187,7 @@ impl Protocol for SshProtocol {
     }
 
     async fn create_target(
-        &self, 
+        &self,
         _url: &Url,
         _options: &HashMap<String, String>,
     ) -> Result<Box<dyn Target>> {

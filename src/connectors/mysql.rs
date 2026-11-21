@@ -187,9 +187,12 @@ impl Source for MysqlSource {
 
         let query = format!("SELECT * FROM `{}` LIMIT {}", self.table_name, sample_size);
 
-        let rows = sqlx::query(&query).fetch_all(pool).await.map_err(|e| {
-            TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e))
-        })?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+            .fetch_all(pool)
+            .await
+            .map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e))
+            })?;
 
         if rows.is_empty() {
             return Ok(Schema {
@@ -229,7 +232,7 @@ impl Source for MysqlSource {
             self.table_name, batch_size, self.current_offset
         );
 
-        let rows = sqlx::query(&query)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
             .fetch_all(pool)
             .await
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch batch: {}", e)))?;
@@ -258,7 +261,7 @@ impl Source for MysqlSource {
             self.table_name
         );
 
-        match sqlx::query_scalar::<_, i64>(&count_query)
+        match sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_query.as_str()))
             .fetch_one(pool)
             .await
         {
@@ -266,7 +269,7 @@ impl Source for MysqlSource {
             _ => {
                 // Fallback to exact count if estimate fails
                 let exact_query = format!("SELECT COUNT(*) FROM `{}`", self.table_name);
-                match sqlx::query_scalar::<_, i64>(&exact_query)
+                match sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(exact_query.as_str()))
                     .fetch_one(pool)
                     .await
                 {
@@ -432,7 +435,7 @@ impl MysqlTarget {
         );
 
         // Build the query with all parameter bindings
-        let mut query = sqlx::query(&insert_sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(insert_sql.as_str()));
         let default_value = Value::String("".to_string());
 
         // Bind all values for all rows in the correct order
@@ -510,12 +513,15 @@ impl Target for MysqlTarget {
             columns.join(", ")
         );
 
-        sqlx::query(&create_sql).execute(pool).await.map_err(|e| {
-            TinyEtlError::Connection(format!(
-                "Failed to create MySQL table '{}': {}",
-                actual_table_name, e
-            ))
-        })?;
+        sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                TinyEtlError::Connection(format!(
+                    "Failed to create MySQL table '{}': {}",
+                    actual_table_name, e
+                ))
+            })?;
 
         Ok(())
     }
@@ -573,10 +579,13 @@ impl Target for MysqlTarget {
             table_name
         };
 
-        sqlx::query(&format!("TRUNCATE TABLE `{}`", actual_table_name))
-            .execute(pool)
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "TRUNCATE TABLE `{}`",
+            actual_table_name
+        )))
+        .execute(pool)
+        .await
+        .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
 
         Ok(())
     }

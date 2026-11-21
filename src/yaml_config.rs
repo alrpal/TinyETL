@@ -48,11 +48,11 @@ impl YamlConfig {
     pub fn from_config(config: Config) -> Self {
         YamlConfig {
             version: 1,
-            source: SourceOrTargetConfig { 
+            source: SourceOrTargetConfig {
                 uri: config.source,
                 options: config.source_options,
             },
-            target: SourceOrTargetConfig { 
+            target: SourceOrTargetConfig {
                 uri: config.target,
                 options: config.target_options,
             },
@@ -554,12 +554,12 @@ discount = total * 0.1"#;
         let restored_config = deserialized_yaml.into_config().unwrap();
 
         // Verify defaults are preserved
-        assert_eq!(restored_config.infer_schema, true);
+        assert!(restored_config.infer_schema);
         assert_eq!(restored_config.batch_size, Config::default().batch_size);
-        assert_eq!(restored_config.dry_run, false);
+        assert!(!restored_config.dry_run);
         assert_eq!(restored_config.log_level, LogLevel::Info);
-        assert_eq!(restored_config.skip_existing, false);
-        assert_eq!(restored_config.truncate, false);
+        assert!(!restored_config.skip_existing);
+        assert!(!restored_config.truncate);
         assert_eq!(restored_config.transform, TransformConfig::None);
     }
 
@@ -596,12 +596,12 @@ discount = total * 0.1"#;
         // Verify data is still intact after multiple cycles
         assert_eq!(config.source, "input.csv");
         assert_eq!(config.target, "output.db#data");
-        assert_eq!(config.infer_schema, false);
+        assert!(!config.infer_schema);
         assert_eq!(config.schema_file, Some("my_schema.yaml".to_string()));
         assert_eq!(config.batch_size, 7500);
         assert_eq!(config.preview, Some(25));
         assert_eq!(config.log_level, LogLevel::Error);
-        assert_eq!(config.skip_existing, true);
+        assert!(config.skip_existing);
         assert_eq!(
             config.transform,
             TransformConfig::Inline("x = row.a + row.b".to_string())

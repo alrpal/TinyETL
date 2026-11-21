@@ -95,9 +95,12 @@ impl Source for PostgresSource {
             format!("SELECT * FROM {} LIMIT {}", self.table_name, sample_size)
         };
 
-        let rows = sqlx::query(&query).fetch_all(pool).await.map_err(|e| {
-            TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e))
-        })?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+            .fetch_all(pool)
+            .await
+            .map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e))
+            })?;
 
         if rows.is_empty() {
             return Ok(Schema {
@@ -147,7 +150,7 @@ impl Source for PostgresSource {
             )
         };
 
-        let rows = sqlx::query(&query)
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
             .fetch_all(pool)
             .await
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch batch: {}", e)))?;
@@ -184,7 +187,7 @@ impl Source for PostgresSource {
             )
         };
 
-        match sqlx::query_scalar::<_, i64>(&count_query)
+        match sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_query.as_str()))
             .fetch_one(pool)
             .await
         {
@@ -192,7 +195,7 @@ impl Source for PostgresSource {
             Err(_) => {
                 // Fallback to exact count if estimate fails
                 let exact_query = format!("SELECT COUNT(*) FROM {}", self.table_name);
-                match sqlx::query_scalar::<_, i64>(&exact_query)
+                match sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(exact_query.as_str()))
                     .fetch_one(pool)
                     .await
                 {
@@ -391,7 +394,7 @@ impl Target for PostgresTarget {
         create_sql.push_str(&column_defs.join(", "));
         create_sql.push(')');
 
-        sqlx::query(&create_sql)
+        sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
             .execute(pool)
             .await
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to create table: {}", e)))?;
@@ -457,7 +460,7 @@ impl Target for PostgresTarget {
             );
 
             // Build query and bind all values
-            let mut query = sqlx::query(&insert_sql);
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(insert_sql.as_str()));
 
             for row in chunk {
                 for col in &schema.columns {
@@ -528,7 +531,7 @@ impl Target for PostgresTarget {
 
         let truncate_query = format!("TRUNCATE TABLE \"{}\"", table_name);
 
-        sqlx::query(&truncate_query)
+        sqlx::query(sqlx::AssertSqlSafe(truncate_query.as_str()))
             .execute(pool)
             .await
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;

@@ -73,9 +73,12 @@ impl Source for SqliteSource {
         let pool = self.pool.as_ref().unwrap();
 
         // Get table info for column definitions
-        let table_info = sqlx::query(&format!("PRAGMA table_info(\"{}\")", self.table_name))
-            .fetch_all(pool)
-            .await?;
+        let table_info = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA table_info(\"{}\")",
+            self.table_name
+        )))
+        .fetch_all(pool)
+        .await?;
 
         let mut columns = Vec::new();
         for row in table_info {
@@ -101,10 +104,10 @@ impl Source for SqliteSource {
         }
 
         // Get estimated row count
-        let count_result = sqlx::query(&format!(
+        let count_result = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT COUNT(*) as count FROM \"{}\"",
             self.table_name
-        ))
+        )))
         .fetch_one(pool)
         .await?;
         let estimated_rows: i64 = count_result.get("count");
@@ -131,7 +134,9 @@ impl Source for SqliteSource {
             "SELECT * FROM \"{}\" LIMIT {} OFFSET {}",
             self.table_name, batch_size, self.current_offset
         );
-        let rows = sqlx::query(&query).fetch_all(pool).await?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+            .fetch_all(pool)
+            .await?;
 
         // Update offset for next batch
         self.current_offset += rows.len();
@@ -181,10 +186,10 @@ impl Source for SqliteSource {
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
         if let Some(pool) = &self.pool {
-            let count_result = sqlx::query(&format!(
+            let count_result = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT COUNT(*) as count FROM {}",
                 self.table_name
-            ))
+            )))
             .fetch_one(pool)
             .await?;
             let count: i64 = count_result.get("count");
@@ -330,7 +335,9 @@ impl Target for SqliteTarget {
             column_definitions.join(", ")
         );
 
-        sqlx::query(&create_sql).execute(pool).await?;
+        sqlx::query(sqlx::AssertSqlSafe(create_sql.as_str()))
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
@@ -374,7 +381,7 @@ impl Target for SqliteTarget {
                 value_groups.join(", ")
             );
 
-            let mut query = sqlx::query(&insert_sql);
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(insert_sql.as_str()));
 
             // Bind all values in row order for this chunk
             for row in chunk {
@@ -437,9 +444,12 @@ impl Target for SqliteTarget {
                 table_name
             };
 
-            sqlx::query(&format!("DELETE FROM \"{}\"", actual_table_name))
-                .execute(pool)
-                .await?;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM \"{}\"",
+                actual_table_name
+            )))
+            .execute(pool)
+            .await?;
         }
         Ok(())
     }

@@ -164,7 +164,12 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
 /// Use these for new protocol support (snowflake://, onelake://, etc.)
 /// Create a source using the new protocol abstraction
 pub async fn create_source_from_url(connection_string: &str) -> Result<Box<dyn Source>> {
-    create_source_from_url_with_type_and_options(connection_string, None, &std::collections::HashMap::new()).await
+    create_source_from_url_with_type_and_options(
+        connection_string,
+        None,
+        &std::collections::HashMap::new(),
+    )
+    .await
 }
 
 /// Create a source using the new protocol abstraction with optional type hint
@@ -172,7 +177,12 @@ pub async fn create_source_from_url_with_type(
     connection_string: &str,
     source_type: Option<&str>,
 ) -> Result<Box<dyn Source>> {
-    create_source_from_url_with_type_and_options(connection_string, source_type, &std::collections::HashMap::new()).await
+    create_source_from_url_with_type_and_options(
+        connection_string,
+        source_type,
+        &std::collections::HashMap::new(),
+    )
+    .await
 }
 
 /// Create a source using the new protocol abstraction with optional type hint and options
@@ -197,7 +207,12 @@ pub async fn create_source_from_url_with_type_and_options(
             create_source(connection_string)
         } else {
             // Fall back to protocol abstraction for other protocols (file://, snowflake://, etc.)
-            crate::protocols::create_source_from_url_with_type(connection_string, source_type, options).await
+            crate::protocols::create_source_from_url_with_type(
+                connection_string,
+                source_type,
+                options,
+            )
+            .await
         }
     } else {
         // Fallback to legacy connector system for backward compatibility

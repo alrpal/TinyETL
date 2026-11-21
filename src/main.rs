@@ -5,7 +5,10 @@ use tracing_subscriber::{fmt, EnvFilter};
 use tinyetl::{
     cli::Cli,
     config::Config,
-    connectors::{create_source_from_url_with_type_and_options, create_target_from_url_with_options, Source, Target},
+    connectors::{
+        create_source_from_url_with_type_and_options, create_target_from_url_with_options, Source,
+        Target,
+    },
     secrets::process_connection_string,
     transfer::TransferEngine,
     yaml_config::YamlConfig,
@@ -234,15 +237,14 @@ async fn create_connectors(
     )?;
 
     let source = create_source_from_url_with_type_and_options(
-        &processed_source, 
+        &processed_source,
         config.source_type.as_deref(),
         &config.source_options,
-    ).await?;
-    
-    let target = create_target_from_url_with_options(
-        &processed_target,
-        &config.target_options,
-    ).await?;
+    )
+    .await?;
+
+    let target =
+        create_target_from_url_with_options(&processed_target, &config.target_options).await?;
 
     Ok((source, target))
 }
@@ -282,28 +284,19 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_main_function_exists() {
-        // Basic test to ensure main function compiles
-        assert!(true);
-    }
-
-    #[test]
     fn test_cli_parsing() {
         // Test that Cli can be created from command line args
         let cli = Cli::try_parse_from([
             "tinyetl",
             "test.csv",      // positional source
             "test.db#table", // positional target
-          
         ]);
         assert!(cli.is_ok());
-
 
         let cli = cli.unwrap();
         assert_eq!(cli.source, Some("test.csv".to_string()));
         assert_eq!(cli.target, Some("test.db#table".to_string()));
     }
-
 
     #[test]
     fn test_cli_to_config_conversion() {
@@ -322,7 +315,6 @@ mod tests {
         assert_eq!(config.batch_size, 100);
     }
 
-
     #[test]
     fn test_cli_with_preview_option() {
         let cli = Cli::try_parse_from([
@@ -338,7 +330,6 @@ mod tests {
         assert_eq!(config.preview, Some(5));
     }
 
-
     #[test]
     fn test_cli_with_dry_run() {
         let cli = Cli::try_parse_from([
@@ -352,7 +343,6 @@ mod tests {
         let config: Config = cli.into();
         assert!(config.dry_run);
     }
-
 
     #[test]
     fn test_cli_with_transform() {
@@ -374,28 +364,24 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_cli_missing_required_args() {
         // With new subcommand structure, CLI parsing should succeed
         // but conversion to Config should handle validation
-        let result = Cli::try_parse_from(&["tinyetl", "only_target.json"]);
+        let result = Cli::try_parse_from(["tinyetl", "only_target.json"]);
         assert!(result.is_ok());
-
 
         // Should succeed parsing with no args (could be subcommand)
-        let result = Cli::try_parse_from(&["tinyetl"]);
+        let result = Cli::try_parse_from(["tinyetl"]);
         assert!(result.is_ok());
 
-
         // Test config file subcommand
-        let result = Cli::try_parse_from(&["tinyetl", "run", "config.yaml"]);
+        let result = Cli::try_parse_from(["tinyetl", "run", "config.yaml"]);
         assert!(result.is_ok());
         let cli = result.unwrap();
         assert!(cli.is_config_mode());
         assert_eq!(cli.get_config_file(), Some("config.yaml"));
     }
-
 
     #[tokio::test]
     async fn test_env_filter_log_levels() {
@@ -407,7 +393,6 @@ mod tests {
             ..Default::default()
         };
 
-
         let env_filter = EnvFilter::new(format!(
             "sqlx=warn,tinyetl={}",
             match config_info.log_level {
@@ -417,17 +402,14 @@ mod tests {
             }
         ));
 
-
         // Just verify the filter can be created without error
         assert!(env_filter.to_string().contains("sqlx=warn"));
         assert!(env_filter.to_string().contains("tinyetl=info"));
-
 
         let config_warn = Config {
             log_level: tinyetl::config::LogLevel::Warn,
             ..config_info.clone()
         };
-
 
         let env_filter_warn = EnvFilter::new(format!(
             "sqlx=warn,tinyetl={}",
@@ -438,10 +420,8 @@ mod tests {
             }
         ));
 
-
         assert!(env_filter_warn.to_string().contains("tinyetl=warn"));
     }
-
 
     // Integration test using the actual binary
     #[test]
@@ -450,7 +430,6 @@ mod tests {
             .args(["run", "--", "--help"])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output();
-
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -469,7 +448,6 @@ mod tests {
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output();
 
-
         if let Ok(output) = output {
             assert!(!output.status.success());
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -486,12 +464,10 @@ mod tests {
         let _result = result; // Use the result to avoid unused variable warning
     }
 
-
     #[tokio::test]
     async fn test_target_connector_creation() {
         let temp_file = NamedTempFile::new().unwrap();
         let file_path = temp_file.path().to_str().unwrap();
-
 
         // Test JSON target creation
         let json_target = format!("{}.json", file_path);
@@ -506,11 +482,9 @@ mod tests {
         assert!(result.is_ok());
     }
 
-
     #[tokio::test]
     async fn test_config_default_values() {
         let config = Config::default();
-
 
         // Test that default values are sensible
         assert_eq!(config.batch_size, 1_000);

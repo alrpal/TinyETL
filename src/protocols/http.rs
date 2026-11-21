@@ -25,7 +25,6 @@ impl HttpProtocol {
         Self
     }
 
-
     /// Download a file from an HTTP/HTTPS URL to a temporary file with optional type hint and options
     async fn download_to_temp_with_type_and_options(
         &self,
@@ -64,9 +63,10 @@ impl HttpProtocol {
             request = request.bearer_auth(token);
         }
 
-        let response = request.send().await.map_err(|e| {
-            TinyEtlError::Connection(format!("Failed to fetch URL {}: {}", url, e))
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| TinyEtlError::Connection(format!("Failed to fetch URL {}: {}", url, e)))?;
 
         if !response.status().is_success() {
             return Err(TinyEtlError::Connection(format!(
@@ -133,7 +133,7 @@ impl HttpProtocol {
 #[async_trait]
 impl Protocol for HttpProtocol {
     async fn create_source(
-        &self, 
+        &self,
         url: &Url,
         options: &HashMap<String, String>,
     ) -> Result<Box<dyn Source>> {
@@ -147,7 +147,9 @@ impl Protocol for HttpProtocol {
         options: &HashMap<String, String>,
     ) -> Result<Box<dyn Source>> {
         // Download the file to a temporary location
-        let temp_file = self.download_to_temp_with_type_and_options(url, source_type, options).await?;
+        let temp_file = self
+            .download_to_temp_with_type_and_options(url, source_type, options)
+            .await?;
 
         // Create a persistent temporary file in the system temp directory
         let extension = self.get_file_extension(url, source_type);
@@ -171,7 +173,7 @@ impl Protocol for HttpProtocol {
     }
 
     async fn create_target(
-        &self, 
+        &self,
         _url: &Url,
         _options: &HashMap<String, String>,
     ) -> Result<Box<dyn Target>> {

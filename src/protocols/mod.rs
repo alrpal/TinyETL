@@ -18,7 +18,7 @@ use url::Url;
 pub trait Protocol: Send + Sync {
     /// Create a source connector for reading data from this protocol
     async fn create_source(
-        &self, 
+        &self,
         url: &Url,
         options: &HashMap<String, String>,
     ) -> Result<Box<dyn Source>>;
@@ -36,7 +36,7 @@ pub trait Protocol: Send + Sync {
 
     /// Create a target connector for writing data to this protocol  
     async fn create_target(
-        &self, 
+        &self,
         url: &Url,
         options: &HashMap<String, String>,
     ) -> Result<Box<dyn Target>>;
