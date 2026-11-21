@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Linux and macOS binaries no longer need unixODBC installed** ([#25](https://github.com/alrpal/TinyETL/issues/25)). The binaries failed to start on machines without `libodbc` (`error while loading shared libraries: libodbc.so.2`). The unixODBC driver manager and GNU libltdl are now compiled into the binary, so it has no runtime dependencies again
   - On macOS, drivers registered by Homebrew are still found automatically. Set `ODBCSYSINI` to use a different `odbcinst.ini` location
 - **The Linux binary no longer needs OpenSSL installed.** It linked the system's `libssl.so.3`, so it failed to start on systems without it (such as `debian:12-slim`). OpenSSL is now compiled into the Linux binary; it still uses the system's CA certificates. macOS and Windows use the operating system's TLS libraries as before
+- The Linux binary is now built on Ubuntu 22.04, so it runs on systems with glibc 2.35 or later (Ubuntu 22.04+, Debian 12+, Fedora 36+). Built on Ubuntu 24.04, it required glibc 2.38 and failed on Debian 12 and Ubuntu 22.04
 - Reading from PostgreSQL or MySQL now keeps the table's column order. Previously the columns in the output file came out in a random order
 - Reading a PostgreSQL table that hadn't been analyzed yet logged `Copying 18446744073709551615 rows`. TinyETL now falls back to an exact row count
 

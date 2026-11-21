@@ -20,9 +20,10 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: tinyetl-macos-apple-silicon-aarch64
-          # Linux build
+          # Linux build. Built on the oldest supported Ubuntu because a binary only runs where glibc and
+          # libstdc++ are at least as new as on the build machine: 22.04 gives glibc 2.35 / GCC 11.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             name: tinyetl-linux-x86_64
           # Windows builds
           - target: x86_64-pc-windows-msvc
@@ -54,7 +55,7 @@ jobs:
           ${{ runner.os }}-cargo-
 
     - name: Install system dependencies (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
+      if: startsWith(matrix.os, 'ubuntu')
       run: |
         sudo apt-get update
         # libltdl-dev provides the static libltdl.a linked into the binary with the bundled unixODBC.
@@ -91,7 +92,7 @@ jobs:
 
     # The binary must run on a machine with nothing installed (no libodbc, libltdl, etc.)
     - name: Verify no third-party shared libraries (Linux)
-      if: matrix.os == 'ubuntu-latest'
+      if: startsWith(matrix.os, 'ubuntu')
       run: |
         BIN=target/${{ matrix.target }}/release/tinyetl
         ldd "$BIN"
@@ -101,9 +102,12 @@ jobs:
           echo "::error::Binary links a library that is not available on a clean system (listed above)"
           exit 1
         fi
-        # Run it in a bare container, as a user downloading the release would
-        docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/dist:ro" ubuntu:24.04 /dist/tinyetl --version
-        docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/dist:ro" debian:12-slim /dist/tinyetl --version
+        # Run it in bare containers, as a user downloading the release would: the oldest supported
+        # glibc (Ubuntu 22.04, 2.35), Debian 12, and the current Ubuntu LTS
+        for image in ubuntu:22.04 debian:12-slim ubuntu:24.04; do
+          echo "--- $image"
+          docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/dist:ro" "$image" /dist/tinyetl --version
+        done
 
     - name: Verify no third-party shared libraries (macOS)
       if: matrix.os == 'macos-latest'
