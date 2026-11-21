@@ -156,6 +156,80 @@ fn read_lines(reader: BufReader<File>, sender: &SyncSender<Item>) {
     }
 }
 
+/// Lines in a JSON Lines file, for the progress bar (blank lines are counted too, so this
+/// can be slightly high).
+fn count_lines(mut file: File) -> Result<usize> {
+    use std::io::Read;
+    let mut buffer = vec![0u8; 1 << 20];
+    let (mut lines, mut last) = (0usize, b'\n');
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        lines += memchr::memchr_iter(b'\n', &buffer[..n]).count();
+        last = buffer[n - 1];
+    }
+    Ok(lines + usize::from(last != b'\n'))
+}
+
+/// Elements of the top-level array, counted by scanning for commas outside strings and
+/// nested values.
+fn count_array_elements(mut file: File) -> Result<usize> {
+    use std::io::Read;
+    let mut buffer = vec![0u8; 1 << 20];
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    let (mut commas, mut any_element) = (0usize, false);
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buffer[..n];
+        let mut i = 0;
+        while i < n {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                    i += 1;
+                    continue;
+                }
+                // Jump to the next quote or backslash; strings are most of the bytes
+                match memchr::memchr2(b'"', b'\\', &chunk[i..]) {
+                    None => i = n,
+                    Some(offset) => {
+                        i += offset;
+                        if chunk[i] == b'"' {
+                            in_string = false;
+                        } else {
+                            escaped = true;
+                        }
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            let b = chunk[i];
+            i += 1;
+            match b {
+                b'"' => {
+                    in_string = true;
+                    any_element |= depth == 1;
+                }
+                b'[' | b'{' => {
+                    any_element |= depth == 1;
+                    depth += 1;
+                }
+                b']' | b'}' => depth = depth.saturating_sub(1),
+                b',' if depth == 1 => commas += 1,
+                b' ' | b'\t' | b'\r' | b'\n' => {}
+                _ => any_element |= depth == 1,
+            }
+        }
+    }
+    Ok(if any_element { commas + 1 } else { 0 })
+}
+
 fn json_value_to_value(json_val: &serde_json::Value) -> Value {
     match json_val {
         serde_json::Value::String(s) => {
@@ -280,8 +354,12 @@ impl Source for JsonSource {
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
-        // Unknown without reading the whole file
-        Ok(None)
+        // A quick scan of the bytes, without parsing values, for the progress bar
+        let file = File::open(&self.file_path)?;
+        Ok(Some(match self.format {
+            JsonFormat::Lines => count_lines(file)?,
+            JsonFormat::Array => count_array_elements(file)?,
+        }))
     }
 
     async fn reset(&mut self) -> Result<()> {
@@ -536,6 +614,33 @@ mod tests {
             // Columns keep the file's key order, which is the column order it was written in
             let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
             assert_eq!(names, ["zeta", "alpha"], "{}", name);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_row_counts_for_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            ("a.json", "[]", 0),
+            ("b.json", "[\n  {\"a\": 1}\n]", 1),
+            (
+                "c.json",
+                r#"[{"a": "x,]{", "b": [1, 2, {"c": 3}]}, {"a": "q\"uote,"}, 5]"#,
+                3,
+            ),
+            ("d.jsonl", "{\"a\":1}\n{\"a\":2}", 2),
+            ("e.jsonl", "{\"a\":1}\n{\"a\":2}\n", 2),
+        ];
+        for (name, text, expected) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            let source = JsonSource::new(path.to_str().unwrap()).unwrap();
+            assert_eq!(
+                source.estimated_row_count().await.unwrap(),
+                Some(expected),
+                "{}",
+                name
+            );
         }
     }
 

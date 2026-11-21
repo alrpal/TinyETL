@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - File targets write to a temporary file next to the destination and rename it into place when the transfer finishes, so a failed run leaves an existing file untouched (it used to leave a half-written file)
 - Parquet files are written with Snappy compression (previously uncompressed; the 1M-row test file went from 55 MB to 19 MB)
 - JSON output keys follow the column order instead of alphabetical order, and reading JSON keeps the file's key order for the columns
-- Reading JSON or Avro no longer reports a row count up front (it isn't known without reading the whole file), so no progress bar is shown for them
+- JSON, JSON Lines and Avro sources count their rows with a quick scan before copying, so the progress bar shows for them as for CSV (Avro reads only block headers: 0.2 s for 10M rows; JSON about 1.5 s per 2 GB)
 - **Schema inference: a column of whole and fractional numbers (`84`, `29.85`) is now a decimal column**; it used to become text. Blank values (`" "`) no longer decide a column's type, and are loaded as NULL in non-text columns (previously a single blank made the whole column text)
 - Values are converted to their column's inferred type before writing. A column inferred as text now receives `84` as the string `"84"` (JSON output quotes it), and text that parses as the column's type is converted (`"12"` in an integer column becomes `12`)
 - `--skip-existing` is documented as not implemented yet (it never had an effect); `tinyetl generate-default-config` now matches the README example

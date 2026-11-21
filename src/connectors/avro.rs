@@ -16,6 +16,90 @@ use crate::{
 
 type AvroRecords = Peekable<Reader<'static, BufReader<File>>>;
 
+/// Read a zigzag-encoded variable-length long (Avro's `long` encoding).
+fn read_long(reader: &mut impl std::io::Read) -> std::io::Result<i64> {
+    let (mut value, mut shift) = (0u64, 0u32);
+    loop {
+        let mut byte = [0u8];
+        reader.read_exact(&mut byte)?;
+        value |= u64::from(byte[0] & 0x7f) << shift;
+        if byte[0] & 0x80 == 0 {
+            return Ok((value >> 1) as i64 ^ -((value & 1) as i64));
+        }
+        shift += 7;
+        if shift > 63 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bad Avro varint",
+            ));
+        }
+    }
+}
+
+struct CountingReader<'a, R> {
+    inner: &'a mut R,
+    read: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for CountingReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
+}
+
+/// Records in an Avro container file, summed from the block headers. Each block's data is
+/// skipped with a seek, so this reads only a few bytes per block.
+fn count_records(path: &std::path::Path) -> std::io::Result<usize> {
+    use std::io::{Read, Seek};
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "not an Avro file");
+    let mut reader = BufReader::with_capacity(1 << 16, File::open(path)?);
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic)?;
+    if &magic != b"Obj\x01" {
+        return Err(invalid());
+    }
+    // File metadata: a map of string -> bytes, written as blocks of entries
+    loop {
+        let mut entries = read_long(&mut reader)?;
+        if entries == 0 {
+            break;
+        }
+        if entries < 0 {
+            entries = -entries;
+            read_long(&mut reader)?; // block size in bytes
+        }
+        for _ in 0..entries {
+            for _ in 0..2 {
+                let len = read_long(&mut reader)?;
+                reader.seek_relative(len)?;
+            }
+        }
+    }
+    reader.seek_relative(16)?; // sync marker
+    let end = reader.get_ref().metadata()?.len();
+    let mut position = reader.stream_position()?;
+    let mut records = 0usize;
+    // Positions are tracked here rather than asked of the file, which would be a system call
+    let mut counted = CountingReader {
+        inner: &mut reader,
+        read: 0,
+    };
+    while position < end {
+        counted.read = 0;
+        let count = read_long(&mut counted)?;
+        let size = read_long(&mut counted)?;
+        if count < 0 || size < 0 {
+            return Err(invalid());
+        }
+        records += count as usize;
+        counted.inner.seek_relative(size + 16)?;
+        position += counted.read + size as u64 + 16;
+    }
+    Ok(records)
+}
+
 /// Reads an Avro container file record by record, keeping one reader open.
 pub struct AvroSource {
     file_path: PathBuf,
@@ -292,7 +376,8 @@ impl Source for AvroSource {
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
-        Ok(None)
+        // Exact, from the record count in each block header; the data itself is skipped
+        Ok(count_records(&self.file_path).ok())
     }
 
     async fn reset(&mut self) -> Result<()> {
@@ -770,6 +855,36 @@ mod tests {
 
         let rows = source.read_batch(10).await.unwrap();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_record_count_from_block_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("count.avro");
+        let schema = Schema {
+            columns: vec![Column {
+                name: "id".to_string(),
+                data_type: DataType::Integer,
+                nullable: false,
+            }],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        let mut target = AvroTarget::new(path.to_str().unwrap()).unwrap();
+        target.create_table("t", &schema).await.unwrap();
+        for start in (0..50_000).step_by(10_000) {
+            let rows: Vec<Row> = (start..start + 10_000)
+                .map(|i| HashMap::from([("id".to_string(), Value::Integer(i))]))
+                .collect();
+            target.write_batch(&rows).await.unwrap();
+        }
+        target.finalize().await.unwrap();
+        let source = AvroSource::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(source.estimated_row_count().await.unwrap(), Some(50_000));
+
+        // Not an Avro file: no estimate rather than an error
+        std::fs::write(&path, b"hello").unwrap();
+        assert_eq!(source.estimated_row_count().await.unwrap(), None);
     }
 
     #[test]

@@ -5116,6 +5116,7 @@ dependencies = [
  "hex",
  "indicatif",
  "libc",
+ "memchr",
  "mlua",
  "object_store",
  "odbc-api",
