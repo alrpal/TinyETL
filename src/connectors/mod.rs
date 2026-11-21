@@ -76,11 +76,7 @@ pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
         Ok(Box::new(parquet::ParquetSource::new(connection_string)?))
     } else if connection_string.ends_with(".avro") {
         Ok(Box::new(avro::AvroSource::new(connection_string)?))
-    } else if connection_string.ends_with(".xlsx")
-        || connection_string.ends_with(".xls")
-        || connection_string.contains(".xlsx#")
-        || connection_string.contains(".xls#")
-    {
+    } else if excel::is_spreadsheet(connection_string) {
         Ok(Box::new(excel::ExcelSource::new(connection_string)?))
     } else if (connection_string.contains(".duckdb#") || connection_string.ends_with(".duckdb"))
         || connection_string.starts_with("duckdb:")
@@ -109,7 +105,7 @@ pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
         )?))
     } else {
         Err(crate::TinyEtlError::Configuration(
-            format!("Unsupported source type: {}. Supported formats: file.csv, file.json, file.parquet, file.avro, file.xlsx, file.xlsx#sheet, file.xls, file.db#table, file.duckdb#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table", connection_string)
+            format!("Unsupported source type: {}. Supported formats: file.csv, file.json, file.parquet, file.avro, file.xlsx[#sheet] (also .xlsm, .xlsb, .xls, .ods), file.db#table, file.duckdb#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table", connection_string)
         ))
     }
 }
@@ -157,11 +153,7 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
         Ok(Box::new(parquet::ParquetTarget::new(connection_string)?))
     } else if connection_string.ends_with(".avro") {
         Ok(Box::new(avro::AvroTarget::new(connection_string)?))
-    } else if connection_string.ends_with(".xlsx")
-        || connection_string.ends_with(".xls")
-        || connection_string.contains(".xlsx#")
-        || connection_string.contains(".xls#")
-    {
+    } else if excel::is_spreadsheet(connection_string) {
         Ok(Box::new(excel::ExcelTarget::new(connection_string)?))
     } else if connection_string.contains(".duckdb#")
         || connection_string.ends_with(".duckdb")
@@ -178,7 +170,7 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
     } else {
         Err(crate::TinyEtlError::Configuration(format!(
             "Unsupported target type: {}. Supported formats: \
-            file.csv, file.json, file.parquet, file.avro, file.xlsx, file.xlsx#sheet, file.xls, file.db, file.db#table, file.duckdb, file.duckdb#table, \
+            file.csv, file.json, file.parquet, file.avro, file.xlsx[#sheet], file.db, file.db#table, file.duckdb, file.duckdb#table, \
             duckdb://path/file.duckdb#table, sqlite://path/file.db#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table",
             connection_string
         )))

@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Reads stream `SELECT * FROM <table>` and keep NUMBER, FLOAT, BOOLEAN, DATE, TIMESTAMP and VARIANT/OBJECT/ARRAY types
   - Accounts on Azure or Google Cloud load with batched INSERTs (stage uploads are AWS-only so far); `load_method` forces either path
   - Built on the `firn` client crate, kept behind an internal interface so the client can be swapped later
+- **Excel source and target** ([#11](https://github.com/alrpal/TinyETL/issues/11), [#23](https://github.com/alrpal/TinyETL/pull/23), contributed by Michael Descy)
+  - Reads `.xlsx`, `.xlsm`, `.xlsb`, `.xls` and `.ods`; writes `.xlsx`. `file.xlsx#Sheet` picks the sheet to read or names the sheet to write
+  - Keeps Excel's types: dates, booleans, whole numbers as integers, text cells as text (leading zeros survive)
+  - Writes stream rows to a temporary file, with a bold header and date formats; exports over Excel's 1,048,576-row limit fail with a message
+  - Works over S3 (`s3://bucket/file.xlsx`) and HTTP(S)
+  - Both libraries (`calamine`, `rust_xlsxwriter`) are pure Rust, so the build still needs only a C/C++ compiler
+- Example `23_excel`: CSV → Excel → CSV round trip, named sheets, transforms, Excel → SQLite
 - **CrateDB** as a source and target through `postgresql://` URLs ([#22](https://github.com/alrpal/TinyETL/pull/22), contributed by Andreas Motl)
 - Example `22_snowflake`: load and read against a real account (skipped unless `SNOWFLAKE_*` variables are set)
 - Example `21_csv_to_postgres_odbc`: a CSV → PostgreSQL → CSV round trip through the PostgreSQL ODBC driver

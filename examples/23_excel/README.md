@@ -1,95 +1,27 @@
-# TinyETL Excel Support Example
+# Example 23: Excel
 
-This example demonstrates TinyETL's Excel connector capabilities for reading from and writing to Excel files (.xlsx and .xls formats).
+Reads and writes Excel workbooks, checking the results:
 
-## Features Demonstrated
-
-1. **CSV to Excel** - Convert CSV files to Excel format
-2. **Excel to CSV** - Read Excel files and export to CSV
-3. **Excel to Excel** - Copy Excel data with custom sheet names
-4. **Excel to JSON** - Convert Excel data to JSON format
-5. **Transformations** - Apply Lua transformations when writing to Excel
-6. **Sheet Names** - Specify custom sheet names using `file.xlsx#SheetName` syntax
-7. **Preview Mode** - Inspect Excel data before processing
-
-## Running the Example
+1. `employees.csv` → `employees.xlsx` → CSV, compared value by value (decimals, dates, booleans, Unicode, a blank cell) and in column order.
+2. Writes and reads a named sheet (`book.xlsx#Staff`), and checks that asking for a sheet that doesn't exist fails with the list of sheets.
+3. Adds computed columns with `--transform` while writing Excel.
+4. Loads the workbook into SQLite and compares the result.
 
 ```bash
-cd examples/23_excel
-chmod +x run.sh
-./run.sh
+cargo build --release
+bash examples/23_excel/run.sh
 ```
 
-## Excel-Specific Features
+Outputs go to a temporary directory, so the example leaves no files behind.
 
-### Sheet Name Specification
-
-You can specify a sheet name for both reading and writing:
+## Commands
 
 ```bash
-# Read from specific sheet
-tinyetl "data.xlsx#Sheet2" output.csv
-
-# Write to specific sheet (defaults to "Sheet1" if not specified)
-tinyetl data.csv "output.xlsx#EmployeeData"
+tinyetl employees.csv employees.xlsx                 # write; the sheet is named Sheet1
+tinyetl employees.csv "book.xlsx#Staff"              # write a named sheet
+tinyetl employees.xlsx employees.csv                 # read the first sheet
+tinyetl "book.xlsx#Staff" staff.json                 # read a named sheet
+tinyetl employees.xlsx "staff.db#employees"          # Excel into SQLite
 ```
 
-### Supported Excel Formats
-
-- **.xlsx** - Modern Excel format (Office 2007+)
-- **.xls** - Legacy Excel format (Office 97-2003)
-
-### Data Type Handling
-
-TinyETL automatically converts between Excel and TinyETL data types:
-
-- **Numbers** - Excel integers and floats → Integer/Decimal
-- **Text** - Excel strings → String (with date parsing attempt)
-- **Booleans** - Excel TRUE/FALSE → Boolean
-- **Dates** - Excel date values → DateTime (converted to strings)
-- **Empty cells** - Excel empty → Null
-
-### Column Order Preservation
-
-Excel connector preserves column order from the header row, ensuring consistent output.
-
-## Example Commands
-
-```bash
-# Basic conversion
-tinyetl employees.csv employees.xlsx
-tinyetl employees.xlsx employees.csv
-
-# With sheet names
-tinyetl "sales.xlsx#Q4Data" report.csv
-tinyetl data.csv "report.xlsx#Summary"
-
-# With transformations
-tinyetl employees.csv output.xlsx \
-  --transform "full_name=row.first_name .. ' ' .. row.last_name"
-
-# Preview Excel data
-tinyetl employees.xlsx output.json --preview 5
-
-# Excel to database
-tinyetl employees.xlsx "sqlite:///employees.db#staff"
-
-# Database to Excel
-tinyetl "postgres://user@localhost/db#orders" orders.xlsx
-```
-
-## Notes
-
-- Excel files are read entirely into memory for processing
-- Large Excel files (>100k rows) may be slower than CSV or Parquet
-- Excel target writes occur at finalization (after all batches accumulated)
-- Sheet names default to "Sheet1" if not specified
-- Excel files don't support true append mode (truncate-and-write only)
-
-## Use Cases
-
-- **Report Generation** - Create formatted Excel reports from databases
-- **Data Exchange** - Share data with non-technical users who prefer Excel
-- **Legacy System Integration** - Import/export from systems using Excel
-- **Financial Data** - Handle spreadsheet-based financial data with precision
-- **Data Validation** - Preview and validate Excel files before database import
+TinyETL reads `.xlsx`, `.xlsm`, `.xlsb`, `.xls` and `.ods`, and writes `.xlsx`. See the Excel section of the main README for how types, headers and large sheets are handled.

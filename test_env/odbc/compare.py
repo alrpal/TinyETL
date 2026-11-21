@@ -1,12 +1,14 @@
 """Compare an exported CSV with the original, value by value.
 
 Usage: compare.py [--ignore-header-case] original.csv exported.csv [key_column]
-Numbers are compared numerically, booleans by truth value, and empty means NULL.
+Numbers are compared numerically, booleans by truth value, ISO dates and timestamps as instants
+(a date is midnight UTC), and empty means NULL.
 Column order must match exactly; with --ignore-header-case, column names may differ in case
 (Snowflake upper-cases unquoted names). Prints the differences and exits 1 if there are any.
 """
 import csv
 import sys
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 TRUE = {"1", "true", "t", "yes"}
@@ -25,6 +27,11 @@ def norm(value):
     try:
         return Decimal(v).normalize()
     except InvalidOperation:
+        pass
+    try:
+        dt = datetime.fromisoformat(v)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
         return value
 
 
