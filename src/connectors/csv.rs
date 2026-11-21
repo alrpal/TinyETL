@@ -161,11 +161,25 @@ impl Source for CsvSource {
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
-        // Simple estimation by counting lines (not perfect but fast)
-        let content = std::fs::read_to_string(&self.file_path)?;
-        let line_count = content.lines().count();
-        // Subtract 1 for header if present
-        Ok(Some(line_count.saturating_sub(1)))
+        // Count lines in chunks rather than loading the file (quoted newlines make this an
+        // estimate, which is all the progress bar needs)
+        use std::io::Read;
+        let mut file = std::fs::File::open(&self.file_path)?;
+        let mut buffer = vec![0u8; 1 << 20];
+        let (mut lines, mut last) = (0usize, b'\n');
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            lines += buffer[..n].iter().filter(|&&b| b == b'\n').count();
+            last = buffer[n - 1];
+        }
+        if last != b'\n' {
+            lines += 1; // a last line without a newline
+        }
+        // Subtract 1 for the header
+        Ok(Some(lines.saturating_sub(1)))
     }
 
     async fn reset(&mut self) -> Result<()> {
@@ -423,6 +437,12 @@ mod tests {
 
         let count = source.estimated_row_count().await.unwrap();
         assert_eq!(count, Some(2)); // 2 data rows (excluding header)
+
+        // A last line without a trailing newline still counts
+        let mut no_newline = NamedTempFile::new().unwrap();
+        write!(no_newline, "id\n1\n2").unwrap();
+        let source = CsvSource::new(no_newline.path().to_str().unwrap()).unwrap();
+        assert_eq!(source.estimated_row_count().await.unwrap(), Some(2));
     }
 
     #[tokio::test]

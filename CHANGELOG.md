@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Writes stream rows to a temporary file, with a bold header and date formats; exports over Excel's 1,048,576-row limit fail with a message
   - Works over S3 (`s3://bucket/file.xlsx`) and HTTP(S)
   - Both libraries (`calamine`, `rust_xlsxwriter`) are pure Rust, so the build still needs only a C/C++ compiler
+- **JSON Lines** (`.jsonl`, `.ndjson`) as a source and target, including over S3
 - Example `23_excel`: CSV → Excel → CSV round trip, named sheets, transforms, Excel → SQLite
 - **CrateDB** as a source and target through `postgresql://` URLs ([#22](https://github.com/alrpal/TinyETL/pull/22), contributed by Andreas Motl)
 - Example `22_snowflake`: load and read against a real account (skipped unless `SNOWFLAKE_*` variables are set)
@@ -54,10 +55,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Loading decimals into a PostgreSQL `NUMERIC` column failed (`column … is of type numeric but expression is of type text`); decimals are now sent as numbers
 - Reading `NUMERIC`/`DECIMAL` columns from PostgreSQL, MySQL and SQL Server returned NULL for every value, as did PostgreSQL `JSON`/`JSONB` and SQL Server `INT`, `SMALLINT`, `TINYINT` and `REAL` columns. They now keep their values
 - Writing Avro files with timestamp, date or JSON columns failed (`Cannot convert value Date(…) to Avro type String`): the writer took column types from the Avro schema's canonical form, which drops logical types. It now uses TinyETL's column types
+- Reading Avro files was quadratic: each batch reopened the file and skipped every record already read (1M rows took 44 s; now 1.8 s). Avro timestamp and date fields are also read as dates instead of integers
+- Reading Parquet with `--batch-size` below 1,024 dropped rows: each 1,024-row chunk was cut to the batch size and the rest discarded
+- Writing Parquet failed for `Date` columns, and an empty source produced no Parquet file at all (now a valid file with the schema)
+- Counting rows in a CSV for the progress bar read the whole file into memory; it now counts lines in chunks
 - `nullable` in a schema file is optional again and defaults to `true`, as documented (leaving it out was an error)
 - Creating a decimal column on CrateDB failed (`NUMERIC storage is only supported if precision and scale are specified`). TinyETL detects CrateDB and creates `NUMERIC(38,10)` there
 
 ### Changed
+- **Parquet, JSON and Avro now stream.** Rows are written a batch at a time instead of being held until the end, and files are read a batch at a time instead of being loaded whole. Converting a 10M-row (843 MB) CSV peaks at 32–70 MB for every file format; before, a 1M-row CSV took 1.3–2.3 GB to write as Parquet, JSON or Avro, and reading JSON loaded the whole file
+- File targets write to a temporary file next to the destination and rename it into place when the transfer finishes, so a failed run leaves an existing file untouched (it used to leave a half-written file)
+- Parquet files are written with Snappy compression (previously uncompressed; the 1M-row test file went from 55 MB to 19 MB)
+- JSON output keys follow the column order instead of alphabetical order, and reading JSON keeps the file's key order for the columns
+- Reading JSON or Avro no longer reports a row count up front (it isn't known without reading the whole file), so no progress bar is shown for them
 - **Schema inference: a column of whole and fractional numbers (`84`, `29.85`) is now a decimal column**; it used to become text. Blank values (`" "`) no longer decide a column's type, and are loaded as NULL in non-text columns (previously a single blank made the whole column text)
 - Values are converted to their column's inferred type before writing. A column inferred as text now receives `84` as the string `"84"` (JSON output quotes it), and text that parses as the column's type is converted (`"12"` in an integer column becomes `12`)
 - `--skip-existing` is documented as not implemented yet (it never had an effect); `tinyetl generate-default-config` now matches the README example

@@ -28,7 +28,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 ## Why TinyETL?
 
 ✅ **Single binary** — about a 20 MB download (50 MB unpacked), with no runtime dependencies: no Python, no JVM, no shared libraries to install  
-✅ **Fast** — 150k–380k rows/sec for a 1M-row CSV on a laptop (see [Performance](#performance))  
+✅ **Fast and streaming** — 140k–345k rows/sec on a laptop, with memory that stays flat as files grow (see [Performance](#performance))  
 ✅ **Zero configuration** — automatic schema detection and table creation (override with schema and config files in yaml)  
    *Note: Auto-inferred schemas default all columns to nullable for safety*
 
@@ -102,8 +102,8 @@ tinyetl "postgresql://user:@host/db#users" "mysql://user:@host/db#users"
 # Transform while transferring
 tinyetl sales.csv results.db --transform "profit=row.revenue - row.costs; margin=profit/revenue"
 
-# Load a large file in big batches (memory stays flat)
-tinyetl huge_dataset.csv "analytics.duckdb#events" --batch-size 100000
+# Large files stream with flat memory
+tinyetl huge_dataset.csv output.parquet
 
 # Download and convert web data
 tinyetl "https://example.com/api/export" local_data.json --source-type=csv
@@ -160,6 +160,7 @@ tinyetl data.csv output.parquet
 tinyetl data.csv output.avro
 tinyetl data.json output.csv
 tinyetl data.avro output.json
+tinyetl events.jsonl events.parquet
 tinyetl "budget.xlsx#Q4" q4.csv
 tinyetl "postgresql://user:@localhost/mydb#orders" orders.xlsx
 
@@ -205,7 +206,8 @@ TinyETL supports two main categories of data sources and targets:
 **File Formats:**
 - **CSV** - Comma-separated values
 - **JSON** - JavaScript Object Notation (array of objects)
-- **Parquet** - Columnar storage format
+- **JSON Lines** - One JSON object per line (`.jsonl`, `.ndjson`)
+- **Parquet** - Columnar storage format (written with Snappy compression)
 - **Avro** - Binary serialization format with schema evolution
 - **Excel** - Reads `.xlsx`, `.xlsm`, `.xlsb`, `.xls` and OpenDocument `.ods`; writes `.xlsx`. Pick a sheet with `file.xlsx#Sheet` (see "Excel" below)
 
@@ -311,7 +313,7 @@ tinyetl "ssh://user@server.com/data/export_20241107" output.parquet --source-typ
 tinyetl data.csv output.json  # No --source-type needed
 ```
 
-**Supported source types:** `csv`, `json`, `parquet`, `avro`, `xlsx` (and the other spreadsheet extensions above)
+**Supported source types:** `csv`, `json`, `jsonl`, `parquet`, `avro`, `xlsx` (and the other spreadsheet extensions above)
 
 ### Excel
 
@@ -1020,7 +1022,7 @@ See [Example 18: HTTP with Authentication](examples/18_http_with_auth/) for comp
 
 #### S3 Options
 
-`s3://bucket/path/file.ext` works as both a source and a target for CSV, JSON, Parquet, Avro and Excel (`.xlsx`) files:
+`s3://bucket/path/file.ext` works as both a source and a target for CSV, JSON, JSON Lines, Parquet, Avro and Excel (`.xlsx`) files:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -1178,31 +1180,31 @@ INFO tinyetl: Processed 100000 rows in 0.98s (101586 rows/sec)
 
 ### Performance
 
-A 1,000,000-row, 8-column CSV (83 MB) converted on an Apple M4 Pro with the default batch size:
+An 8-column CSV converted on an Apple M4 Pro with the default batch size. Times are for 1,000,000 rows (83 MB); peak memory is shown for 1M and 10M rows (843 MB):
 
-| Target | Time | Rows/sec | Peak memory |
-|---|---|---|---|
-| CSV | 2.6 s | 383k | 107 MB |
-| DuckDB | 3.1 s | 331k | 185 MB |
-| Parquet | 3.7 s | 289k | 1.4 GB |
-| JSON | 4.5 s | 236k | 2.3 GB |
-| Avro | 4.6 s | 217k | 1.3 GB |
-| Excel (.xlsx) | 5.3 s | 190k | 107 MB |
-| SQLite | 6.7 s | 151k | 118 MB |
+| Target | Time (1M rows) | Rows/sec | Peak memory, 1M rows | Peak memory, 10M rows |
+|---|---|---|---|---|
+| CSV | 2.9 s | 345k | 32 MB | 32 MB |
+| Parquet | 2.9 s | 345k | 58 MB | 70 MB |
+| JSON Lines | 3.4 s | 294k | 32 MB | 32 MB |
+| DuckDB | 3.6 s | 278k | 118 MB | 218 MB |
+| JSON | 3.8 s | 263k | 32 MB | 32 MB |
+| Avro | 4.4 s | 227k | 47 MB | 47 MB |
+| SQLite | 7.2 s | 139k | 53 MB | 58 MB |
+| Excel (.xlsx) | 7.3 s | 137k | 33 MB | (Excel's limit is 1,048,576 rows) |
 
-Sources are read in batches, and CSV, Excel and database targets write each batch as it arrives, so their memory use stays flat. The Parquet, JSON and Avro targets currently hold all rows in memory until the end, so for very large exports prefer CSV or a database (or split the input). Network databases and warehouses depend mostly on the server and the network.
+Every source and file target streams: rows are read and written a batch at a time, so memory stays flat as files grow. Reading the 10M-row Parquet, JSON or Avro file back to CSV peaks at 31–79 MB. Excel is the exception on the read side: a sheet is loaded whole. Network databases and warehouses depend mostly on the server and the network.
 
 ### Roadmap
 
 **Done:**
-- Files: CSV, JSON, Parquet, Avro, Excel ✅
+- Files: CSV, JSON, JSON Lines, Parquet, Avro, Excel, streamed with flat memory ✅
 - Databases: SQLite, DuckDB, PostgreSQL, MySQL, SQL Server, CrateDB, any ODBC driver ✅
 - Snowflake (staged bulk loads) ✅
 - Remote files over HTTP(S), SSH and S3 ✅
 - Schema inference, schema files, Lua transforms, YAML jobs ✅
 
 **Next:**
-- Streaming Parquet, JSON and Avro writes (bounded memory)
 - Databricks and OneLake
 - `--skip-existing` (the flag exists but has no effect yet)
 - Advanced transformation functions and libraries
