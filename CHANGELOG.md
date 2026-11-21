@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Example `21_csv_to_postgres_odbc`: a CSV → PostgreSQL → CSV round trip through the PostgreSQL ODBC driver
+- Prebuilt **Linux ARM64** binary (`tinyetl-linux-aarch64`), built natively on GitHub's arm64 runner
 - `test_env/odbc/run.sh`: tests the `odbc://` connector on Linux against SQL Server, PostgreSQL, MySQL and SQLite with their ODBC drivers
 - **S3 Protocol**: `s3://bucket/path/file.ext` as both a source and a target for CSV, JSON, Parquet and Avro files
   - Works with Amazon S3 and S3-compatible stores (e.g. Cloudflare R2) via the `endpoint` option
@@ -37,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `duckdb` from 1.4.1 to 1.4.5, which builds with Visual Studio 2026 (MSVC 14.5x). 1.4.1's bundled `fmt` library used `stdext::checked_array_iterator`, which that compiler removed, so Windows builds failed
 - **Building from source now requires Rust 1.94 or later** (`rust-version` was previously listed as 1.70, which the dependencies had already outgrown). TinyETL builds on current stable Rust again: `sqlx` 0.6 and `mlua` 0.8 no longer compiled on Rust 1.100, so they are upgraded to `sqlx` 0.9 and `mlua` 0.12
 - Building from source on Linux no longer needs `libssl-dev`: sqlx's unused query macros are disabled, which built a second, non-vendored OpenSSL for the build host
-- **No more prebuilt binary for Intel Macs.** Intel Mac users can still build from source with `cargo install tinyetl`
 - Release workflow checks that binaries link no third-party shared libraries and run in clean `ubuntu:22.04`, `debian:12-slim` and `ubuntu:24.04` containers
 - Building from source no longer needs unixODBC installed (`unixodbc-dev` / `brew install unixodbc`): it is compiled from the vendored sources. A C/C++ compiler (plus `perl` on Linux, for OpenSSL) is all that's required
 

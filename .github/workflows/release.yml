@@ -15,15 +15,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS build (Apple Silicon only; Intel Macs are not built)
+          # macOS builds. Intel is cross-compiled on the Apple Silicon runner; everything it links is
+          # either built from source or part of macOS.
           - target: aarch64-apple-darwin
             os: macos-latest
             name: tinyetl-macos-apple-silicon-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: tinyetl-macos-intel-x86_64
           # Linux build. Built on the oldest supported Ubuntu because a binary only runs where glibc and
           # libstdc++ are at least as new as on the build machine: 22.04 gives glibc 2.35 / GCC 11.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             name: tinyetl-linux-x86_64
+          # Linux ARM64, built natively on GitHub's arm64 runner (same Ubuntu, same glibc floor)
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            name: tinyetl-linux-aarch64
           # Windows builds
           - target: x86_64-pc-windows-msvc
             os: windows-latest
@@ -86,7 +94,7 @@ jobs:
         BIN=target/${{ matrix.target }}/release/tinyetl
         ldd "$BIN"
         # Only the C/C++ runtime that every Linux system has is allowed
-        ALLOWED='^\s*(linux-vdso\.so|/lib64/ld-linux|ld-linux|libc\.so|libm\.so|libgcc_s\.so|libstdc\+\+\.so|libpthread\.so|libdl\.so|librt\.so)'
+        ALLOWED='^\s*(linux-vdso\.so|(/lib64/|/lib/)?ld-linux|libc\.so|libm\.so|libgcc_s\.so|libstdc\+\+\.so|libpthread\.so|libdl\.so|librt\.so)'
         if ldd "$BIN" | grep -v -E "$ALLOWED"; then
           echo "::error::Binary links a library that is not available on a clean system (listed above)"
           exit 1
