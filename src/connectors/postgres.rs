@@ -122,7 +122,13 @@ impl Source for PostgresSource {
             schema_rows.push(schema_row);
         }
 
-        let mut schema = SchemaInferer::infer_from_rows(&schema_rows)?;
+        // Keep the result set's column order; rows are hash maps and don't preserve it.
+        let column_order: Vec<String> = rows[0]
+            .columns()
+            .iter()
+            .map(|column| column.name().to_string())
+            .collect();
+        let mut schema = SchemaInferer::infer_from_rows_ordered(&schema_rows, &column_order)?;
 
         // Get estimated row count
         if let Ok(count_result) = self.estimated_row_count().await {
@@ -187,13 +193,15 @@ impl Source for PostgresSource {
             )
         };
 
+        // reltuples is -1 for a table that hasn't been vacuumed or analyzed yet (and 0 can mean
+        // the same on older servers), so only trust a positive estimate.
         match sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_query.as_str()))
             .fetch_one(pool)
             .await
         {
-            Ok(count) => Ok(Some(count as usize)),
-            Err(_) => {
-                // Fallback to exact count if estimate fails
+            Ok(count) if count > 0 => Ok(Some(count as usize)),
+            _ => {
+                // No usable estimate: fall back to an exact count
                 let exact_query = format!("SELECT COUNT(*) FROM {}", self.table_name);
                 match sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(exact_query.as_str()))
                     .fetch_one(pool)

@@ -214,7 +214,13 @@ impl Source for MysqlSource {
             schema_rows.push(schema_row);
         }
 
-        let mut schema = SchemaInferer::infer_from_rows(&schema_rows)?;
+        // Keep the result set's column order; rows are hash maps and don't preserve it.
+        let column_order: Vec<String> = rows[0]
+            .columns()
+            .iter()
+            .map(|column| column.name().to_string())
+            .collect();
+        let mut schema = SchemaInferer::infer_from_rows_ordered(&schema_rows, &column_order)?;
 
         // Get estimated row count
         if let Ok(count_result) = self.estimated_row_count().await {

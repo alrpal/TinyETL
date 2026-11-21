@@ -65,13 +65,13 @@ if [ "$EXPORT_ROWS" != "$CSV_ROWS" ]; then
     echo "❌ FAIL: expected $CSV_ROWS rows in $OUTPUT, found $EXPORT_ROWS"
     exit 1
 fi
-for column in $(head -1 customers.csv | tr ',' ' '); do
-    if ! head -1 "$OUTPUT" | tr ',' '\n' | grep -qx "$column"; then
-        echo "❌ FAIL: column $column missing from $OUTPUT"
-        exit 1
-    fi
-done
-echo "✅ PASS: exported $EXPORT_ROWS rows with all columns to $OUTPUT"
+if [ "$(head -1 "$OUTPUT")" != "$(head -1 customers.csv)" ]; then
+    echo "❌ FAIL: $OUTPUT columns are not in the table's order"
+    echo "  expected: $(head -1 customers.csv)"
+    echo "  got:      $(head -1 "$OUTPUT")"
+    exit 1
+fi
+echo "✅ PASS: exported $EXPORT_ROWS rows to $OUTPUT, columns in table order"
 
 # 4. Export a table TinyETL did not create: test_env seeds an employees table with
 #    SERIAL, DECIMAL and DATE columns (test_env/init-scripts/postgres).

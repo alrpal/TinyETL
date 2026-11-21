@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use csv::{ReaderBuilder, WriterBuilder};
 use rust_decimal::Decimal;
 use serde_json;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::{
@@ -28,54 +27,6 @@ impl CsvSource {
             headers: Vec::new(),
             current_position: 0,
             has_more_data: true,
-        })
-    }
-
-    fn infer_schema_with_order(&self, rows: &[Row]) -> Result<Schema> {
-        if rows.is_empty() {
-            return Ok(Schema {
-                columns: Vec::new(),
-                estimated_rows: Some(0),
-                primary_key_candidate: None,
-            });
-        }
-
-        let mut column_types: HashMap<String, Vec<crate::schema::DataType>> = HashMap::new();
-
-        // Use the CSV headers order instead of HashMap iteration order
-        for col_name in &self.headers {
-            let mut types = Vec::new();
-            for row in rows {
-                let data_type = match row.get(col_name) {
-                    Some(value) => crate::schema::SchemaInferer::infer_type(value),
-                    None => crate::schema::DataType::Null,
-                };
-                types.push(data_type);
-            }
-            column_types.insert(col_name.clone(), types);
-        }
-
-        // Determine final type for each column, preserving header order
-        let columns = self
-            .headers
-            .iter()
-            .filter_map(|col_name| {
-                column_types.get(col_name).map(|types| {
-                    let (data_type, nullable) =
-                        crate::schema::SchemaInferer::resolve_column_type(types);
-                    crate::schema::Column {
-                        name: col_name.clone(),
-                        data_type,
-                        nullable,
-                    }
-                })
-            })
-            .collect();
-
-        Ok(Schema {
-            columns,
-            estimated_rows: Some(rows.len()),
-            primary_key_candidate: None,
         })
     }
 
@@ -167,7 +118,7 @@ impl Source for CsvSource {
         self.reset().await?;
 
         // Custom schema inference that preserves column order from CSV headers
-        self.infer_schema_with_order(&sample_rows)
+        crate::schema::SchemaInferer::infer_from_rows_ordered(&sample_rows, &self.headers)
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {

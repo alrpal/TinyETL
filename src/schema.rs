@@ -458,7 +458,18 @@ pub type Row = HashMap<String, Value>;
 pub struct SchemaInferer;
 
 impl SchemaInferer {
+    /// Infers a schema from sample rows. Rows are hash maps and carry no column order, so the
+    /// columns come out sorted by name; sources that know their column order should call
+    /// [`SchemaInferer::infer_from_rows_ordered`] instead.
     pub fn infer_from_rows(rows: &[Row]) -> Result<Schema> {
+        Self::infer_from_rows_ordered(rows, &[])
+    }
+
+    /// Infers a schema from sample rows, with columns in `column_order` (for example a CSV
+    /// header or a query's result columns). Columns found in the rows but missing from
+    /// `column_order` follow, sorted by name; names in `column_order` that appear in no row
+    /// are skipped.
+    pub fn infer_from_rows_ordered(rows: &[Row], column_order: &[String]) -> Result<Schema> {
         if rows.is_empty() {
             return Ok(Schema {
                 columns: Vec::new(),
@@ -467,35 +478,31 @@ impl SchemaInferer {
             });
         }
 
-        let mut column_types: HashMap<String, Vec<DataType>> = HashMap::new();
-
-        // Collect all unique column names
-        let mut all_columns = std::collections::HashSet::new();
-        for row in rows {
-            for key in row.keys() {
-                all_columns.insert(key.clone());
-            }
-        }
-
-        // Analyze each column's data types
-        for col_name in &all_columns {
-            let mut types = Vec::new();
-            for row in rows {
-                let data_type = match row.get(col_name) {
-                    Some(value) => Self::infer_type(value),
-                    None => DataType::Null,
-                };
-                types.push(data_type);
-            }
-            column_types.insert(col_name.clone(), types);
-        }
-
-        // Determine final type for each column
-        let columns = all_columns
+        let present: std::collections::HashSet<&String> =
+            rows.iter().flat_map(|row| row.keys()).collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut names: Vec<&String> = column_order
             .iter()
+            .filter(|name| present.contains(name) && seen.insert(*name))
+            .collect();
+        let mut rest: Vec<&String> = present
+            .into_iter()
+            .filter(|name| !seen.contains(name))
+            .collect();
+        rest.sort();
+        names.extend(rest);
+
+        let columns = names
+            .into_iter()
             .map(|col_name| {
-                let types = column_types.get(col_name).unwrap();
-                let (data_type, nullable) = Self::resolve_column_type(types);
+                let types: Vec<DataType> = rows
+                    .iter()
+                    .map(|row| match row.get(col_name) {
+                        Some(value) => Self::infer_type(value),
+                        None => DataType::Null,
+                    })
+                    .collect();
+                let (data_type, nullable) = Self::resolve_column_type(&types);
                 Column {
                     name: col_name.clone(),
                     data_type,
@@ -595,6 +602,49 @@ mod tests {
         let id_col = schema.columns.iter().find(|c| c.name == "id").unwrap();
         assert_eq!(id_col.data_type, DataType::Integer);
         assert!(id_col.nullable); // Always nullable when inferred from sample data
+    }
+
+    fn column_names(schema: &Schema) -> Vec<&str> {
+        schema.columns.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn test_infer_from_rows_ordered_keeps_given_order() {
+        let mut row1 = HashMap::new();
+        row1.insert("last_name".to_string(), Value::String("Smith".to_string()));
+        row1.insert("customer_id".to_string(), Value::Integer(1));
+        row1.insert("zeta".to_string(), Value::Integer(9));
+        let mut row2 = row1.clone();
+        // A column only some rows have, missing from the order: goes after the ordered ones
+        row2.insert("extra".to_string(), Value::Boolean(true));
+
+        let order: Vec<String> = ["zeta", "customer_id", "not_in_rows", "last_name", "zeta"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let schema = SchemaInferer::infer_from_rows_ordered(&[row1, row2], &order).unwrap();
+
+        // "not_in_rows" is skipped and the duplicate "zeta" appears once
+        assert_eq!(
+            column_names(&schema),
+            ["zeta", "customer_id", "last_name", "extra"]
+        );
+        let extra = schema.columns.iter().find(|c| c.name == "extra").unwrap();
+        assert_eq!(extra.data_type, DataType::Boolean);
+        assert!(extra.nullable);
+    }
+
+    #[test]
+    fn test_infer_from_rows_is_sorted_by_name() {
+        let mut row = HashMap::new();
+        for name in ["delta", "alpha", "charlie", "bravo"] {
+            row.insert(name.to_string(), Value::Integer(1));
+        }
+        let schema = SchemaInferer::infer_from_rows(&[row]).unwrap();
+        assert_eq!(
+            column_names(&schema),
+            ["alpha", "bravo", "charlie", "delta"]
+        );
     }
 
     #[test]
