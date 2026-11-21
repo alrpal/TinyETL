@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use url::Url;
 
 /// File formats that can be staged through S3 (must match the file connectors).
-const SUPPORTED_FORMATS: [&str; 4] = ["csv", "json", "parquet", "avro"];
+const SUPPORTED_FORMATS: [&str; 5] = ["csv", "json", "parquet", "avro", "xlsx"];
 
 /// S3 protocol for reading and writing single objects (`s3://bucket/path/to/file.ext`).
 ///

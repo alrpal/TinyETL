@@ -1,0 +1,6 @@
+id,first_name,last_name,email,department,salary,hire_date,is_active
+1,Alice,Johnson,alice@example.com,Engineering,95000.50,2020-03-15,true
+2,Bob,Smith,bob@example.com,Sales,75000,2019-07-22,true
+3,Zoë,Müller,zoe@example.com,Marketing,68000.25,2021-01-10,true
+4,David,Brown,david@example.com,Engineering,88000,2018-11-05,true
+5,Eve,Davis,,HR,72000,2022-02-28,false

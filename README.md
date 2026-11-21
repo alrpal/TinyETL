@@ -31,7 +31,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
    *Note: Auto-inferred schemas default all columns to nullable for safety*
 
 ✅ **Lua transformations** — powerful data transformations  
-✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, CrateDB, DuckDB, MSSQL, ODBC, Snowflake. Coming soon: Databricks, OneLake
+✅ **Universal connectivity** — CSV, JSON, Excel, Parquet, Avro, MySQL, PostgreSQL, SQLite, CrateDB, DuckDB, MSSQL, ODBC, Snowflake. Coming soon: Databricks, OneLake
 
 ✅ **Cross-platform** — Linux, macOS, Windows ready
 
@@ -100,6 +100,7 @@ tinyetl --version
 # File format conversion (auto-detects schemas)
 tinyetl data.csv output.parquet
 tinyetl data.json analysis.db
+tinyetl report.xlsx report.csv
 
 # Database to database 
 tinyetl "postgresql://user:@host/db#users" "mysql://user:@host/db#users"
@@ -163,6 +164,8 @@ tinyetl data.csv output.parquet
 tinyetl data.csv output.avro
 tinyetl data.json output.csv
 tinyetl data.avro output.json
+tinyetl "budget.xlsx#Q4" q4.csv
+tinyetl "postgresql://user:@localhost/mydb#orders" orders.xlsx
 
 # Download from web
 tinyetl "https://example.com/data.csv" output.json
@@ -208,6 +211,7 @@ TinyETL supports two main categories of data sources and targets:
 - **JSON** - JavaScript Object Notation (array of objects)
 - **Parquet** - Columnar storage format
 - **Avro** - Binary serialization format with schema evolution
+- **Excel** - Reads `.xlsx`, `.xlsm`, `.xlsb`, `.xls` and OpenDocument `.ods`; writes `.xlsx`. Pick a sheet with `file.xlsx#Sheet` (see "Excel" below)
 
 **Access Protocols:**
 - **Local Files** - Direct file system access
@@ -306,7 +310,20 @@ tinyetl "ssh://user@server.com/data/export_20241107" output.parquet --source-typ
 tinyetl data.csv output.json  # No --source-type needed
 ```
 
-**Supported source types:** `csv`, `json`, `parquet`, `avro`
+**Supported source types:** `csv`, `json`, `parquet`, `avro`, `xlsx` (and the other spreadsheet extensions above)
+
+### Excel
+
+```bash
+tinyetl sales.xlsx sales.csv                 # first sheet
+tinyetl "sales.xlsx#Q4 2024" q4.parquet      # a named sheet
+tinyetl "postgresql://user:@host/db#orders" "orders.xlsx#Orders"   # write; the sheet defaults to Sheet1
+```
+
+- **Reading:** the first row is the header; blank header cells become `column_N` and repeated names get `_2`, `_3`, …. Rows with no values are skipped. The whole sheet is loaded into memory (the spreadsheet libraries read a sheet at once), so use CSV or Parquet for very large data.
+- **Types:** Excel stores every number as a double: whole numbers are read as integers, others as decimals. Date cells are read as dates, booleans as booleans, and text cells stay text (so `02134` keeps its leading zero). Error cells (`#N/A`, `#DIV/0!`) are read as NULL.
+- **Writing:** produces an `.xlsx` with a bold header row; dates get a date format, and integers beyond ±2^53, which a double can't hold exactly, are written as text. Rows are streamed to a temporary file, so memory stays low. A sheet holds at most 1,048,576 rows; larger exports fail with a message. Writing replaces an existing file (it doesn't add a sheet to it).
+- **S3 and HTTP:** `s3://bucket/report.xlsx` works as a source and a target; HTTP(S) URLs ending in a spreadsheet extension, or with `--source-type xlsx`, work as sources.
 
 ### Database Connection Strings
 

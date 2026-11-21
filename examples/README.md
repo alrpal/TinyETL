@@ -106,6 +106,16 @@ tinyetl data.csv "snowflake://TINYETL_LOADER@MYORG-MYACCOUNT/TINYETL_TEST/EXAMPL
 
 ## Protocol Architecture
 
+### 23_excel
+**Excel Source and Target**
+
+Round-trips a CSV through an `.xlsx` file and compares every value (decimals, dates, booleans, Unicode, a blank cell), writes and reads a named sheet (`file.xlsx#Staff`), checks that a missing sheet fails with the list of sheets, applies a transform while writing, and loads the workbook into SQLite.
+
+```bash
+tinyetl employees.csv employees.xlsx
+tinyetl "book.xlsx#Staff" staff.json
+```
+
 ### Current Implementation Status
 
 | Protocol | Status | Description |
