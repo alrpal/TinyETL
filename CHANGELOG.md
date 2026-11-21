@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Reads stream `SELECT * FROM <table>` and keep NUMBER, FLOAT, BOOLEAN, DATE, TIMESTAMP and VARIANT/OBJECT/ARRAY types
   - Accounts on Azure or Google Cloud load with batched INSERTs (stage uploads are AWS-only so far); `load_method` forces either path
   - Built on the `firn` client crate, kept behind an internal interface so the client can be swapped later
+- **CrateDB** as a source and target through `postgresql://` URLs ([#22](https://github.com/alrpal/TinyETL/pull/22), contributed by Andreas Motl)
 - Example `22_snowflake`: load and read against a real account (skipped unless `SNOWFLAKE_*` variables are set)
 - Example `21_csv_to_postgres_odbc`: a CSV → PostgreSQL → CSV round trip through the PostgreSQL ODBC driver
 - Prebuilt **Linux ARM64** binary (`tinyetl-linux-aarch64`), built natively on GitHub's arm64 runner
