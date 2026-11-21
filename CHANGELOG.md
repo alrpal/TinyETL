@@ -40,8 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - TinyETL switches to a UTF-8 character locale when the environment has none (common in containers), which some drivers need to convert text
 - Reading Parquet files with decimal, date, 8/16-bit integer, float32 or non-nanosecond timestamp columns replaced each value with the text `unsupported_type_row_N`. They now keep their values (types without a TinyETL equivalent are read as text)
 - Reading a PostgreSQL table that hadn't been analyzed yet logged `Copying 18446744073709551615 rows`. TinyETL now falls back to an exact row count
+- **Loading into PostgreSQL (and CrateDB) failed when a column mixed value types** ([#24](https://github.com/alrpal/TinyETL/issues/24)), with `invalid byte sequence for encoding "UTF8": 0x00` (CrateDB: `readerIndex: …, writerIndex: …`). Each value was sent with its own type; a column holding both `84` and `29.85` (stored as text) got integers and strings, and the prepared statement reused between batches then received binary integers where it expected text. Values are now converted to the column's type before they are written, for every target, and the PostgreSQL target sends every value, NULLs included, with the column's type. A value that can't be converted (`abc` in an integer column) fails with the column name and value
+- Loading decimals into a PostgreSQL `NUMERIC` column failed (`column … is of type numeric but expression is of type text`); decimals are now sent as numbers
+- Reading `NUMERIC`/`DECIMAL` columns from PostgreSQL, MySQL and SQL Server returned NULL for every value, as did PostgreSQL `JSON`/`JSONB` and SQL Server `INT`, `SMALLINT`, `TINYINT` and `REAL` columns. They now keep their values
+- Creating a decimal column on CrateDB failed (`NUMERIC storage is only supported if precision and scale are specified`). TinyETL detects CrateDB and creates `NUMERIC(38,10)` there
 
 ### Changed
+- **Schema inference: a column of whole and fractional numbers (`84`, `29.85`) is now a decimal column**; it used to become text. Blank values (`" "`) no longer decide a column's type, and are loaded as NULL in non-text columns (previously a single blank made the whole column text)
+- Values are converted to their column's inferred type before writing. A column inferred as text now receives `84` as the string `"84"` (JSON output quotes it), and text that parses as the column's type is converted (`"12"` in an integer column becomes `12`)
+- PostgreSQL decimal columns are created as `NUMERIC` (previously `DECIMAL`, the same type)
 - Upgraded `arrow`/`parquet` from 57 to 58 and `object_store` from 0.12 to 0.13
 - Upgraded `odbc-api` from 8.x to 30.x (required for the bundled unixODBC)
 - Upgraded `duckdb` from 1.4.1 to 1.4.5, which builds with Visual Studio 2026 (MSVC 14.5x). 1.4.1's bundled `fmt` library used `stdext::checked_array_iterator`, which that compiler removed, so Windows builds failed

@@ -68,7 +68,7 @@ See [`19_s3/README.md`](19_s3/README.md) for the setup.
 ### 20_csv_to_postgres
 **PostgreSQL Round Trip**
 
-Loads a CSV into PostgreSQL, checks the stored values with `psql`, then exports the table back to CSV. Needs the `tinyetl-postgres` container from `test_env` (`cd test_env && docker-compose up -d postgres`); skips if it isn't running.
+Loads a CSV into PostgreSQL, checks the stored values with `psql`, then exports the table back to CSV. It also exports a pre-seeded table with `DECIMAL` salaries and checks the values, and loads 2,500 generated rows whose column mixes whole numbers, decimals and blanks (issue #24), checking that the column is `numeric`, blanks are NULL, and the sum matches. Needs the `tinyetl-postgres` container from `test_env` (`cd test_env && docker-compose up -d postgres`); skips if it isn't running.
 
 ```bash
 tinyetl customers.csv "postgres://testuser:testpass@localhost:5432/testdb#customers" --truncate

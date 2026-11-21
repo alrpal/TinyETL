@@ -159,11 +159,17 @@ impl TransferEngine {
             }
 
             // Apply transformations
-            let processed_batch = if transformer.is_enabled() {
+            let mut processed_batch = if transformer.is_enabled() {
                 transformer.transform_batch(&batch)?
             } else {
                 batch
             };
+
+            // The schema came from a sample; give every value its column's type so targets
+            // that bind typed parameters (e.g. Postgres) see one type per column
+            for row in &mut processed_batch {
+                crate::schema::coerce_row(row, &final_schema);
+            }
 
             let written = target.write_batch(&processed_batch).await?;
             total_rows += written;

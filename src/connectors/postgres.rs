@@ -261,6 +261,9 @@ impl PostgresSource {
                 Some(i) => Ok(Value::Integer(i as i64)),
                 None => Ok(Value::Null),
             }
+        } else if let Ok(val) = row.try_get::<Option<Decimal>, _>(col_name) {
+            // NUMERIC / DECIMAL
+            Ok(val.map_or(Value::Null, Value::Decimal))
         } else if let Ok(val) = row.try_get::<Option<f64>, _>(col_name) {
             match val {
                 Some(f) => {
@@ -306,6 +309,9 @@ impl PostgresSource {
                 }
                 None => Ok(Value::Null),
             }
+        } else if let Ok(val) = row.try_get::<Option<serde_json::Value>, _>(col_name) {
+            // JSON / JSONB
+            Ok(val.map_or(Value::Null, Value::Json))
         } else {
             Ok(Value::Null)
         }
@@ -317,9 +323,26 @@ pub struct PostgresTarget {
     pool: Option<PgPool>,
     table_name: Option<String>,
     schema: Option<Schema>,
+    /// The server is CrateDB, which speaks the Postgres protocol
+    cratedb: bool,
 }
 
 impl PostgresTarget {
+    /// The column type for `data_type` in CREATE TABLE.
+    fn column_type(data_type: &DataType, cratedb: bool) -> &'static str {
+        match data_type {
+            DataType::String => "TEXT",
+            DataType::Integer => "BIGINT",
+            // CrateDB stores NUMERIC only with a precision and scale
+            DataType::Decimal if cratedb => "NUMERIC(38,10)",
+            DataType::Decimal => "NUMERIC",
+            DataType::Boolean => "BOOLEAN",
+            DataType::Date | DataType::DateTime => "TIMESTAMP WITH TIME ZONE",
+            DataType::Json => "JSONB", // PostgreSQL native JSON type
+            DataType::Null => "TEXT",  // Default to TEXT for null columns
+        }
+    }
+
     pub fn new(connection_string: &str) -> Result<Self> {
         // Parse table name from connection string
         let (conn_str, table_name) = if connection_string.contains('#') {
@@ -340,6 +363,7 @@ impl PostgresTarget {
             pool: None,
             table_name,
             schema: None,
+            cratedb: false,
         })
     }
 }
@@ -354,6 +378,12 @@ impl Target for PostgresTarget {
         let pool = PgPool::connect_with(options).await.map_err(|e| {
             TinyEtlError::Connection(format!("Failed to connect to PostgreSQL: {}", e))
         })?;
+
+        let version: String = sqlx::query_scalar("SELECT version()")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_default();
+        self.cratedb = version.starts_with("CrateDB");
 
         self.pool = Some(pool);
         Ok(())
@@ -384,15 +414,7 @@ impl Target for PostgresTarget {
             .columns
             .iter()
             .map(|col| {
-                let pg_type = match col.data_type {
-                    DataType::String => "TEXT",
-                    DataType::Integer => "BIGINT",
-                    DataType::Decimal => "DECIMAL",
-                    DataType::Boolean => "BOOLEAN",
-                    DataType::Date | DataType::DateTime => "TIMESTAMP WITH TIME ZONE",
-                    DataType::Json => "JSONB", // PostgreSQL native JSON type
-                    DataType::Null => "TEXT",  // Default to TEXT for null columns
-                };
+                let pg_type = Self::column_type(&col.data_type, self.cratedb);
 
                 let nullable = if col.nullable { "" } else { " NOT NULL" };
                 format!("\"{}\" {}{}", col.name, pg_type, nullable)
@@ -470,28 +492,42 @@ impl Target for PostgresTarget {
             // Build query and bind all values
             let mut query = sqlx::query(sqlx::AssertSqlSafe(insert_sql.as_str()));
 
-            for row in chunk {
+            // Every value is bound with its column's type, NULLs included. sqlx caches the
+            // prepared statement by its SQL text, so if a parameter's type changed between
+            // chunks, a binary integer could be sent where the cached statement expects text
+            // (Postgres: "invalid byte sequence for encoding UTF8: 0x00").
+            for (offset, row) in chunk.iter().enumerate() {
                 for col in &schema.columns {
                     let value = row.get(&col.name).unwrap_or(&Value::Null);
-                    query = match value {
-                        Value::Integer(i) => query.bind(i),
-                        Value::Decimal(d) => {
-                            // PostgreSQL is stricter - strip ALL null bytes
-                            let s: String = d.to_string().chars().filter(|&c| c != '\0').collect();
-                            query.bind(s)
+                    query = match (&col.data_type, value) {
+                        (DataType::Integer, Value::Null) => query.bind(None::<i64>),
+                        (DataType::Boolean, Value::Null) => query.bind(None::<bool>),
+                        (DataType::Date | DataType::DateTime, Value::Null) => {
+                            query.bind(None::<chrono::DateTime<chrono::Utc>>)
                         }
-                        Value::String(s) => {
-                            // PostgreSQL doesn't allow null bytes - filter them out completely
-                            let cleaned: String = s.chars().filter(|&c| c != '\0').collect();
-                            query.bind(cleaned)
+                        (DataType::Decimal, Value::Null) => query.bind(None::<Decimal>),
+                        (DataType::Json, Value::Null) => query.bind(None::<serde_json::Value>),
+                        (_, Value::Null) => query.bind(None::<String>),
+                        (DataType::Integer, Value::Integer(i)) => query.bind(*i),
+                        (DataType::Decimal, Value::Decimal(d)) => query.bind(*d),
+                        (DataType::Boolean, Value::Boolean(b)) => query.bind(*b),
+                        (DataType::Date | DataType::DateTime, Value::Date(d)) => query.bind(*d),
+                        (DataType::Json, Value::Json(j)) => query.bind(j.clone()),
+                        (DataType::String | DataType::Null, Value::String(s)) => {
+                            // PostgreSQL text can't hold NUL bytes
+                            query.bind(s.replace('\0', ""))
                         }
-                        Value::Boolean(b) => query.bind(b),
-                        Value::Date(d) => query.bind(d),
-                        Value::Json(j) => {
-                            // PostgreSQL accepts JSONB directly
-                            query.bind(serde_json::to_value(j).unwrap_or(serde_json::Value::Null))
+                        (data_type, value) => {
+                            return Err(TinyEtlError::DataValidation(format!(
+                                "Column '{}' is {} but row {} of this batch has the value {:?} \
+                                 (column types are inferred from the first 1000 rows; use \
+                                 --schema-file to set them)",
+                                col.name,
+                                data_type,
+                                total_written + offset + 1,
+                                value
+                            )));
                         }
-                        Value::Null => query.bind(None::<String>),
                     };
                 }
             }
@@ -779,6 +815,24 @@ mod tests {
         assert_eq!(schema.columns[3].data_type, DataType::Boolean);
         assert_eq!(schema.columns[4].data_type, DataType::DateTime);
         assert_eq!(schema.columns[5].data_type, DataType::Date);
+    }
+
+    #[test]
+    fn test_postgres_column_types() {
+        use crate::schema::DataType;
+        assert_eq!(
+            PostgresTarget::column_type(&DataType::Decimal, false),
+            "NUMERIC"
+        );
+        assert_eq!(
+            PostgresTarget::column_type(&DataType::Decimal, true),
+            "NUMERIC(38,10)"
+        );
+        assert_eq!(
+            PostgresTarget::column_type(&DataType::Integer, true),
+            "BIGINT"
+        );
+        assert_eq!(PostgresTarget::column_type(&DataType::Json, false), "JSONB");
     }
 
     #[test]

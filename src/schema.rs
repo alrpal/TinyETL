@@ -451,6 +451,95 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Whether this value can be stored as-is in a column of type `data_type`.
+    pub fn fits(&self, data_type: &DataType) -> bool {
+        matches!(
+            (self, data_type),
+            (Value::Null, _)
+                | (Value::String(_), DataType::String | DataType::Null)
+                | (Value::Integer(_), DataType::Integer)
+                | (Value::Decimal(_), DataType::Decimal)
+                | (Value::Boolean(_), DataType::Boolean)
+                | (Value::Date(_), DataType::Date | DataType::DateTime)
+                | (Value::Json(_), DataType::Json)
+        )
+    }
+
+    /// Convert this value to `data_type` without losing information, so every value in a
+    /// column has the column's type. Schemas are inferred from a sample, so later rows can
+    /// disagree (an integer in a decimal column, a number in a text column).
+    ///
+    /// - Anything converts to text.
+    /// - Text converts when it parses as the column's type; blank text in a non-text
+    ///   column becomes NULL.
+    /// - Integers widen to decimals; decimals with no fractional part narrow to integers.
+    /// - Numbers and booleans become JSON scalars.
+    ///
+    /// A value that can't convert is returned unchanged; targets that need exact types
+    /// report it.
+    pub fn coerce_to(self, data_type: &DataType) -> Value {
+        if self.fits(data_type) {
+            return self;
+        }
+        match (self, data_type) {
+            (value, DataType::String | DataType::Null) => {
+                Value::String(value.to_string_for_arrow().unwrap_or_default())
+            }
+            (Value::String(s), _) if s.trim().is_empty() => Value::Null,
+            (Value::String(s), DataType::Integer) => match s.trim().parse::<i64>() {
+                Ok(i) => Value::Integer(i),
+                Err(_) => Value::String(s),
+            },
+            (Value::String(s), DataType::Decimal) => match s.trim().parse::<Decimal>() {
+                Ok(d) => Value::Decimal(d),
+                Err(_) => Value::String(s),
+            },
+            (Value::String(s), DataType::Boolean) => match s.trim().to_ascii_lowercase().as_str() {
+                "true" => Value::Boolean(true),
+                "false" => Value::Boolean(false),
+                _ => Value::String(s),
+            },
+            (Value::String(s), DataType::Date | DataType::DateTime) => {
+                match crate::date_parser::DateParser::try_parse(&s) {
+                    Some(date @ Value::Date(_)) => date,
+                    _ => Value::String(s),
+                }
+            }
+            (Value::String(s), DataType::Json) => match serde_json::from_str(&s) {
+                Ok(json) => Value::Json(json),
+                Err(_) => Value::String(s),
+            },
+            (Value::Integer(i), DataType::Decimal) => Value::Decimal(Decimal::from(i)),
+            (Value::Decimal(d), DataType::Integer) if d.fract().is_zero() => {
+                match i64::try_from(d) {
+                    Ok(i) => Value::Integer(i),
+                    Err(_) => Value::Decimal(d),
+                }
+            }
+            (Value::Integer(i), DataType::Json) => Value::Json(i.into()),
+            (Value::Decimal(d), DataType::Json) => {
+                match f64::try_from(d).ok().and_then(serde_json::Number::from_f64) {
+                    Some(n) => Value::Json(n.into()),
+                    None => Value::Decimal(d),
+                }
+            }
+            (Value::Boolean(b), DataType::Json) => Value::Json(b.into()),
+            (value, _) => value,
+        }
+    }
+}
+
+/// Convert each value in `row` to its column's type with [`Value::coerce_to`].
+pub fn coerce_row(row: &mut Row, schema: &Schema) {
+    for column in &schema.columns {
+        if let Some(value) = row.get_mut(&column.name) {
+            if !value.fits(&column.data_type) {
+                let owned = std::mem::replace(value, Value::Null);
+                *value = owned.coerce_to(&column.data_type);
+            }
+        }
+    }
 }
 
 pub type Row = HashMap<String, Value>;
@@ -498,6 +587,9 @@ impl SchemaInferer {
                 let types: Vec<DataType> = rows
                     .iter()
                     .map(|row| match row.get(col_name) {
+                        // Blank text says nothing about the column's type; it becomes NULL
+                        // in a non-text column (see Value::coerce_to)
+                        Some(Value::String(s)) if s.trim().is_empty() => DataType::Null,
                         Some(value) => Self::infer_type(value),
                         None => DataType::Null,
                     })
@@ -548,6 +640,12 @@ impl SchemaInferer {
             .all(|t| std::mem::discriminant(*t) == std::mem::discriminant(first_type))
         {
             first_type.clone()
+        } else if non_null_types
+            .iter()
+            .all(|t| matches!(t, DataType::Integer | DataType::Decimal))
+        {
+            // Whole and fractional numbers in one column (e.g. 84 and 29.85)
+            DataType::Decimal
         } else {
             // Mixed types default to String
             DataType::String
@@ -738,6 +836,126 @@ mod tests {
         let (resolved_type, nullable) = SchemaInferer::resolve_column_type(&types);
         assert_eq!(resolved_type, DataType::String);
         assert!(nullable);
+
+        // Whole and fractional numbers make a decimal column
+        let types = vec![DataType::Decimal, DataType::Integer, DataType::Null];
+        let (resolved_type, _) = SchemaInferer::resolve_column_type(&types);
+        assert_eq!(resolved_type, DataType::Decimal);
+
+        // Numbers mixed with anything else stay text
+        let types = vec![DataType::Integer, DataType::Boolean];
+        let (resolved_type, _) = SchemaInferer::resolve_column_type(&types);
+        assert_eq!(resolved_type, DataType::String);
+    }
+
+    #[test]
+    fn test_coerce_to_column_type() {
+        use std::str::FromStr;
+        let dec = |s: &str| Value::Decimal(Decimal::from_str(s).unwrap());
+
+        // Widen, narrow, and leave what doesn't convert
+        assert_eq!(Value::Integer(84).coerce_to(&DataType::Decimal), dec("84"));
+        assert_eq!(
+            dec("12.00").coerce_to(&DataType::Integer),
+            Value::Integer(12)
+        );
+        assert_eq!(dec("12.5").coerce_to(&DataType::Integer), dec("12.5"));
+
+        // Anything becomes text
+        assert_eq!(
+            dec("29.85").coerce_to(&DataType::String),
+            Value::String("29.85".into())
+        );
+        assert_eq!(
+            Value::Boolean(true).coerce_to(&DataType::String),
+            Value::String("true".into())
+        );
+
+        // Text parses into the column type; blank text is NULL
+        assert_eq!(
+            Value::String(" 1889.5 ".into()).coerce_to(&DataType::Decimal),
+            dec("1889.5")
+        );
+        assert_eq!(
+            Value::String(" ".into()).coerce_to(&DataType::Decimal),
+            Value::Null
+        );
+        assert_eq!(
+            Value::String("TRUE".into()).coerce_to(&DataType::Boolean),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            Value::String("n/a".into()).coerce_to(&DataType::Integer),
+            Value::String("n/a".into())
+        );
+        assert!(matches!(
+            Value::String("2024-01-15".into()).coerce_to(&DataType::Date),
+            Value::Date(_)
+        ));
+        assert_eq!(
+            Value::String(r#"{"a":1}"#.into()).coerce_to(&DataType::Json),
+            Value::Json(serde_json::json!({"a": 1}))
+        );
+        assert_eq!(
+            Value::Integer(5).coerce_to(&DataType::Json),
+            Value::Json(serde_json::json!(5))
+        );
+
+        // NULL fits everywhere
+        assert_eq!(Value::Null.coerce_to(&DataType::Integer), Value::Null);
+    }
+
+    #[test]
+    fn test_blank_text_does_not_decide_column_type() {
+        let rows: Vec<Row> = ["29.85", " ", "84"]
+            .iter()
+            .map(|v| {
+                let value = match *v {
+                    " " => Value::String(" ".into()),
+                    "84" => Value::Integer(84),
+                    _ => Value::Decimal(v.parse().unwrap()),
+                };
+                HashMap::from([("total".to_string(), value)])
+            })
+            .collect();
+        let schema = SchemaInferer::infer_from_rows(&rows).unwrap();
+        assert_eq!(schema.columns[0].data_type, DataType::Decimal);
+
+        // A column of nothing but blanks stays text
+        let rows = vec![HashMap::from([(
+            "x".to_string(),
+            Value::String(" ".into()),
+        )])];
+        let schema = SchemaInferer::infer_from_rows(&rows).unwrap();
+        assert_eq!(schema.columns[0].data_type, DataType::String);
+    }
+
+    #[test]
+    fn test_coerce_row() {
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "charge".into(),
+                    data_type: DataType::Decimal,
+                    nullable: true,
+                },
+                Column {
+                    name: "note".into(),
+                    data_type: DataType::String,
+                    nullable: true,
+                },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        let mut row: Row = HashMap::new();
+        row.insert("charge".into(), Value::Integer(20));
+        row.insert("note".into(), Value::Integer(7));
+        row.insert("extra".into(), Value::Integer(1)); // not in the schema: untouched
+        coerce_row(&mut row, &schema);
+        assert_eq!(row["charge"], Value::Decimal(Decimal::from(20)));
+        assert_eq!(row["note"], Value::String("7".into()));
+        assert_eq!(row["extra"], Value::Integer(1));
     }
 
     #[test]

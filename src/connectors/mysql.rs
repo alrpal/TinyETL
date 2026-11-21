@@ -126,6 +126,9 @@ impl MysqlSource {
                 Some(u) => Ok(Value::Integer(u as i64)),
                 None => Ok(Value::Null),
             }
+        } else if let Ok(val) = row.try_get::<Option<Decimal>, _>(col_name) {
+            // DECIMAL / NUMERIC
+            Ok(val.map_or(Value::Null, Value::Decimal))
         } else if let Ok(val) = row.try_get::<Option<f64>, _>(col_name) {
             match val {
                 Some(f) => match Decimal::try_from(f) {

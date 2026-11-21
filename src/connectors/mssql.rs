@@ -272,8 +272,24 @@ impl Source for MssqlSource {
                             // Try different types
                             if let Ok(Some(v)) = row.try_get::<i64, usize>(i) {
                                 Value::Integer(v)
+                            } else if let Ok(Some(v)) = row.try_get::<i32, usize>(i) {
+                                Value::Integer(v.into())
+                            } else if let Ok(Some(v)) = row.try_get::<i16, usize>(i) {
+                                Value::Integer(v.into())
+                            } else if let Ok(Some(v)) = row.try_get::<u8, usize>(i) {
+                                Value::Integer(v.into())
+                            } else if let Ok(Some(v)) = row.try_get::<Decimal, usize>(i) {
+                                // DECIMAL / NUMERIC / MONEY
+                                Value::Decimal(v)
                             } else if let Ok(Some(v)) = row.try_get::<f64, usize>(i) {
-                                Value::Decimal(Decimal::from_f64_retain(v).unwrap_or_default())
+                                // Shortest decimal that round-trips (7.1234, not 7.12340000000000017…)
+                                Decimal::try_from(v)
+                                    .map(Value::Decimal)
+                                    .unwrap_or_else(|_| Value::String(v.to_string()))
+                            } else if let Ok(Some(v)) = row.try_get::<f32, usize>(i) {
+                                Decimal::try_from(v)
+                                    .map(Value::Decimal)
+                                    .unwrap_or_else(|_| Value::String(v.to_string()))
                             } else if let Ok(Some(v)) = row.try_get::<bool, usize>(i) {
                                 Value::Boolean(v)
                             } else if let Ok(Some(v)) = row.try_get::<NaiveDateTime, usize>(i) {

@@ -88,6 +88,49 @@ if [ "$EXPORTED_EMPLOYEES" != "$EMPLOYEE_ROWS" ]; then
 fi
 echo "✅ PASS: exported $EXPORTED_EMPLOYEES employees to $EMPLOYEES_OUTPUT"
 
+# The DECIMAL salaries must come out as numbers, not empty values
+EXPECTED_SALARIES=$(psql_query "SELECT string_agg(salary::text, ',' ORDER BY id) FROM employees")
+EXPORTED_SALARIES=$(python3 -I -c 'import csv, sys
+rows = sorted(csv.DictReader(open(sys.argv[1])), key=lambda r: int(r["id"]))
+print(",".join(r["salary"] for r in rows))' "$EMPLOYEES_OUTPUT")
+if [ "$EXPORTED_SALARIES" != "$EXPECTED_SALARIES" ]; then
+    echo "❌ FAIL: exported salaries differ from the table"
+    echo "  expected: $EXPECTED_SALARIES"
+    echo "  got:      $EXPORTED_SALARIES"
+    exit 1
+fi
+echo "✅ PASS: DECIMAL salaries exported with their values"
+
+# 5. A column of whole and fractional numbers with some blanks, over several insert
+#    statements (issue #24: this failed with 'invalid byte sequence for encoding "UTF8": 0x00')
+echo ""
+echo "Step 4: Loading a column that mixes 84, 29.85 and blanks..."
+MIXED=$(mktemp -d)
+trap 'rm -rf "$MIXED"' EXIT
+awk 'BEGIN {
+    print "id,charge,note";
+    for (i = 1; i <= 2500; i++) {
+        if (i % 97 == 0) charge = " ";               # blank
+        else if (i % 3 == 0) charge = i % 100;       # whole number
+        else charge = sprintf("%d.%02d", i % 100, i % 89);
+        printf "%d,%s,row %d\n", i, charge, i
+    }
+}' > "$MIXED/mixed.csv"
+$TINYETL "$MIXED/mixed.csv" "$PG_URL#mixed_numbers" --truncate
+
+EXPECTED=$(python3 -I -c 'import csv, sys
+from decimal import Decimal
+rows = list(csv.DictReader(open(sys.argv[1])))
+vals = [Decimal(r["charge"]) for r in rows if r["charge"].strip()]
+print(f"{len(rows)}|{len(vals)}|{sum(vals)}")' "$MIXED/mixed.csv")
+STORED=$(psql_query "SELECT count(*) || '|' || count(charge) || '|' || sum(charge) FROM mixed_numbers")
+TYPE=$(psql_query "SELECT data_type FROM information_schema.columns WHERE table_name = 'mixed_numbers' AND column_name = 'charge'")
+if [ "$STORED" != "$EXPECTED" ] || [ "$TYPE" != "numeric" ]; then
+    echo "❌ FAIL: expected rows|non-blank|sum $EXPECTED in a numeric column, got $STORED ($TYPE)"
+    exit 1
+fi
+echo "✅ PASS: rows|non-blank|sum = $STORED, stored as $TYPE (blanks are NULL)"
+
 echo ""
 echo "Sample of $OUTPUT:"
 head -4 "$OUTPUT"

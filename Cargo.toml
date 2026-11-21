@@ -21,7 +21,7 @@ clap = { version = "4.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
 # No default features: TinyETL builds queries at runtime, so it needs neither the query macros (whose
 # proc-macro would need a system OpenSSL to build) nor `any`/`migrate`. `json` decodes MySQL JSON columns.
-sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "tls-native-tls", "sqlite", "postgres", "mysql", "chrono", "json"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "tls-native-tls", "sqlite", "postgres", "mysql", "chrono", "json", "rust_decimal"] }
 csv = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -42,7 +42,7 @@ reqwest = { version = "0.11", features = ["json", "native-tls"] }
 tempfile = "3.8"
 apache-avro = "0.16"
 rust_decimal = { version = "1.35", features = ["serde", "db-postgres", "db-tokio-postgres"] }
-tiberius = { version = "0.12", features = ["sql-browser-async-std", "chrono"] }
+tiberius = { version = "0.12", features = ["sql-browser-async-std", "chrono", "rust_decimal"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures-util = "0.3"
 uuid = { version = "1.0", features = ["v4"] }

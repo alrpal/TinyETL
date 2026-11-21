@@ -657,6 +657,8 @@ tinyetl data.csv output.db --transform "total=row.qty * row.price" --preview 5
 Create a YAML file defining your expected schema. Here's the complete format:
 
 > **📝 Note on Schema Inference:** When TinyETL automatically infers schema from your data, all columns are marked as `nullable: true` by default. This is a safety measure for ETL operations—sample data may not represent all possible values in your dataset. If you need `NOT NULL` constraints or other strict validation, you must provide an explicit schema file.
+>
+> **How types are inferred:** column types come from the first 1,000 rows. A column whose values all have one type gets that type; whole and fractional numbers together (`84`, `29.85`) make a decimal column; any other mix makes a text column. Blank values (empty or whitespace only) don't count. While copying, every value is converted to its column's type: numbers in a text column become text, text that parses in a numeric, boolean, date or JSON column is converted, and blank values in non-text columns become NULL. A later value that can't be converted (`abc` in an integer column) is written unchanged where the target allows it (files, SQLite) and fails with the column name on typed databases such as PostgreSQL. Use a schema file to fix the types up front.
 
 **schema.yaml:**
 ```yaml
