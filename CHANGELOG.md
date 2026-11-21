@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `odbc-api` from 8.x to 30.x (required for the bundled unixODBC)
 - Upgraded `duckdb` from 1.4.1 to 1.4.5, which builds with Visual Studio 2026 (MSVC 14.5x). 1.4.1's bundled `fmt` library used `stdext::checked_array_iterator`, which that compiler removed, so Windows builds failed
 - **Building from source now requires Rust 1.94 or later** (`rust-version` was previously listed as 1.70, which the dependencies had already outgrown). TinyETL builds on current stable Rust again: `sqlx` 0.6 and `mlua` 0.8 no longer compiled on Rust 1.100, so they are upgraded to `sqlx` 0.9 and `mlua` 0.12
+- Building from source on Linux no longer needs `libssl-dev`: sqlx's unused query macros are disabled, which built a second, non-vendored OpenSSL for the build host
 - **No more prebuilt binary for Intel Macs.** Homebrew no longer supports Intel Macs, so the release build can't get the libraries it needs for them. Intel Mac users can still build from source with `cargo install tinyetl`
 - Release workflow checks that binaries link no third-party shared libraries and run in clean `ubuntu:24.04` and `debian:12-slim` containers
 
