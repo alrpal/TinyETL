@@ -1,4 +1,5 @@
 mod arrow_values;
+mod output_file;
 pub mod avro;
 pub mod csv;
 pub mod duckdb;
