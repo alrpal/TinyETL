@@ -11,6 +11,38 @@ use crate::{
     Result, TinyEtlError,
 };
 
+/// Directories where Homebrew keeps `odbcinst.ini` (Apple silicon, then Intel).
+const HOMEBREW_ODBC_DIRS: [&str; 2] = ["/opt/homebrew/etc", "/usr/local/etc"];
+
+/// Point the bundled unixODBC driver manager at Homebrew's driver registrations on macOS.
+///
+/// TinyETL compiles unixODBC into the binary, and that copy reads `odbcinst.ini` / `odbc.ini`
+/// from `/etc`. Homebrew-installed drivers (e.g. `msodbcsql18`) register themselves in
+/// `$(brew --prefix)/etc` instead, so without this, `Driver={...}` names would not resolve.
+/// If `ODBCSYSINI` is already set or `/etc/odbcinst.ini` exists, nothing is changed.
+///
+/// Must be called before any threads are started, because it modifies the process environment.
+pub fn configure_driver_manager() {
+    if cfg!(target_os = "macos") {
+        let already_set = std::env::var_os("ODBCSYSINI").is_some();
+        if let Some(dir) =
+            homebrew_odbc_sysini(already_set, |path| std::path::Path::new(path).exists())
+        {
+            std::env::set_var("ODBCSYSINI", dir);
+        }
+    }
+}
+
+/// Decide which directory to use as `ODBCSYSINI`, if any. `exists` checks a file path.
+fn homebrew_odbc_sysini(already_set: bool, exists: impl Fn(&str) -> bool) -> Option<&'static str> {
+    if already_set || exists("/etc/odbcinst.ini") {
+        return None;
+    }
+    HOMEBREW_ODBC_DIRS
+        .into_iter()
+        .find(|dir| exists(&format!("{}/odbcinst.ini", dir)))
+}
+
 /// Wrapper that keeps Environment and Connection together with proper lifetimes
 struct OdbcConnection {
     _env: Arc<Environment>,
@@ -120,7 +152,8 @@ impl OdbcSource {
             | OdbcDataType::Varchar { .. }
             | OdbcDataType::WChar { .. }
             | OdbcDataType::WVarchar { .. }
-            | OdbcDataType::LongVarchar { .. } => DataType::String,
+            | OdbcDataType::LongVarchar { .. }
+            | OdbcDataType::WLongVarchar { .. } => DataType::String,
             OdbcDataType::Decimal { .. } | OdbcDataType::Numeric { .. } => DataType::Decimal,
             OdbcDataType::SmallInt
             | OdbcDataType::Integer
@@ -164,7 +197,7 @@ impl Source for OdbcSource {
         let query = format!("SELECT * FROM [{}] WHERE 1=0", self.table_name);
 
         let cursor = conn
-            .execute(&query, ())
+            .execute(&query, (), None)
             .map_err(|e| {
                 TinyEtlError::DataTransfer(format!("Failed to query table metadata: {}", e))
             })?
@@ -256,7 +289,7 @@ impl Source for OdbcSource {
         };
 
         let mut cursor = match conn
-            .execute(&query, ())
+            .execute(&query, (), None)
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))?
         {
             Some(c) => c,
@@ -432,7 +465,7 @@ impl Target for OdbcTarget {
         let conn = conn_ref.connection();
 
         // Set autocommit off and begin transaction
-        conn.execute("SET IMPLICIT_TRANSACTIONS ON", ())
+        conn.execute("SET IMPLICIT_TRANSACTIONS ON", (), None)
             .map_err(|e| {
                 TinyEtlError::Connection(format!("Failed to set implicit transactions: {}", e))
             })?;
@@ -455,7 +488,7 @@ impl Target for OdbcTarget {
 
         // Check if table already exists
         let check_query = format!("SELECT 1 FROM [{}] WHERE 1=0", table_name);
-        let table_exists = conn.execute(&check_query, ()).is_ok();
+        let table_exists = conn.execute(&check_query, (), None).is_ok();
 
         if !table_exists {
             // Build CREATE TABLE statement with proper identifier quoting for SQL Server
@@ -476,7 +509,7 @@ impl Target for OdbcTarget {
             create_sql.push(')');
 
             // Execute CREATE TABLE
-            conn.execute(&create_sql, ()).map_err(|e| {
+            conn.execute(&create_sql, (), None).map_err(|e| {
                 TinyEtlError::DataTransfer(format!("Failed to create table: {}", e))
             })?;
         }
@@ -631,7 +664,7 @@ impl Target for OdbcTarget {
 
         // Try to query the table - if it fails, it doesn't exist
         let query = format!("SELECT 1 FROM [{}] WHERE 1=0", table_name);
-        let result = conn.execute(&query, ());
+        let result = conn.execute(&query, (), None);
 
         match result {
             Ok(_) => Ok(true),
@@ -652,7 +685,7 @@ impl Target for OdbcTarget {
 
         // Use DELETE instead of TRUNCATE for better compatibility
         let truncate_sql = format!("DELETE FROM [{}]", table_name);
-        conn.execute(&truncate_sql, ())
+        conn.execute(&truncate_sql, (), None)
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
 
         Ok(())
@@ -660,5 +693,40 @@ impl Target for OdbcTarget {
 
     fn supports_append(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_homebrew_odbc_sysini() {
+        let only = |present: &'static [&'static str]| move |p: &str| present.contains(&p);
+
+        // Respect an explicit ODBCSYSINI
+        assert_eq!(
+            homebrew_odbc_sysini(true, only(&["/opt/homebrew/etc/odbcinst.ini"])),
+            None
+        );
+        // A system-wide /etc/odbcinst.ini takes precedence
+        assert_eq!(
+            homebrew_odbc_sysini(
+                false,
+                only(&["/etc/odbcinst.ini", "/opt/homebrew/etc/odbcinst.ini"])
+            ),
+            None
+        );
+        // Apple silicon Homebrew, then Intel Homebrew
+        assert_eq!(
+            homebrew_odbc_sysini(false, only(&["/opt/homebrew/etc/odbcinst.ini"])),
+            Some("/opt/homebrew/etc")
+        );
+        assert_eq!(
+            homebrew_odbc_sysini(false, only(&["/usr/local/etc/odbcinst.ini"])),
+            Some("/usr/local/etc")
+        );
+        // Nothing registered anywhere
+        assert_eq!(homebrew_odbc_sysini(false, only(&[])), None);
     }
 }

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Linux and macOS binaries no longer need unixODBC installed** ([#25](https://github.com/alrpal/TinyETL/issues/25)). The binaries failed to start on machines without `libodbc` (`error while loading shared libraries: libodbc.so.2`). The unixODBC driver manager and GNU libltdl are now compiled into the binary, so it has no runtime dependencies again
+  - On macOS, drivers registered by Homebrew are still found automatically. Set `ODBCSYSINI` to use a different `odbcinst.ini` location
+
+### Changed
+- Upgraded `odbc-api` from 8.x to 30.x (required for the bundled unixODBC)
+- Release workflow checks that binaries link no third-party shared libraries and run in clean `ubuntu:24.04` and `debian:12-slim` containers
+
+### Licensing
+- The Linux and macOS binaries include unixODBC 2.3.14 and GNU libltdl under the GNU LGPL. License texts ship with each download; see `THIRD_PARTY_LICENSES.md`. `LICENSE` now states that its additional commercial terms do not apply to these bundled libraries
+
 ## [0.10.0] - 2024-12-03
 
 ### Added

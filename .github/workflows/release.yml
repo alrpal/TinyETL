@@ -59,39 +59,34 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        sudo apt-get install -y pkg-config libssl-dev unixodbc-dev
+        # libltdl-dev provides the static libltdl.a linked into the binary with the bundled unixODBC.
+        # unixodbc-dev must NOT be installed: its libodbc would be linked instead of the bundled copy.
+        sudo apt-get install -y pkg-config libssl-dev libltdl-dev
+        # rustc only finds static libraries on explicit search paths; point odbc-sys at libltdl.a
+        echo "ODBC_SYS_STATIC_PATH=/usr/lib/$(gcc -print-multiarch)" >> $GITHUB_ENV
 
     - name: Install system dependencies (macOS)
       if: matrix.os == 'macos-latest'
       run: |
+        # libtool provides the static libltdl.a linked into the binary with the bundled unixODBC.
+        # The -L flag makes the linker use the libltdl.a for the target architecture.
         if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
           echo "⚙️ Installing x86 Homebrew (Rosetta) for Intel build..."
           arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          arch -x86_64 /usr/local/bin/brew install openssl@3 unixodbc
-          echo "RUSTFLAGS=-L /usr/local/opt/unixodbc/lib" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=/usr/local/opt/unixodbc/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=/usr/local/opt/unixodbc/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
+          arch -x86_64 /usr/local/bin/brew install openssl@3 libtool
+          echo "RUSTFLAGS=-L /usr/local/opt/libtool/lib" >> $GITHUB_ENV
         else
           echo "⚙️ Installing ARM Homebrew dependencies..."
           brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
-          brew list unixodbc >/dev/null 2>&1 || brew install unixodbc
-          echo "RUSTFLAGS=-L /opt/homebrew/opt/unixodbc/lib" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=/opt/homebrew/opt/unixodbc/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=/opt/homebrew/opt/unixodbc/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
+          brew list libtool >/dev/null 2>&1 || brew install libtool
+          echo "RUSTFLAGS=-L /opt/homebrew/opt/libtool/lib" >> $GITHUB_ENV
         fi
-
 
     - name: Install system dependencies (Windows)
       if: matrix.os == 'windows-latest'
       run: |
         # Windows has native ODBC support, no additional installation needed
         echo "Using Windows native ODBC driver manager"
-
-    - name: Set ODBC library path (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        echo "LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LIBRARY_PATH" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
     - name: Build release binary
       id: build
@@ -105,18 +100,62 @@ jobs:
         echo "::notice::This platform will be skipped in the release"
         exit 1
 
+    # The binary must run on a machine with nothing installed (no libodbc, libltdl, etc.)
+    - name: Verify no third-party shared libraries (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        BIN=target/${{ matrix.target }}/release/tinyetl
+        ldd "$BIN"
+        if ldd "$BIN" | grep -E "libodbc|libltdl|not found"; then
+          echo "::error::Binary links a library that is not available on a clean system"
+          exit 1
+        fi
+        # Run it in a bare container, as a user downloading the release would
+        docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/dist:ro" ubuntu:24.04 /dist/tinyetl --version
+        docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/dist:ro" debian:12-slim /dist/tinyetl --version
+
+    - name: Verify no third-party shared libraries (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        BIN=target/${{ matrix.target }}/release/tinyetl
+        otool -L "$BIN"
+        if otool -L "$BIN" | tail -n +2 | grep -v -E "^\s+(/usr/lib/|/System/Library/)"; then
+          echo "::error::Binary links a library outside /usr/lib and /System/Library"
+          exit 1
+        fi
+
     - name: Prepare binary (Unix)
       if: matrix.os != 'windows-latest'
       run: |
         mkdir -p dist
         cp target/${{ matrix.target }}/release/tinyetl dist/
         chmod +x dist/tinyetl
+        # The binary bundles unixODBC (LGPL-2.1-or-later); ship the license texts with it
+        cp LICENSE THIRD_PARTY_LICENSES.md dist/
+        cp -r licenses dist/
+        # Record the exact versions of the statically linked LGPL libraries
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          LTDL="libltdl-dev $(dpkg-query -W -f='${Version}' libltdl-dev) (Ubuntu package)"
+        elif [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+          LTDL="Homebrew $(/usr/local/bin/brew list --versions libtool)"
+        else
+          LTDL="Homebrew $(brew list --versions libtool)"
+        fi
+        UNIX_ODBC=$(grep -A1 '^name = "unix-odbc"' Cargo.lock | grep version | cut -d'"' -f2)
+        {
+          echo "TinyETL ${{ github.ref_name }} (${{ matrix.target }}), commit ${{ github.sha }}"
+          echo "unixODBC: 2.3.14 via the unix-odbc crate ${UNIX_ODBC} (https://crates.io/crates/unix-odbc/${UNIX_ODBC})"
+          echo "GNU libltdl: ${LTDL}"
+        } > dist/licenses/BUILD-INFO.txt
+        cat dist/licenses/BUILD-INFO.txt
 
     - name: Prepare binary (Windows)
       if: matrix.os == 'windows-latest'
       run: |
         mkdir dist
         cp target/${{ matrix.target }}/release/tinyetl.exe dist/
+        cp LICENSE dist/
+        cp THIRD_PARTY_LICENSES.md dist/
 
     - name: Create archive (Unix)
       if: matrix.os != 'windows-latest'
@@ -188,5 +227,9 @@ jobs:
         draft: false
         prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
         generate_release_notes: true
+        body: |
+          ### License notice
+
+          The Linux and macOS binaries include the [unixODBC](https://www.unixodbc.org/) driver manager (version 2.3.14) and GNU libltdl, statically linked and licensed under the **GNU LGPL v2.1 or later**. TinyETL itself is licensed under Apache 2.0; the LGPL applies only to those bundled libraries, and the additional commercial terms in `LICENSE` do not apply to them. License texts are included in each download (`THIRD_PARTY_LICENSES.md` and `licenses/`). See [THIRD_PARTY_LICENSES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_LICENSES.md) for source and relinking information.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

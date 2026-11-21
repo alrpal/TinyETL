@@ -11,8 +11,17 @@ use tinyetl::{
     yaml_config::YamlConfig,
 };
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Adjusts the process environment, so it must run before the async runtime starts threads.
+    tinyetl::connectors::odbc::configure_driver_manager();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // handle generate-default-config subcommand

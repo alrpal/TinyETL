@@ -44,6 +44,8 @@ Visit the [releases page](https://github.com/alrpal/tinyetl/releases/latest) and
 - macOS Intel, macOS Apple Silicon  
 - Windows x64, Windows ARM64
 
+Each download is a single self-contained binary with nothing else to install. The Linux and macOS binaries include the unixODBC driver manager (LGPL-2.1-or-later); see [License](#license).
+
 <!--
 **Linux x64:**
 ```bash
@@ -94,6 +96,13 @@ Expand-Archive -Path "tinyetl.zip" -DestinationPath "."
 ```bash
 cargo install tinyetl
 ```
+
+Building from source needs a C compiler and the static GNU libltdl library, which is linked into the binary together with the bundled unixODBC:
+- Debian/Ubuntu: `sudo apt install build-essential pkg-config libssl-dev libltdl-dev`, then build with the library directory set:
+  ```bash
+  ODBC_SYS_STATIC_PATH=/usr/lib/$(gcc -print-multiarch) cargo install tinyetl
+  ```
+- macOS: `xcode-select --install` and `brew install libtool`
 
 **Verify installation**:
 ```bash
@@ -378,9 +387,12 @@ tinyetl data.csv "odbc://Driver={IBM DB2 ODBC DRIVER};Database=sample;Hostname=l
 ```
 
 **ODBC Driver Requirements:**
-- **Windows**: Drivers typically pre-installed or available via vendor installers
-- **macOS**: Install via Homebrew 
-- **Linux**: Install via package manager 
+
+TinyETL includes the ODBC driver manager, so you only need the driver for your database. You do not need to install unixODBC.
+- **Windows**: Drivers are typically pre-installed or available via vendor installers. TinyETL uses the driver manager built into Windows
+- **macOS**: Install drivers via Homebrew (e.g. `brew install microsoft/mssql-release/msodbcsql18`). TinyETL finds drivers registered in Homebrew's `odbcinst.ini` automatically
+- **Linux**: Install drivers via your package manager. They are registered in `/etc/odbcinst.ini`
+- Drivers and DSNs are read from `odbcinst.ini` / `odbc.ini` in `/etc`, or from the directory in the `ODBCSYSINI` environment variable if set. You can also skip registration and give the driver's library path: `Driver=/path/to/libdriver.so`
 
 **Important ODBC Notes:**
 - Connection strings must be URL-encoded if they contain special characters
@@ -1062,6 +1074,8 @@ for contributing to TinyETL!
 This project is licensed under a modified Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 Commercial use is explicitly allowed with the exception of reselling TinyETL in a cloud SaaS format, please contact licensing@tinyetl.com for additional commercial licensing terms.
+
+**Bundled third-party libraries:** to keep the binary free of runtime dependencies, the Linux and macOS binaries statically link the [unixODBC](https://www.unixodbc.org/) driver manager (2.3.14) and GNU libltdl. Both are licensed under the GNU LGPL (v2.1 or later and v2 or later, respectively), not under TinyETL's license, and the commercial terms above do not apply to them. Their license texts ship with every download, and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) explains where to get their source and how to rebuild TinyETL against modified versions.
 
 
 ---

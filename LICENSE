@@ -212,3 +212,13 @@ You may use this software under the terms of the Apache 2.0 License above.
 
 If you wish to include TinyETL in a commercial SaaS or hosted product, 
 please contact licensing@tinyetl.com for additional commercial licensing terms.
+
+===============================================================================
+
+THIRD-PARTY COMPONENTS
+
+The Linux and macOS binaries of TinyETL include third-party libraries
+(unixODBC and GNU libltdl) that are licensed under the GNU Lesser General
+Public License. These libraries are not covered by this License, and the
+Additional Commercial Licensing Terms above do not apply to them. They
+remain under their own licenses. See THIRD_PARTY_LICENSES.md.
