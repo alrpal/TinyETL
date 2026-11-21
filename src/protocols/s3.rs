@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use object_store::{
     aws::AmazonS3Builder, buffered::BufWriter, path::Path as ObjectPath, ObjectStore,
+    ObjectStoreExt,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;

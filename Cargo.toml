@@ -34,8 +34,8 @@ indicatif = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
 thiserror = "1.0"
-arrow = { version = "57.0", features = ["csv", "json"] }
-parquet = { version = "57.0", features = ["arrow", "async"] }
+arrow = { version = "58", features = ["csv", "json"] }
+parquet = { version = "58", features = ["arrow", "async"] }
 mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
 url = "2.4"
 reqwest = { version = "0.11", features = ["json", "native-tls"] }
@@ -50,7 +50,7 @@ base64 = "0.21"
 duckdb = { version = "~1.4.5", features = ["bundled"] }
 odbc-api = { version = "30.1.0", default-features = false, features = ["narrow", "odbc_version_3_80"] }
 hex = "0.4"
-object_store = { version = "0.12.5", features = ["aws"] }
+object_store = { version = "0.13", features = ["aws"] }
 
 # On Linux and macOS, compile the unixODBC driver manager into the binary so it has no runtime
 # dependency on libodbc. Windows uses its built-in ODBC driver manager instead.
