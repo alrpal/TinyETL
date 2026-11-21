@@ -52,7 +52,7 @@ the LGPL requires that you be able to relink TinyETL against a modified version.
 is public, and every release is tagged in this repository with its `Cargo.lock`, so you can rebuild any released
 binary:
 
-1. Check out the release tag, for example `git checkout v0.10.0`.
+1. Check out the release tag, for example `git checkout v0.11.0`.
 2. Point the build at your modified unixODBC by adding a patch to `Cargo.toml`:
 
    ```toml

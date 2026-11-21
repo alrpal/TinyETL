@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - Unreleased
+
 ### Added
 - **Snowflake source and target** (`snowflake://user@account/database/schema?warehouse=WH#table`), replacing the mock `snowflake://` protocol
   - Writes rows as gzip CSV files to the table's own stage and loads them with one `COPY INTO`, in a transaction together with `--truncate`'s `DELETE`, so a failed load leaves the table unchanged
@@ -248,7 +250,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment variable support for secrets
 - Data transformation capabilities
 
-[Unreleased]: https://github.com/alrpal/TinyETL/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/alrpal/TinyETL/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/alrpal/TinyETL/compare/v0.10.0...v0.11.0
 [0.5.0]: https://github.com/alrpal/TinyETL/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/alrpal/TinyETL/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/alrpal/TinyETL/compare/v0.3.0...v0.3.1

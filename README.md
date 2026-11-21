@@ -3,7 +3,7 @@
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/alrpal/tinyetl/actions)
 [![Coverage](https://img.shields.io/badge/coverage-60%25-brightgreen)](https://github.com/alrpal/tinyetl/actions)
-[![Version](https://img.shields.io/badge/version-0.10.0-blue)](https://github.com/alrpal/tinyetl/releases)
+[![Version](https://img.shields.io/badge/version-0.11.0-blue)](https://github.com/alrpal/tinyetl/releases)
 [![Rust Edition](https://img.shields.io/badge/rust-2021-orange)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
 [![Binary Size](https://img.shields.io/badge/binary-15MB-green)](https://github.com/alrpal/tinyetl/releases)
 
@@ -887,7 +887,7 @@ source:
   uri: "employees.csv"            # or database connection string
   # Optional source-specific options (e.g., for HTTP sources)
   # options:
-  #   header.User-Agent: "TinyETL/0.10.0"
+  #   header.User-Agent: "TinyETL/0.11.0"
   #   header.Accept: "text/csv"
   #   auth.basic.username: "user"
   #   auth.basic.password: "${PASSWORD}"
@@ -956,7 +956,7 @@ source:
   uri: "http://api.example.com/data.csv"
   options:
     # Custom headers (prefix with "header.")
-    header.User-Agent: "TinyETL/0.10.0"
+    header.User-Agent: "TinyETL/0.11.0"
     header.Accept: "text/csv"
     header.X-API-Version: "v2"
     
