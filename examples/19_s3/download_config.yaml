@@ -1,0 +1,12 @@
+# Example: read a Parquet object from S3 into a local JSON file
+# Credentials and region come from the AWS_* environment variables.
+version: 1
+
+source:
+  uri: "s3://${TINYETL_S3_BUCKET}/tinyetl-example/employees.parquet"
+
+target:
+  uri: "output_employees.json"
+
+options:
+  log_level: info

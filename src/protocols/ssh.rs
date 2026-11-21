@@ -154,14 +154,7 @@ impl SshProtocol {
 
     /// Extract file extension from remote path
     fn extract_extension_from_path(&self, path: &str) -> Option<String> {
-        if let Some(filename) = path.split('/').next_back() {
-            if let Some(extension) = filename.split('.').next_back() {
-                if !extension.is_empty() && extension.len() <= 10 && extension != filename {
-                    return Some(extension.to_lowercase());
-                }
-            }
-        }
-        None
+        crate::protocols::extension_from_path(path)
     }
 }
 

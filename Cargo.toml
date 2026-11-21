@@ -48,6 +48,7 @@ base64 = "0.21"
 duckdb = { version = "1.4.1", features = ["bundled"] }
 odbc-api = { version = "30.1.0", default-features = false, features = ["narrow", "odbc_version_3_80"] }
 hex = "0.4"
+object_store = { version = "0.12.5", features = ["aws"] }
 
 # On Linux and macOS, compile the unixODBC driver manager (and GNU libltdl) into the binary so it
 # has no runtime dependency on libodbc. Windows uses its built-in ODBC driver manager instead.

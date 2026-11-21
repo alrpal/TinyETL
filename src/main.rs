@@ -133,7 +133,9 @@ source:
 target:
   uri: "employees_output.json"    # or database connection string
   # options:                      # Optional target-specific options
-  #   header.X-Custom: "value"
+  #   region: "us-east-1"         # e.g. S3 target (s3://bucket/path/file.parquet)
+  #   access_key_id: "${AWS_ACCESS_KEY_ID}"
+  #   secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
 
 # The "options" key and all other keys beneath "options" can be omitted.
 # Sensible default values will be used for omitted keys.

@@ -1,5 +1,6 @@
 pub mod file;
 pub mod http;
+pub mod s3;
 pub mod snowflake;
 pub mod ssh;
 
@@ -48,6 +49,18 @@ pub trait Protocol: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// Extract a lowercased file extension from the last segment of a URL or remote path.
+/// Used by remote protocols to pick the right file connector for a downloaded file.
+pub(crate) fn extension_from_path(path: &str) -> Option<String> {
+    let filename = path.split('/').next_back()?;
+    let extension = filename.split('.').next_back()?;
+    if !extension.is_empty() && extension.len() <= 10 && extension != filename {
+        Some(extension.to_lowercase())
+    } else {
+        None
+    }
+}
+
 /// Factory function to create a protocol handler based on URL scheme
 pub fn create_protocol(url: &str) -> Result<Box<dyn Protocol>> {
     // For backward compatibility, handle file paths that aren't valid URLs
@@ -63,9 +76,10 @@ pub fn create_protocol(url: &str) -> Result<Box<dyn Protocol>> {
         "snowflake" => Ok(Box::new(snowflake::SnowflakeProtocol::new())),
         "http" | "https" => Ok(Box::new(http::HttpProtocol::new())),
         "ssh" => Ok(Box::new(ssh::SshProtocol::new())),
+        "s3" => Ok(Box::new(s3::S3Protocol::new())),
         scheme => {
             Err(TinyEtlError::Configuration(
-                format!("Unsupported protocol: {}. Supported protocols: file://, snowflake://, http://, https://, ssh://", scheme)
+                format!("Unsupported protocol: {}. Supported protocols: file://, snowflake://, http://, https://, ssh://, s3://", scheme)
             ))
         }
     }
@@ -163,6 +177,23 @@ mod tests {
         let protocol = create_protocol("ssh://user@example.com/path/to/data.csv");
         assert!(protocol.is_ok());
         assert_eq!(protocol.unwrap().name(), "ssh");
+    }
+
+    #[test]
+    fn test_create_s3_protocol() {
+        let protocol = create_protocol("s3://my-bucket/path/to/data.parquet");
+        assert!(protocol.is_ok());
+        assert_eq!(protocol.unwrap().name(), "s3");
+    }
+
+    #[test]
+    fn test_extension_from_path() {
+        assert_eq!(
+            extension_from_path("/a/b/data.CSV"),
+            Some("csv".to_string())
+        );
+        assert_eq!(extension_from_path("/a.b/data"), None);
+        assert_eq!(extension_from_path("/a/b/"), None);
     }
 
     #[test]

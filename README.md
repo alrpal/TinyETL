@@ -244,6 +244,12 @@ TinyETL supports two main categories of data sources and targets:
   tinyetl "ssh://user@server.com:2222/remote/data.parquet" local.csv
   ```
 
+- **Amazon S3** - Read and write single objects (also works with S3-compatible stores such as Cloudflare R2)
+  ```bash
+  tinyetl s3://my-bucket/raw/orders.csv orders.parquet
+  tinyetl "postgres://user@host/db#orders" s3://my-bucket/exports/orders.parquet
+  ```
+
 **Protocol Features:**
 - **file://** - Local file system (default for simple paths)
 - **http://** and **https://** - Web downloads with progress tracking
@@ -251,6 +257,8 @@ TinyETL supports two main categories of data sources and targets:
   - Custom HTTP headers via YAML configuration
   - Environment variable substitution for secure credential management
 - **ssh://** - Secure shell file transfer using SCP
+- **s3://** - Amazon S3 and S3-compatible object storage, as both source and target
+  - Credentials from `AWS_*` environment variables, IAM roles, or YAML options (see S3 Options section)
 - **--source-type** parameter for format override (useful for URLs without clear extensions)
 
 #### Database Sources
@@ -843,7 +851,9 @@ target:
   uri: "employees_output.json"    # or database connection string
   # Optional target-specific options
   # options:
-  #   header.X-Custom: "value"
+  #   region: "us-east-1"         # e.g. S3 target (s3://bucket/path/file.parquet)
+  #   access_key_id: "${AWS_ACCESS_KEY_ID}"
+  #   secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
 
 # The "options" key and all other keys beneath "options" can be omitted.
 # Sensible default values will be used for omitted keys.
@@ -933,6 +943,57 @@ source:
 ```
 
 See [Example 18: HTTP with Authentication](examples/18_http_with_auth/) for complete working examples.
+
+#### S3 Options
+
+`s3://bucket/path/file.ext` works as both a source and a target for CSV, JSON, Parquet and Avro files:
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=eu-west-1
+
+tinyetl s3://my-bucket/raw/orders.csv orders.parquet
+tinyetl orders.csv s3://my-bucket/exports/orders.parquet
+```
+
+Settings are read from the standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT`, `AWS_ALLOW_HTTP`). On AWS infrastructure, IAM roles (EC2 instance profiles, ECS task roles, web identity) are picked up automatically. In a YAML config, each endpoint can override them:
+
+```yaml
+version: 1
+
+source:
+  uri: "s3://my-bucket/raw/orders.csv"
+  options:
+    region: "eu-west-1"
+    access_key_id: "${S3_ACCESS_KEY_ID}"
+    secret_access_key: "${S3_SECRET_ACCESS_KEY}"
+
+target:
+  uri: "s3://other-bucket/exports/orders.parquet"
+  options:
+    endpoint: "https://<account-id>.r2.cloudflarestorage.com"   # S3-compatible stores
+    access_key_id: "${R2_ACCESS_KEY_ID}"
+    secret_access_key: "${R2_SECRET_ACCESS_KEY}"
+```
+
+**Available S3 Options:**
+- `region` - AWS region of the bucket (defaults to `us-east-1`)
+- `endpoint` - Custom endpoint URL for S3-compatible stores
+- `access_key_id`, `secret_access_key`, `session_token` - Static credentials
+- `allow_http` - Allow non-TLS endpoints (`true`/`false`; implied by an `http://` endpoint option)
+- `path_style` - `true` for path-style requests (the default), `false` for virtual-hosted-style
+
+**Behavior and limitations:**
+- One object per source or target; prefixes and wildcards are not supported
+- The file format comes from the object key's extension (sources can override it with `--source-type`)
+- Data is staged in a local temporary file, so the machine needs free disk space for the object
+- Writing replaces an existing object. The upload happens once the transfer has finished, so a failed run leaves the existing object untouched
+- The credentials need `s3:ListBucket` on the bucket and `s3:GetObject` / `s3:PutObject` on its objects (the target checks whether the object exists before writing)
+- Profiles in `~/.aws/credentials` / `~/.aws/config` and AWS SSO are not read; use environment variables instead
+- `--source-secret-id` / `--dest-secret-id` do not apply to S3 URLs
+
+See [Example 19: S3](examples/19_s3/) for a complete working example.
 
 ### Environment Variables
 

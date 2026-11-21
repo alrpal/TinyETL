@@ -109,15 +109,7 @@ impl HttpProtocol {
 
     /// Extract file extension from URL path for proper temporary file naming
     fn extract_extension_from_url(&self, url: &Url) -> Option<String> {
-        let path = url.path();
-        if let Some(filename) = path.split('/').next_back() {
-            if let Some(extension) = filename.split('.').next_back() {
-                if !extension.is_empty() && extension.len() <= 10 && extension != filename {
-                    return Some(extension.to_lowercase());
-                }
-            }
-        }
-        None
+        crate::protocols::extension_from_path(url.path())
     }
 
     /// Extract file extension from URL with optional type override

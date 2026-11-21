@@ -1,0 +1,12 @@
+# Example: write a local CSV file to S3 as Parquet
+# Credentials and region come from the AWS_* environment variables.
+version: 1
+
+source:
+  uri: "employees.csv"
+
+target:
+  uri: "s3://${TINYETL_S3_BUCKET}/tinyetl-example/employees.parquet"
+
+options:
+  log_level: info
