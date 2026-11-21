@@ -55,7 +55,7 @@ calamine = { version = "0.38", features = ["chrono"] }
 rust_xlsxwriter = { version = "0.103", features = ["chrono", "constant_memory"] }
 object_store = { version = "0.13", features = ["aws"] }
 firn = "0.17"
-flate2 = "1"
+zstd = "0.13"
 percent-encoding = "2"
 
 # On Linux and macOS, compile the unixODBC driver manager into the binary so it has no runtime

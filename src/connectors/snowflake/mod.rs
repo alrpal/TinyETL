@@ -1,7 +1,7 @@
 //! Snowflake source and target.
 //!
 //! - **Reading** streams one `SELECT * FROM <table>` as Arrow batches.
-//! - **Writing** stages rows as gzip CSV files in the table's own stage (`@%table`) and loads them
+//! - **Writing** stages rows as zstd-compressed CSV files in the table's own stage (`@%table`) and loads them
 //!   with one `COPY INTO` when the transfer finishes. The stage upload only works for accounts on
 //!   AWS (a limit of the client library); elsewhere rows are inserted in batches with bound
 //!   parameters instead.

@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Snowflake source and target** (`snowflake://user@account/database/schema?warehouse=WH#table`), replacing the mock `snowflake://` protocol
-  - Writes rows as gzip CSV files to the table's own stage and loads them with one `COPY INTO`, in a transaction together with `--truncate`'s `DELETE`, so a failed load leaves the table unchanged
+  - Writes rows as Zstandard-compressed CSV files to the table's own stage and loads them with one `COPY INTO`, in a transaction together with `--truncate`'s `DELETE`, so a failed load leaves the table unchanged
   - Key-pair authentication (`SNOWFLAKE_PRIVATE_KEY_PATH` or the `private_key_path` option, optionally passphrase-protected), or a password / programmatic access token
   - Reads stream `SELECT * FROM <table>` and keep NUMBER, FLOAT, BOOLEAN, DATE, TIMESTAMP and VARIANT/OBJECT/ARRAY types
   - Accounts on Azure or Google Cloud load with batched INSERTs (stage uploads are AWS-only so far); `load_method` forces either path

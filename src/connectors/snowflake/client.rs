@@ -39,7 +39,7 @@ pub trait SnowflakeClient: Send + Sync {
     /// Run a query and stream its result.
     async fn query(&self, sql: &str) -> Result<QueryStream>;
 
-    /// Upload an already gzip-compressed local file to a stage location such as
+    /// Upload an already zstd-compressed local file to a stage location such as
     /// `@%ORDERS/tinyetl/<run>/`.
     async fn put(&self, local_file: &Path, stage_location: &str) -> Result<()>;
 

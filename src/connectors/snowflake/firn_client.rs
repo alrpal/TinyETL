@@ -143,7 +143,7 @@ impl SnowflakeClient for FirnClient {
             format!("file:///{}", path) // Windows: C:/...
         };
         let sql = format!(
-            "PUT {} {} AUTO_COMPRESS = FALSE SOURCE_COMPRESSION = GZIP OVERWRITE = TRUE",
+            "PUT {} {} AUTO_COMPRESS = FALSE SOURCE_COMPRESSION = ZSTD OVERWRITE = TRUE",
             sql_string(&uri),
             sql_string(stage_location)
         );

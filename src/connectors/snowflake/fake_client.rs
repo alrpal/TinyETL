@@ -3,7 +3,6 @@
 
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use flate2::read::GzDecoder;
 use futures_util::stream::{self, StreamExt};
 use std::io::Read;
 use std::path::Path;
@@ -102,7 +101,8 @@ impl SnowflakeClient for FakeClient {
 
     async fn put(&self, local_file: &Path, stage_location: &str) -> Result<()> {
         let mut text = String::new();
-        GzDecoder::new(std::fs::File::open(local_file)?).read_to_string(&mut text)?;
+        zstd::stream::read::Decoder::new(std::fs::File::open(local_file)?)?
+            .read_to_string(&mut text)?;
         let mut recorded = self.recorded.lock().unwrap();
         recorded.log.push(format!("PUT {}", stage_location));
         recorded.uploads.push(text);

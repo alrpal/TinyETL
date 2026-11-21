@@ -1,11 +1,11 @@
-//! Gzip CSV files staged for `COPY INTO`.
+//! Zstandard-compressed CSV files staged for `COPY INTO`. zstd makes files several times
+//! smaller than fast gzip at the same speed, and uploading them is usually the slow part.
 //!
 //! Every non-NULL value is written in double quotes, and NULL as an empty unquoted field. With
 //! `FIELD_OPTIONALLY_ENCLOSED_BY = '"'` and `EMPTY_FIELD_AS_NULL = TRUE`, Snowflake loads `""` as
 //! an empty string and a bare empty field as NULL, so the two never collide (unlike a `\N`
 //! sentinel, which real data could contain).
 
-use flate2::{write::GzEncoder, Compression};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -16,7 +16,10 @@ use crate::{schema::Value, Result, TinyEtlError};
 /// The `FILE_FORMAT` that matches what [`ChunkWriter`] writes.
 pub(super) const FILE_FORMAT: &str = "TYPE = CSV FIELD_DELIMITER = ',' \
     FIELD_OPTIONALLY_ENCLOSED_BY = '\"' ESCAPE_UNENCLOSED_FIELD = NONE \
-    EMPTY_FIELD_AS_NULL = TRUE NULL_IF = () COMPRESSION = GZIP ENCODING = 'UTF8'";
+    EMPTY_FIELD_AS_NULL = TRUE NULL_IF = () COMPRESSION = ZSTD ENCODING = 'UTF8'";
+
+/// zstd level for staged files: fast, and already much smaller than gzip.
+const ZSTD_LEVEL: i32 = 3;
 
 /// Text for a value in a staged file or a bind parameter, or `None` for NULL. Timestamps are
 /// UTC (the target columns are `TIMESTAMP_NTZ`); decimals keep their exact digits.
@@ -55,12 +58,12 @@ pub(super) struct StagedFile {
 }
 
 struct OpenFile {
-    encoder: GzEncoder<BufWriter<File>>,
+    encoder: zstd::stream::write::Encoder<'static, BufWriter<File>>,
     path: PathBuf,
     rows: usize,
 }
 
-/// Writes rows into numbered `part-NNNNN.csv.gz` files of at most `max_rows` rows each.
+/// Writes rows into numbered `part-NNNNN.csv.zst` files of at most `max_rows` rows each.
 pub(super) struct ChunkWriter {
     dir: TempDir,
     max_rows: usize,
@@ -93,10 +96,10 @@ impl ChunkWriter {
             let path = self
                 .dir
                 .path()
-                .join(format!("part-{:05}.csv.gz", self.next_index));
+                .join(format!("part-{:05}.csv.zst", self.next_index));
             let file = BufWriter::new(File::create(&path)?);
             self.current = Some(OpenFile {
-                encoder: GzEncoder::new(file, Compression::fast()),
+                encoder: zstd::stream::write::Encoder::new(file, ZSTD_LEVEL)?,
                 path,
                 rows: 0,
             });
@@ -129,12 +132,12 @@ impl ChunkWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::read::GzDecoder;
     use std::io::Read;
 
-    fn read_gz(path: &std::path::Path) -> String {
+    fn read_zst(path: &std::path::Path) -> String {
         let mut text = String::new();
-        GzDecoder::new(File::open(path).unwrap())
+        zstd::stream::read::Decoder::new(File::open(path).unwrap())
+            .unwrap()
             .read_to_string(&mut text)
             .unwrap();
         text
@@ -192,12 +195,12 @@ mod tests {
         assert!(writer.write_row([Some("1")].into_iter()).unwrap().is_none());
         let first = writer.write_row([Some("2")].into_iter()).unwrap().unwrap();
         assert_eq!(first.rows, 2);
-        assert_eq!(read_gz(&first.path), "\"1\"\n\"2\"\n");
+        assert_eq!(read_zst(&first.path), "\"1\"\n\"2\"\n");
         assert!(writer.write_row([None].into_iter()).unwrap().is_none());
         let last = writer.finish().unwrap().unwrap();
         assert_eq!(last.rows, 1);
-        assert_eq!(read_gz(&last.path), "\n");
-        assert!(last.path.ends_with("part-00002.csv.gz"));
+        assert_eq!(read_zst(&last.path), "\n");
+        assert!(last.path.ends_with("part-00002.csv.zst"));
         assert!(writer.finish().unwrap().is_none());
     }
 }
