@@ -2,3 +2,6 @@
 /test_data
 requirements.md
 .env
+
+# macOS Finder metadata
+.DS_Store
