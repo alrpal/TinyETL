@@ -31,7 +31,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
    *Note: Auto-inferred schemas default all columns to nullable for safety*
 
 ✅ **Lua transformations** — powerful data transformations  
-✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, CrateDB, DuckDB, MSSQL, ODBC, Snowflake. Coming soon: Databricks, OneLake
+✅ **Universal connectivity** — CSV, JSON, Excel, Parquet, Avro, MySQL, PostgreSQL, SQLite, CrateDB, DuckDB, MSSQL, ODBC, Snowflake. Coming soon: Databricks, OneLake
 
 ✅ **Cross-platform** — Linux, macOS, Windows ready
 
