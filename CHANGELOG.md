@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.0] - Unreleased
+## [0.11.0] - 2026-11-21
 
 ### Added
 - **Snowflake source and target** (`snowflake://user@account/database/schema?warehouse=WH#table`), replacing the mock `snowflake://` protocol
