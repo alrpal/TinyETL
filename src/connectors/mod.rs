@@ -1,5 +1,4 @@
 mod arrow_values;
-mod output_file;
 pub mod avro;
 pub mod csv;
 pub mod duckdb;
@@ -8,6 +7,7 @@ pub mod json;
 pub mod mssql;
 pub mod mysql;
 pub mod odbc;
+mod output_file;
 pub mod parquet;
 pub mod postgres;
 pub mod snowflake;
@@ -71,7 +71,7 @@ pub trait Target: Send + Sync {
 pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
     if connection_string.ends_with(".csv") {
         Ok(Box::new(csv::CsvSource::new(connection_string)?))
-    } else if connection_string.ends_with(".json") {
+    } else if connection_string.ends_with(".json") || json::is_json_lines(connection_string) {
         Ok(Box::new(json::JsonSource::new(connection_string)?))
     } else if connection_string.ends_with(".parquet") {
         Ok(Box::new(parquet::ParquetSource::new(connection_string)?))
@@ -106,7 +106,7 @@ pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
         )?))
     } else {
         Err(crate::TinyEtlError::Configuration(
-            format!("Unsupported source type: {}. Supported formats: file.csv, file.json, file.parquet, file.avro, file.xlsx[#sheet] (also .xlsm, .xlsb, .xls, .ods), file.db#table, file.duckdb#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table", connection_string)
+            format!("Unsupported source type: {}. Supported formats: file.csv, file.json, file.jsonl, file.parquet, file.avro, file.xlsx[#sheet] (also .xlsm, .xlsb, .xls, .ods), file.db#table, file.duckdb#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table", connection_string)
         ))
     }
 }
@@ -148,7 +148,7 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
     // Handle legacy file-based and non-protocol database connections
     if connection_string.ends_with(".csv") {
         Ok(Box::new(csv::CsvTarget::new(connection_string)?))
-    } else if connection_string.ends_with(".json") {
+    } else if connection_string.ends_with(".json") || json::is_json_lines(connection_string) {
         Ok(Box::new(json::JsonTarget::new(connection_string)?))
     } else if connection_string.ends_with(".parquet") {
         Ok(Box::new(parquet::ParquetTarget::new(connection_string)?))
@@ -171,7 +171,7 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
     } else {
         Err(crate::TinyEtlError::Configuration(format!(
             "Unsupported target type: {}. Supported formats: \
-            file.csv, file.json, file.parquet, file.avro, file.xlsx[#sheet], file.db, file.db#table, file.duckdb, file.duckdb#table, \
+            file.csv, file.json, file.jsonl, file.parquet, file.avro, file.xlsx[#sheet], file.db, file.db#table, file.duckdb, file.duckdb#table, \
             duckdb://path/file.duckdb#table, sqlite://path/file.db#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table",
             connection_string
         )))

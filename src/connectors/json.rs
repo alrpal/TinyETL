@@ -1,152 +1,325 @@
+//! JSON files: an array of objects (`.json`) or one object per line (JSON Lines: `.jsonl`,
+//! `.ndjson`). Both are read and written as streams, so memory stays at about one batch.
+
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use serde_json;
-use std::path::PathBuf;
+use serde::de::{Deserializer as _, SeqAccess, Visitor};
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Mutex;
 
 use crate::{
-    connectors::{Source, Target},
+    connectors::{output_file::OutputFile, Source, Target},
     date_parser::DateParser,
     schema::{Row, Schema, SchemaInferer, Value},
     Result, TinyEtlError,
 };
 
-pub struct JsonSource {
-    file_path: PathBuf,
-    data: Vec<serde_json::Value>,
-    current_index: usize,
+/// JSON values decoded ahead of the reader.
+const READ_AHEAD: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum JsonFormat {
+    /// `[ {...}, {...} ]`
+    Array,
+    /// One object per line
+    Lines,
 }
 
-impl JsonSource {
-    pub fn new(file_path: &str) -> Result<Self> {
-        Ok(Self {
-            file_path: PathBuf::from(file_path),
-            data: Vec::new(),
-            current_index: 0,
-        })
-    }
-
-    fn json_value_to_value(&self, json_val: &serde_json::Value) -> Value {
-        match json_val {
-            serde_json::Value::String(s) => {
-                // Try to parse string as date first, fall back to string
-                if let Some(date_value) = DateParser::try_parse(s) {
-                    date_value
-                } else {
-                    Value::String(s.clone())
-                }
-            }
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Value::Integer(i)
-                } else if let Some(f) = n.as_f64() {
-                    // Convert f64 to Decimal
-                    match Decimal::try_from(f) {
-                        Ok(d) => Value::Decimal(d),
-                        Err(_) => Value::String(n.to_string()),
-                    }
-                } else {
-                    Value::String(n.to_string())
-                }
-            }
-            serde_json::Value::Bool(b) => Value::Boolean(*b),
-            serde_json::Value::Null => Value::Null,
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                Value::String(json_val.to_string())
-            }
+impl JsonFormat {
+    fn for_path(path: &Path) -> Self {
+        match path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("jsonl") | Some("ndjson") => JsonFormat::Lines,
+            _ => JsonFormat::Array,
         }
     }
 }
 
-#[async_trait]
-impl Source for JsonSource {
-    async fn connect(&mut self) -> Result<()> {
+/// Whether a connection string names a JSON Lines file.
+pub fn is_json_lines(connection_string: &str) -> bool {
+    JsonFormat::for_path(Path::new(connection_string)) == JsonFormat::Lines
+}
+
+type Item = std::result::Result<serde_json::Value, String>;
+
+/// The values of a JSON file, decoded on a background thread one at a time and handed over
+/// through a bounded channel. Dropping it stops the thread.
+struct JsonValues {
+    // Mutex only to make the receiver Sync (Source requires it); reached through get_mut
+    receiver: Mutex<Receiver<Item>>,
+    peeked: Option<Item>,
+    done: bool,
+}
+
+impl JsonValues {
+    fn open(path: &Path, format: JsonFormat) -> Result<Self> {
+        let file = File::open(path).map_err(|e| {
+            TinyEtlError::Connection(format!("Failed to open {}: {}", path.display(), e))
+        })?;
+        let (sender, receiver) = sync_channel(READ_AHEAD);
+        std::thread::Builder::new()
+            .name("tinyetl-json-reader".to_string())
+            .spawn(move || match format {
+                JsonFormat::Array => read_array(BufReader::new(file), &sender),
+                JsonFormat::Lines => read_lines(BufReader::new(file), &sender),
+            })
+            .map_err(TinyEtlError::Io)?;
+        let mut values = Self {
+            receiver: Mutex::new(receiver),
+            peeked: None,
+            done: false,
+        };
+        values.peek();
+        Ok(values)
+    }
+
+    fn peek(&mut self) {
+        if self.peeked.is_none() && !self.done {
+            let receiver = self.receiver.get_mut().unwrap_or_else(|e| e.into_inner());
+            match receiver.recv() {
+                Ok(item) => self.peeked = Some(item),
+                Err(_) => self.done = true, // the reader thread finished
+            }
+        }
+    }
+
+    fn has_more(&self) -> bool {
+        self.peeked.is_some()
+    }
+
+    fn next_value(&mut self) -> Result<Option<serde_json::Value>> {
+        self.peek();
+        let item = self.peeked.take();
+        self.peek();
+        match item {
+            None => Ok(None),
+            Some(Ok(value)) => Ok(Some(value)),
+            Some(Err(message)) => Err(TinyEtlError::DataTransfer(message)),
+        }
+    }
+}
+
+/// Send each element of a top-level JSON array.
+fn read_array(reader: BufReader<File>, sender: &SyncSender<Item>) {
+    struct Elements<'a>(&'a SyncSender<Item>);
+
+    impl<'de> Visitor<'de> for Elements<'_> {
+        type Value = ();
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an array of objects")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
+            while let Some(value) = seq.next_element::<serde_json::Value>()? {
+                if self.0.send(Ok(value)).is_err() {
+                    break; // nobody is reading any more
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let result = deserializer
+        .deserialize_seq(Elements(sender))
+        .and_then(|()| deserializer.end());
+    if let Err(e) = result {
+        let message = if e.is_data() && e.line() == 1 && e.column() <= 1 {
+            "JSON file must contain an array of objects".to_string()
+        } else {
+            format!("Invalid JSON: {}", e)
+        };
+        let _ = sender.send(Err(message));
+    }
+}
+
+/// Send each non-blank line of a JSON Lines file.
+fn read_lines(reader: BufReader<File>, sender: &SyncSender<Item>) {
+    for (index, line) in reader.lines().enumerate() {
+        let item = match line {
+            Err(e) => Err(format!("Failed to read line {}: {}", index + 1, e)),
+            Ok(line) if line.trim().is_empty() => continue,
+            Ok(line) => serde_json::from_str(&line)
+                .map_err(|e| format!("Invalid JSON on line {}: {}", index + 1, e)),
+        };
+        let failed = item.is_err();
+        if sender.send(item).is_err() || failed {
+            break;
+        }
+    }
+}
+
+fn json_value_to_value(json_val: &serde_json::Value) -> Value {
+    match json_val {
+        serde_json::Value::String(s) => {
+            // Try to parse string as date first, fall back to string
+            DateParser::try_parse(s).unwrap_or_else(|| Value::String(s.clone()))
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                match Decimal::try_from(f) {
+                    Ok(d) => Value::Decimal(d),
+                    Err(_) => Value::String(n.to_string()),
+                }
+            } else {
+                Value::String(n.to_string())
+            }
+        }
+        serde_json::Value::Bool(b) => Value::Boolean(*b),
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Value::String(json_val.to_string())
+        }
+    }
+}
+
+/// A row for each JSON object; other values (numbers, arrays at the top level) are skipped.
+fn object_to_row(value: &serde_json::Value) -> Option<Row> {
+    value.as_object().map(|object| {
+        object
+            .iter()
+            .map(|(key, value)| (key.clone(), json_value_to_value(value)))
+            .collect()
+    })
+}
+
+pub struct JsonSource {
+    file_path: PathBuf,
+    format: JsonFormat,
+    values: Option<JsonValues>,
+    /// Whether rows have been read since the file was opened
+    consumed: bool,
+}
+
+impl JsonSource {
+    pub fn new(file_path: &str) -> Result<Self> {
+        let file_path = PathBuf::from(file_path);
+        Ok(Self {
+            format: JsonFormat::for_path(&file_path),
+            file_path,
+            values: None,
+            consumed: false,
+        })
+    }
+
+    fn open(&mut self) -> Result<()> {
         if !self.file_path.exists() {
             return Err(TinyEtlError::Connection(format!(
                 "JSON file not found: {}",
                 self.file_path.display()
             )));
         }
-
-        let content = std::fs::read_to_string(&self.file_path)?;
-        let json: serde_json::Value = serde_json::from_str(&content)?;
-
-        // Expect an array of objects
-        if let serde_json::Value::Array(array) = json {
-            self.data = array;
-        } else {
-            return Err(TinyEtlError::Configuration(
-                "JSON file must contain an array of objects".to_string(),
-            ));
+        let mut values = JsonValues::open(&self.file_path, self.format)?;
+        // Report a file that isn't a JSON array (or valid JSON Lines) here, not mid-transfer
+        if let Some(Err(message)) = &values.peeked {
+            let message = message.clone();
+            values.peeked = None;
+            return Err(TinyEtlError::Configuration(message));
         }
-
+        self.values = Some(values);
+        self.consumed = false;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Source for JsonSource {
+    async fn connect(&mut self) -> Result<()> {
+        self.open()
     }
 
     async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
-        if self.data.is_empty() {
-            self.connect().await?;
-        }
-
-        let sample_data = self.data.iter().take(sample_size).collect::<Vec<_>>();
-
+        // Sample from a separate pass so the main reader still starts at the first record
+        let mut sample = JsonValues::open(&self.file_path, self.format)?;
         let mut rows = Vec::new();
-        for json_obj in sample_data {
-            if let serde_json::Value::Object(obj) = json_obj {
-                let mut row = Row::new();
-                for (key, value) in obj {
-                    row.insert(key.clone(), self.json_value_to_value(value));
+        let mut key_order: Vec<String> = Vec::new();
+        while rows.len() < sample_size {
+            let Some(value) = sample.next_value()? else {
+                break;
+            };
+            if let Some(object) = value.as_object() {
+                for key in object.keys() {
+                    if !key_order.contains(key) {
+                        key_order.push(key.clone());
+                    }
                 }
+            }
+            if let Some(row) = object_to_row(&value) {
                 rows.push(row);
             }
         }
-
-        SchemaInferer::infer_from_rows(&rows)
+        let mut schema = SchemaInferer::infer_from_rows_ordered(&rows, &key_order)?;
+        schema.estimated_rows = None;
+        Ok(schema)
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
-        let mut rows = Vec::new();
-        let end_index = std::cmp::min(self.current_index + batch_size, self.data.len());
-
-        for i in self.current_index..end_index {
-            if let serde_json::Value::Object(obj) = &self.data[i] {
-                let mut row = Row::new();
-                for (key, value) in obj {
-                    row.insert(key.clone(), self.json_value_to_value(value));
-                }
+        let Some(values) = self.values.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let mut rows = Vec::with_capacity(batch_size.min(READ_AHEAD));
+        while rows.len() < batch_size {
+            let Some(value) = values.next_value()? else {
+                break;
+            };
+            if let Some(row) = object_to_row(&value) {
                 rows.push(row);
             }
         }
-
-        self.current_index = end_index;
+        self.consumed |= !rows.is_empty();
         Ok(rows)
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
-        Ok(Some(self.data.len()))
+        // Unknown without reading the whole file
+        Ok(None)
     }
 
     async fn reset(&mut self) -> Result<()> {
-        self.current_index = 0;
+        if self.consumed || self.values.is_none() {
+            self.open()?;
+        }
         Ok(())
     }
 
     fn has_more(&self) -> bool {
-        self.current_index < self.data.len()
+        self.values.as_ref().is_some_and(JsonValues::has_more)
     }
 }
 
+/// Writes JSON as rows arrive: a pretty-printed array for `.json`, one compact object per line
+/// for `.jsonl` / `.ndjson`. Keys follow the column order.
 pub struct JsonTarget {
     file_path: PathBuf,
-    accumulated_rows: Vec<Row>,
+    format: JsonFormat,
     schema: Option<Schema>,
+    writer: Option<BufWriter<File>>,
+    output: Option<OutputFile>,
+    written: usize,
+    /// truncate() was called: replace the file instead of appending to it
+    replace: bool,
 }
 
 impl JsonTarget {
     pub fn new(file_path: &str) -> Result<Self> {
+        let file_path = PathBuf::from(file_path);
         Ok(Self {
-            file_path: PathBuf::from(file_path),
-            accumulated_rows: Vec::new(),
+            format: JsonFormat::for_path(&file_path),
+            file_path,
             schema: None,
+            writer: None,
+            output: None,
+            written: 0,
+            replace: false,
         })
     }
 
@@ -169,115 +342,108 @@ impl JsonTarget {
             }
             Value::Boolean(b) => serde_json::Value::Bool(*b),
             Value::Date(dt) => serde_json::Value::String(dt.to_rfc3339()),
-            Value::Json(j) => j.clone(), // Already a JSON value, just clone it
+            Value::Json(j) => j.clone(),
             Value::Null => serde_json::Value::Null,
         }
     }
 
-    fn json_to_value(json_val: &serde_json::Value) -> Value {
-        match json_val {
-            serde_json::Value::String(s) => {
-                // Try to parse as date first
-                if let Some(date_value) = crate::date_parser::DateParser::try_parse(s) {
-                    date_value
-                } else {
-                    Value::String(s.clone())
+    fn row_to_json(&self, row: &Row) -> serde_json::Value {
+        let mut object = serde_json::Map::new();
+        match &self.schema {
+            Some(schema) => {
+                for column in &schema.columns {
+                    let value = row
+                        .get(&column.name)
+                        .map(|v| self.value_to_json(v))
+                        .unwrap_or(serde_json::Value::Null);
+                    object.insert(column.name.clone(), value);
                 }
             }
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Value::Integer(i)
-                } else if let Some(f) = n.as_f64() {
-                    match rust_decimal::Decimal::try_from(f) {
-                        Ok(d) => Value::Decimal(d),
-                        Err(_) => Value::String(n.to_string()),
-                    }
-                } else {
-                    Value::String(n.to_string())
+            None => {
+                for (key, value) in row {
+                    object.insert(key.clone(), self.value_to_json(value));
                 }
             }
-            serde_json::Value::Bool(b) => Value::Boolean(*b),
-            serde_json::Value::Null => Value::Null,
-            _ => Value::String(json_val.to_string()), // Fallback for arrays/objects
         }
+        serde_json::Value::Object(object)
+    }
+
+    /// Write one record in the file's format.
+    fn write_value(&mut self, value: &serde_json::Value) -> Result<()> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| TinyEtlError::Configuration("Schema not set".to_string()))?;
+        match self.format {
+            JsonFormat::Lines => {
+                serde_json::to_writer(&mut *writer, value)?;
+                writer.write_all(b"\n")?;
+            }
+            JsonFormat::Array => {
+                // Same layout as serde_json::to_string_pretty for the whole array
+                writer.write_all(if self.written == 0 {
+                    b"[\n  "
+                } else {
+                    b",\n  "
+                })?;
+                let text = serde_json::to_string_pretty(value)?;
+                writer.write_all(text.replace('\n', "\n  ").as_bytes())?;
+            }
+        }
+        self.written += 1;
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Target for JsonTarget {
     async fn connect(&mut self) -> Result<()> {
-        // Create parent directory if it doesn't exist
-        if let Some(parent) = self.file_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         Ok(())
     }
 
     async fn create_table(&mut self, _table_name: &str, schema: &Schema) -> Result<()> {
         self.schema = Some(schema.clone());
+        let (output, file) = OutputFile::create(&self.file_path)?;
+        self.writer = Some(BufWriter::new(file));
+        self.output = Some(output);
+        self.written = 0;
 
-        // If file exists and we support append, load existing data
-        if self.file_path.exists() && self.supports_append() {
-            if let Ok(content) = std::fs::read_to_string(&self.file_path) {
-                if let Ok(existing_json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(array) = existing_json.as_array() {
-                        // Convert existing JSON objects back to Row format
-                        for json_obj in array {
-                            if let Some(obj) = json_obj.as_object() {
-                                let mut row = Row::new();
-                                for (key, json_val) in obj {
-                                    let value = Self::json_to_value(json_val);
-                                    row.insert(key.clone(), value);
-                                }
-                                self.accumulated_rows.push(row);
-                            }
-                        }
-                    }
-                }
+        // Appending: copy the existing records into the new file first, one at a time.
+        // An empty file has no records.
+        let has_content = std::fs::metadata(&self.file_path).is_ok_and(|m| m.len() > 0);
+        if has_content && !self.replace {
+            let mut existing = JsonValues::open(&self.file_path, self.format)?;
+            while let Some(value) = existing.next_value().map_err(|e| {
+                TinyEtlError::DataTransfer(format!(
+                    "Can't append to {}: {} (use --truncate to replace it)",
+                    self.file_path.display(),
+                    e
+                ))
+            })? {
+                self.write_value(&value)?;
             }
         }
-
         Ok(())
     }
 
     async fn write_batch(&mut self, rows: &[Row]) -> Result<usize> {
-        // Accumulate rows - we'll write them all at once in finalize()
-        self.accumulated_rows.extend_from_slice(rows);
+        for row in rows {
+            let value = self.row_to_json(row);
+            self.write_value(&value)?;
+        }
         Ok(rows.len())
     }
 
     async fn finalize(&mut self) -> Result<()> {
-        // Convert all accumulated rows to JSON and write to file
-        let mut json_objects = Vec::new();
-
-        for row in &self.accumulated_rows {
-            let mut json_obj = serde_json::Map::new();
-
-            // Use schema order if available, otherwise use row keys
-            if let Some(schema) = &self.schema {
-                for column in &schema.columns {
-                    let json_value = row
-                        .get(&column.name)
-                        .map(|v| self.value_to_json(v))
-                        .unwrap_or(serde_json::Value::Null);
-                    json_obj.insert(column.name.clone(), json_value);
-                }
-            } else {
-                // Fallback: iterate over row keys
-                for (key, value) in row {
-                    json_obj.insert(key.clone(), self.value_to_json(value));
-                }
-            }
-
-            json_objects.push(serde_json::Value::Object(json_obj));
+        let (Some(mut writer), Some(output)) = (self.writer.take(), self.output.take()) else {
+            return Ok(());
+        };
+        if self.format == JsonFormat::Array {
+            writer.write_all(if self.written == 0 { b"[]" } else { b"\n]" })?;
         }
-
-        // Write JSON array to file
-        let json_array = serde_json::Value::Array(json_objects);
-        let json_string = serde_json::to_string_pretty(&json_array)?;
-        std::fs::write(&self.file_path, json_string)?;
-
-        Ok(())
+        writer.flush()?;
+        drop(writer);
+        output.commit()
     }
 
     async fn exists(&self, _table_name: &str) -> Result<bool> {
@@ -285,13 +451,12 @@ impl Target for JsonTarget {
     }
 
     async fn truncate(&mut self, _table_name: &str) -> Result<()> {
-        // For JSON files, truncation means clearing accumulated rows
-        self.accumulated_rows.clear();
+        // The file is replaced when the transfer finishes
+        self.replace = true;
         Ok(())
     }
 
     fn supports_append(&self) -> bool {
-        // JSON arrays support append - we can merge existing data with new data
         true
     }
 }
@@ -301,6 +466,154 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn two_column_schema() -> Schema {
+        use crate::schema::{Column, DataType};
+        Schema {
+            columns: ["zeta", "alpha"]
+                .iter()
+                .map(|name| Column {
+                    name: name.to_string(),
+                    data_type: DataType::Integer,
+                    nullable: true,
+                })
+                .collect(),
+            estimated_rows: None,
+            primary_key_candidate: None,
+        }
+    }
+
+    fn rows(range: std::ops::Range<i64>) -> Vec<Row> {
+        range
+            .map(|i| {
+                Row::from([
+                    ("zeta".to_string(), Value::Integer(i)),
+                    ("alpha".to_string(), Value::Integer(-i)),
+                ])
+            })
+            .collect()
+    }
+
+    async fn write(path: &Path, rows: &[Row], truncate: bool) {
+        let mut target = JsonTarget::new(path.to_str().unwrap()).unwrap();
+        target.connect().await.unwrap();
+        if truncate {
+            target.truncate("t").await.unwrap();
+        }
+        target
+            .create_table("t", &two_column_schema())
+            .await
+            .unwrap();
+        for chunk in rows.chunks(1000) {
+            target.write_batch(chunk).await.unwrap();
+        }
+        target.finalize().await.unwrap();
+    }
+
+    async fn read(path: &Path, batch_size: usize) -> (Schema, Vec<Row>) {
+        let mut source = JsonSource::new(path.to_str().unwrap()).unwrap();
+        source.connect().await.unwrap();
+        let schema = source.infer_schema(100).await.unwrap();
+        source.reset().await.unwrap();
+        let mut all = Vec::new();
+        while source.has_more() {
+            let batch = source.read_batch(batch_size).await.unwrap();
+            assert!(batch.len() <= batch_size);
+            all.extend(batch);
+        }
+        (schema, all)
+    }
+
+    #[tokio::test]
+    async fn test_array_and_lines_stream_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["data.json", "data.jsonl", "data.ndjson"] {
+            let path = dir.path().join(name);
+            write(&path, &rows(0..10_000), false).await;
+            let (schema, read_rows) = read(&path, 3_000).await;
+            assert_eq!(read_rows.len(), 10_000, "{}", name);
+            assert_eq!(read_rows[9_999]["zeta"], Value::Integer(9_999));
+            // Columns keep the file's key order, which is the column order it was written in
+            let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(names, ["zeta", "alpha"], "{}", name);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_array_layout_matches_pretty_printing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pretty.json");
+        write(&path, &rows(1..3), false).await;
+        let expected = serde_json::to_string_pretty(&serde_json::json!([
+            {"zeta": 1, "alpha": -1},
+            {"zeta": 2, "alpha": -2}
+        ]))
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+
+        write(&path, &[], true).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+    }
+
+    #[tokio::test]
+    async fn test_lines_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.jsonl");
+        write(&path, &rows(1..3), false).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"zeta\":1,\"alpha\":-1}\n{\"zeta\":2,\"alpha\":-2}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_append_and_truncate() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["out.json", "out.jsonl"] {
+            let path = dir.path().join(name);
+            write(&path, &rows(0..3), false).await;
+            write(&path, &rows(3..5), false).await; // append
+            assert_eq!(read(&path, 100).await.1.len(), 5, "{}", name);
+            write(&path, &rows(0..2), true).await; // --truncate
+            assert_eq!(read(&path, 100).await.1.len(), 2, "{}", name);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unfinished_write_keeps_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keep.json");
+        std::fs::write(&path, "[]").unwrap();
+        let mut target = JsonTarget::new(path.to_str().unwrap()).unwrap();
+        target
+            .create_table("t", &two_column_schema())
+            .await
+            .unwrap();
+        target.write_batch(&rows(0..5)).await.unwrap();
+        drop(target);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_bad_input_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let object = dir.path().join("object.json");
+        std::fs::write(&object, r#"{"a": 1}"#).unwrap();
+        let err = JsonSource::new(object.to_str().unwrap())
+            .unwrap()
+            .connect()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("array of objects"), "{}", err);
+
+        let lines = dir.path().join("bad.jsonl");
+        std::fs::write(&lines, "{\"a\": 1}\n\n{oops}\n").unwrap();
+        let mut source = JsonSource::new(lines.to_str().unwrap()).unwrap();
+        source.connect().await.unwrap();
+        let err = source.read_batch(10).await.unwrap_err();
+        assert!(err.to_string().contains("line 3"), "{}", err);
+    }
 
     #[tokio::test]
     async fn test_json_source_connection() {
@@ -317,7 +630,7 @@ mod tests {
         let mut source = JsonSource::new(temp_file.path().to_str().unwrap()).unwrap();
         let result = source.connect().await;
         assert!(result.is_ok());
-        assert_eq!(source.data.len(), 2);
+        assert!(source.has_more());
     }
 
     #[tokio::test]
