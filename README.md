@@ -93,7 +93,7 @@ cargo install tinyetl
 ```
 
 Building from source needs Rust 1.94 or later (`rustup update`), a C compiler, and the static GNU libltdl library, which is linked into the binary together with the bundled unixODBC:
-- Debian/Ubuntu: `sudo apt install build-essential pkg-config libssl-dev libltdl-dev`, then build with the library directory set:
+- Debian/Ubuntu: `sudo apt install build-essential pkg-config perl libltdl-dev` (OpenSSL is compiled from source, which needs `perl`), then build with the library directory set:
   ```bash
   ODBC_SYS_STATIC_PATH=/usr/lib/$(gcc -print-multiarch) cargo install tinyetl
   ```

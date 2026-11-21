@@ -57,6 +57,12 @@ object_store = { version = "0.12.5", features = ["aws"] }
 odbc-api = { version = "30.1.0", default-features = false, features = ["vendored-unix-odbc"] }
 odbc-sys = { version = "0.31.3", default-features = false, features = ["static_ltdl"] }
 
+# On Linux, compile OpenSSL into the binary (used for TLS by the Postgres, MySQL, MSSQL and HTTP
+# connectors through native-tls), so it doesn't need the distribution's libssl at runtime.
+# macOS and Windows use the system TLS libraries, which are always present.
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [dev-dependencies]
 tempfile = "3.8"
 tokio-test = "0.4"

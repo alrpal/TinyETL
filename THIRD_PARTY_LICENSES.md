@@ -8,6 +8,8 @@ They remain under their own licenses, reproduced in [`licenses/`](licenses/).
 The additional commercial licensing terms in `LICENSE` do not apply to these libraries.
 
 The Windows binary does not include them. It uses the ODBC driver manager built into Windows.
+The Linux binary additionally contains OpenSSL (see below); the macOS and Windows binaries use the
+operating system's TLS libraries instead.
 
 ## unixODBC
 
@@ -29,6 +31,15 @@ The Windows binary does not include them. It uses the ODBC driver manager built 
   Linux, the Homebrew `libtool` formula on macOS). The exact version in each binary is recorded in
   `licenses/BUILD-INFO.txt` inside that release download. Source code for any GNU Libtool version is available from
   <https://ftp.gnu.org/gnu/libtool/>.
+
+## OpenSSL (Linux binary only)
+
+- **What:** the TLS library used for encrypted connections by the PostgreSQL, MySQL, MSSQL and HTTP(S) connectors
+- **License:** Apache License 2.0 ([`licenses/OpenSSL-LICENSE.txt`](licenses/OpenSSL-LICENSE.txt))
+- **Copyright:** The OpenSSL Project Authors
+- **Source used for the binaries:** the [`openssl-src` crate](https://crates.io/crates/openssl-src), which vendors
+  the unmodified OpenSSL sources. The exact version is pinned in each release's `Cargo.lock` and recorded in
+  `licenses/BUILD-INFO.txt` in the Linux download. Upstream source: <https://www.openssl.org/source/>.
 
 ## Your rights under the LGPL
 
