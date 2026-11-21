@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Snowflake source and target** (`snowflake://user@account/database/schema?warehouse=WH#table`), replacing the mock `snowflake://` protocol
+  - Writes rows as gzip CSV files to the table's own stage and loads them with one `COPY INTO`, in a transaction together with `--truncate`'s `DELETE`, so a failed load leaves the table unchanged
+  - Key-pair authentication (`SNOWFLAKE_PRIVATE_KEY_PATH` or the `private_key_path` option, optionally passphrase-protected), or a password / programmatic access token
+  - Reads stream `SELECT * FROM <table>` and keep NUMBER, FLOAT, BOOLEAN, DATE, TIMESTAMP and VARIANT/OBJECT/ARRAY types
+  - Accounts on Azure or Google Cloud load with batched INSERTs (stage uploads are AWS-only so far); `load_method` forces either path
+  - Built on the `firn` client crate, kept behind an internal interface so the client can be swapped later
+- Example `22_snowflake`: load and read against a real account (skipped unless `SNOWFLAKE_*` variables are set)
 - Example `21_csv_to_postgres_odbc`: a CSV → PostgreSQL → CSV round trip through the PostgreSQL ODBC driver
 - Prebuilt **Linux ARM64** binary (`tinyetl-linux-aarch64`), built natively on GitHub's arm64 runner
 - `test_env/odbc/run.sh`: tests the `odbc://` connector on Linux against SQL Server, PostgreSQL, MySQL and SQLite with their ODBC drivers
@@ -31,15 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A row was dropped at every batch boundary when reading through ODBC
   - On Debian and Ubuntu, drivers installed with `apt` (registered by file name, such as `Driver={PostgreSQL Unicode}`) can now be loaded; TinyETL resolves them to `/usr/lib/<arch>/odbc/`
   - TinyETL switches to a UTF-8 character locale when the environment has none (common in containers), which some drivers need to convert text
+- Reading Parquet files with decimal, date, 8/16-bit integer, float32 or non-nanosecond timestamp columns replaced each value with the text `unsupported_type_row_N`. They now keep their values (types without a TinyETL equivalent are read as text)
 - Reading a PostgreSQL table that hadn't been analyzed yet logged `Copying 18446744073709551615 rows`. TinyETL now falls back to an exact row count
 
 ### Changed
+- Upgraded `arrow`/`parquet` from 57 to 58 and `object_store` from 0.12 to 0.13
 - Upgraded `odbc-api` from 8.x to 30.x (required for the bundled unixODBC)
 - Upgraded `duckdb` from 1.4.1 to 1.4.5, which builds with Visual Studio 2026 (MSVC 14.5x). 1.4.1's bundled `fmt` library used `stdext::checked_array_iterator`, which that compiler removed, so Windows builds failed
 - **Building from source now requires Rust 1.94 or later** (`rust-version` was previously listed as 1.70, which the dependencies had already outgrown). TinyETL builds on current stable Rust again: `sqlx` 0.6 and `mlua` 0.8 no longer compiled on Rust 1.100, so they are upgraded to `sqlx` 0.9 and `mlua` 0.12
 - Building from source on Linux no longer needs `libssl-dev`: sqlx's unused query macros are disabled, which built a second, non-vendored OpenSSL for the build host
 - Release workflow checks that binaries link no third-party shared libraries and run in clean `ubuntu:22.04`, `debian:12-slim` and `ubuntu:24.04` containers
 - Building from source no longer needs unixODBC installed (`unixodbc-dev` / `brew install unixodbc`): it is compiled from the vendored sources. A C/C++ compiler (plus `perl` on Linux, for OpenSSL) is all that's required
+
+### Removed
+- The mock `snowflake://` protocol and its examples (`03_snowflake_mock_source`, `04_snowflake_mock_target`); `snowflake://` now connects to Snowflake
 
 ### Licensing
 - The Linux and macOS binaries include unixODBC 2.3.14 under the GNU LGPL. The Linux binary also includes OpenSSL (Apache License 2.0). License texts ship with each download; see `THIRD_PARTY_LICENSES.md`. `LICENSE` now states that its additional commercial terms do not apply to these bundled libraries

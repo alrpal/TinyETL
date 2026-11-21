@@ -1,0 +1,16 @@
+# Example: load a CSV into Snowflake with batched INSERTs instead of stage + COPY INTO.
+# This is the path TinyETL uses automatically on Azure- and GCP-hosted accounts; forcing it
+# here tests it on any account. Connection values come from the environment (see README.md).
+version: 1
+
+source:
+  uri: "../../test_env/odbc/typed.csv"
+
+target:
+  uri: "${SNOWFLAKE_URL}#TINYETL_EXAMPLE_INSERT"
+  options:
+    load_method: insert
+
+options:
+  truncate: true
+  log_level: info

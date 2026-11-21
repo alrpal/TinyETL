@@ -144,6 +144,8 @@ jobs:
         cp target/${{ matrix.target }}/release/tinyetl.exe dist/
         cp LICENSE dist/
         cp THIRD_PARTY_LICENSES.md dist/
+        # AWS-LC is statically linked on Windows too; ship the license texts
+        cp -r licenses dist/
 
     - name: Create archive (Unix)
       if: matrix.os != 'windows-latest'

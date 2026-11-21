@@ -1,7 +1,6 @@
 pub mod file;
 pub mod http;
 pub mod s3;
-pub mod snowflake;
 pub mod ssh;
 
 use crate::{
@@ -73,13 +72,12 @@ pub fn create_protocol(url: &str) -> Result<Box<dyn Protocol>> {
 
     match parsed_url.scheme() {
         "file" => Ok(Box::new(file::FileProtocol::new())),
-        "snowflake" => Ok(Box::new(snowflake::SnowflakeProtocol::new())),
         "http" | "https" => Ok(Box::new(http::HttpProtocol::new())),
         "ssh" => Ok(Box::new(ssh::SshProtocol::new())),
         "s3" => Ok(Box::new(s3::S3Protocol::new())),
         scheme => {
             Err(TinyEtlError::Configuration(
-                format!("Unsupported protocol: {}. Supported protocols: file://, snowflake://, http://, https://, ssh://, s3://", scheme)
+                format!("Unsupported protocol: {}. Supported protocols: file://, http://, https://, ssh://, s3:// (databases such as snowflake:// are handled by connectors)", scheme)
             ))
         }
     }
@@ -147,15 +145,6 @@ mod tests {
         let protocol = create_protocol("file:///path/to/file.csv");
         assert!(protocol.is_ok());
         assert_eq!(protocol.unwrap().name(), "file");
-    }
-
-    #[test]
-    fn test_create_snowflake_protocol() {
-        let protocol = create_protocol(
-            "snowflake://user:pass@account.region.cloud/db/schema?warehouse=WH&table=table",
-        );
-        assert!(protocol.is_ok());
-        assert_eq!(protocol.unwrap().name(), "snowflake");
     }
 
     #[test]

@@ -31,7 +31,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
    *Note: Auto-inferred schemas default all columns to nullable for safety*
 
 ✅ **Lua transformations** — powerful data transformations  
-✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, DuckDB, MSSQL, ODBC. Coming soon: Snowflake, Databricks, OneLake
+✅ **Universal connectivity** — CSV, JSON, Parquet, Avro, MySQL, PostgreSQL, SQLite, DuckDB, MSSQL, ODBC, Snowflake. Coming soon: Databricks, OneLake
 
 ✅ **Cross-platform** — Linux, macOS, Windows ready
 
@@ -254,6 +254,7 @@ TinyETL supports two main categories of data sources and targets:
 - **MySQL** - Popular relational database
 - **DuckDB** - Embedded analytical database optimized for OLAP workloads
 - **ODBC** - Any database with an ODBC driver (tested: SQL Server, PostgreSQL, MySQL/MariaDB, SQLite)
+- **Snowflake** - Cloud data warehouse; bulk loads through stage + `COPY INTO`
 
 **Connection Examples:**
 ```bash
@@ -272,6 +273,10 @@ tinyetl data.csv "mysql://user:@localhost:3306/mydb#sales"
 # DuckDB
 tinyetl "products.duckdb#inventory" output.csv
 tinyetl data.csv "analytics.duckdb#sales"
+
+# Snowflake (key-pair auth; see "Snowflake" below)
+tinyetl data.csv "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#orders"
+tinyetl "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#orders" orders.parquet
 
 # ODBC (any database with an ODBC driver; see "ODBC" below)
 tinyetl data.csv "odbc://Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=mydb;UID=sa;PWD=MyPass123;TrustServerCertificate=yes#orders"
@@ -395,6 +400,43 @@ TinyETL includes the ODBC driver manager, so you only need the driver for your d
 - Put values containing `;` in braces, e.g. `PWD={pa;ss}`
 - The database must exist before using TinyETL
 - For SQL Server driver names: `ODBC Driver 18 for SQL Server` (latest), `ODBC Driver 17 for SQL Server`, or `SQL Server` (older). Driver 18 encrypts by default; add `TrustServerCertificate=yes` for servers with self-signed certificates
+
+**Snowflake:**
+
+```bash
+# Format
+snowflake://user[:password]@account/database/schema?warehouse=WH[&role=ROLE]#table
+
+# Load a file into a table (created if it doesn't exist)
+export SNOWFLAKE_PRIVATE_KEY_PATH=~/.snowflake/rsa_key.p8
+tinyetl orders.csv "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#orders"
+
+# Replace the table's rows instead of appending
+tinyetl orders.csv "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#orders" --truncate
+
+# Export a table (or schema.table / database.schema.table)
+tinyetl "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#orders" orders.parquet
+```
+
+- **Account:** the account identifier, `ORGNAME-ACCOUNTNAME` (or a legacy locator such as `xy12345.us-east-1`). `SELECT CURRENT_ORGANIZATION_NAME() || '-' || CURRENT_ACCOUNT_NAME()` shows it
+- **Authentication:** use key-pair authentication; Snowflake is phasing out password-only sign-in, especially for service users. Point TinyETL at an unencrypted or passphrase-protected PKCS#8 private key with `SNOWFLAKE_PRIVATE_KEY_PATH` (and `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`), or with the `private_key_path` / `private_key_passphrase` options in a YAML config. Alternatively, put a password or programmatic access token in the URL, or pass it with `--source-secret-id` / `--dest-secret-id`. A key wins over a password
+- **Loading:** rows are written to gzip CSV files, uploaded to the table's own stage (`@%table`, so no `CREATE STAGE` privilege is needed) and loaded with one `COPY INTO` at the end. The load, and the `DELETE` for `--truncate`, run in one transaction: if anything fails, the table keeps its old rows. Memory use stays flat, since each staged file (500,000 rows by default) is uploaded as soon as it's full
+- **Azure and Google Cloud accounts:** TinyETL can only upload to stages on AWS-hosted accounts so far. On other clouds it detects this and loads with batched `INSERT` statements instead, which works but is slower and uses more warehouse time. Reading works on every cloud
+- **Reading** streams the result of `SELECT * FROM <table>`. NUMBER, FLOAT, BOOLEAN, DATE, TIMESTAMP and VARIANT/OBJECT/ARRAY (as JSON) keep their types; other types are read as text
+- **Names:** plain names (letters, digits, `_`, `$`) are left unquoted, so Snowflake stores them upper-case: a CSV column `customer_id` becomes `CUSTOMER_ID`, which you can query as `customer_id`, and reading the table back gives `CUSTOMER_ID`. Names with other characters are quoted and keep their exact case
+- **Column types for new tables:** `VARCHAR`, `NUMBER(38,0)`, `NUMBER(38,10)`, `BOOLEAN`, `DATE`, `TIMESTAMP_NTZ` (TinyETL's timestamps are UTC) and `VARIANT` for JSON. To choose your own types, create the table first
+
+YAML options for Snowflake endpoints (under `source.options` / `target.options`):
+
+| Option | Default | Meaning |
+|---|---|---|
+| `private_key_path` | `SNOWFLAKE_PRIVATE_KEY_PATH` | Private key for key-pair auth |
+| `private_key_passphrase` | `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE` | Passphrase of an encrypted key |
+| `warehouse`, `role` | from the URL | Override the URL's values |
+| `load_method` | `auto` | `auto` (stage on AWS, INSERT elsewhere), `stage` or `insert` |
+| `stage_file_rows` | `500000` | Rows per staged file |
+
+See [`examples/22_snowflake`](examples/22_snowflake/) for a complete setup, from creating a key pair to a test run.
 
 **Important Notes:**
 - Table names are automatically created if they don't exist

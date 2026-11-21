@@ -1,3 +1,4 @@
+mod arrow_values;
 pub mod avro;
 pub mod csv;
 pub mod duckdb;
@@ -7,6 +8,7 @@ pub mod mysql;
 pub mod odbc;
 pub mod parquet;
 pub mod postgres;
+pub mod snowflake;
 pub mod sqlite;
 
 use crate::{
@@ -93,9 +95,14 @@ pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
         Ok(Box::new(mssql::MssqlSource::new(connection_string)?))
     } else if connection_string.starts_with("odbc://") {
         Ok(Box::new(odbc::OdbcSource::new(connection_string)?))
+    } else if connection_string.starts_with("snowflake://") {
+        Ok(Box::new(snowflake::SnowflakeSource::new(
+            connection_string,
+            &std::collections::HashMap::new(),
+        )?))
     } else {
         Err(crate::TinyEtlError::Configuration(
-            format!("Unsupported source type: {}. Supported formats: file.csv, file.json, file.parquet, file.avro, file.db#table, file.duckdb#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table", connection_string)
+            format!("Unsupported source type: {}. Supported formats: file.csv, file.json, file.parquet, file.avro, file.db#table, file.duckdb#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table", connection_string)
         ))
     }
 }
@@ -121,9 +128,14 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
             return Ok(Box::new(mssql::MssqlTarget::new(connection_string)?));
         } else if connection_string.starts_with("odbc://") {
             return Ok(Box::new(odbc::OdbcTarget::new(connection_string)?));
+        } else if connection_string.starts_with("snowflake://") {
+            return Ok(Box::new(snowflake::SnowflakeTarget::new(
+                connection_string,
+                &std::collections::HashMap::new(),
+            )?));
         } else {
             return Err(crate::TinyEtlError::Configuration(format!(
-                "Unsupported protocol in: {}. Supported protocols: duckdb://, sqlite://, postgres://, mysql://, mssql://, odbc://",
+                "Unsupported protocol in: {}. Supported protocols: duckdb://, sqlite://, postgres://, mysql://, mssql://, odbc://, snowflake://",
                 connection_string
             )));
         }
@@ -154,7 +166,7 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
         Err(crate::TinyEtlError::Configuration(format!(
             "Unsupported target type: {}. Supported formats: \
             file.csv, file.json, file.parquet, file.avro, file.db, file.db#table, file.duckdb, file.duckdb#table, \
-            duckdb://path/file.duckdb#table, sqlite://path/file.db#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table",
+            duckdb://path/file.duckdb#table, sqlite://path/file.db#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table",
             connection_string
         )))
     }
@@ -191,6 +203,13 @@ pub async fn create_source_from_url_with_type_and_options(
     source_type: Option<&str>,
     options: &std::collections::HashMap<String, String>,
 ) -> Result<Box<dyn Source>> {
+    // Snowflake is a database, but unlike the others it takes endpoint options (key path, ...)
+    if connection_string.starts_with("snowflake://") {
+        return Ok(Box::new(snowflake::SnowflakeSource::new(
+            connection_string,
+            options,
+        )?));
+    }
     // Check if this looks like a protocol URL
     if connection_string.contains("://") {
         // Try database connectors first for database protocols
@@ -230,6 +249,12 @@ pub async fn create_target_from_url_with_options(
     connection_string: &str,
     options: &std::collections::HashMap<String, String>,
 ) -> Result<Box<dyn Target>> {
+    if connection_string.starts_with("snowflake://") {
+        return Ok(Box::new(snowflake::SnowflakeTarget::new(
+            connection_string,
+            options,
+        )?));
+    }
     // Check if this looks like a protocol URL
     if connection_string.contains("://") {
         // Try database connectors first for database protocols

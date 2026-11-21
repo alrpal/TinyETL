@@ -1,8 +1,9 @@
 """Compare an exported CSV with the original, value by value.
 
-Usage: compare.py original.csv exported.csv [key_column]
+Usage: compare.py [--ignore-header-case] original.csv exported.csv [key_column]
 Numbers are compared numerically, booleans by truth value, and empty means NULL.
-Column order must match exactly. Prints the differences and exits 1 if there are any.
+Column order must match exactly; with --ignore-header-case, column names may differ in case
+(Snowflake upper-cases unquoted names). Prints the differences and exits 1 if there are any.
 """
 import csv
 import sys
@@ -34,10 +35,16 @@ def load(path):
         return header, [row for row in reader]
 
 
-orig_path, out_path = sys.argv[1], sys.argv[2]
-key = sys.argv[3] if len(sys.argv) > 3 else None
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+ignore_case = "--ignore-header-case" in sys.argv[1:]
+orig_path, out_path = args[0], args[1]
+key = args[2] if len(args) > 2 else None
 oh, orows = load(orig_path)
 eh, erows = load(out_path)
+if ignore_case:
+    oh = [h.lower() for h in oh]
+    eh = [h.lower() for h in eh]
+    key = key.lower() if key else None
 problems = []
 if oh != eh:
     problems.append(f"header differs:\n  expected {oh}\n  got      {eh}")

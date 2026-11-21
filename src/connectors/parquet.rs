@@ -3,8 +3,6 @@ use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
-use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,175 +31,6 @@ impl ParquetSource {
 
     fn arrow_type_to_schema_type(arrow_type: &DataType) -> crate::schema::DataType {
         crate::schema::DataType::from_arrow(arrow_type)
-    }
-
-    fn arrow_array_to_values(
-        array: &dyn Array,
-        column_name: &str,
-        field: &Field,
-    ) -> Result<Vec<(String, Value)>> {
-        let mut values = Vec::new();
-
-        // Check if this is a JSON column based on metadata
-        let is_json = field
-            .metadata()
-            .get("tinyetl:type")
-            .map(|s| s == "json")
-            .unwrap_or(false);
-
-        match array.data_type() {
-            DataType::Utf8 => {
-                let string_array =
-                    array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| {
-                            TinyEtlError::DataTransfer(
-                                "Failed to downcast to StringArray".to_string(),
-                            )
-                        })?;
-                for i in 0..string_array.len() {
-                    let value = if string_array.is_null(i) {
-                        Value::Null
-                    } else if is_json {
-                        // Parse the string as JSON
-                        let json_str = string_array.value(i);
-                        match serde_json::from_str(json_str) {
-                            Ok(json_val) => Value::Json(json_val),
-                            Err(_) => Value::String(json_str.to_string()),
-                        }
-                    } else {
-                        Value::String(string_array.value(i).to_string())
-                    };
-                    values.push((column_name.to_string(), value));
-                }
-            }
-            DataType::Int64 => {
-                let int_array = array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    TinyEtlError::DataTransfer("Failed to downcast to Int64Array".to_string())
-                })?;
-                for i in 0..int_array.len() {
-                    let value = if int_array.is_null(i) {
-                        Value::Null
-                    } else {
-                        Value::Integer(int_array.value(i))
-                    };
-                    values.push((column_name.to_string(), value));
-                }
-            }
-            DataType::Int32 => {
-                let int_array = array.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
-                    TinyEtlError::DataTransfer("Failed to downcast to Int32Array".to_string())
-                })?;
-                for i in 0..int_array.len() {
-                    let value = if int_array.is_null(i) {
-                        Value::Null
-                    } else {
-                        Value::Integer(int_array.value(i) as i64)
-                    };
-                    values.push((column_name.to_string(), value));
-                }
-            }
-            DataType::Float64 => {
-                let float_array =
-                    array
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .ok_or_else(|| {
-                            TinyEtlError::DataTransfer(
-                                "Failed to downcast to Float64Array".to_string(),
-                            )
-                        })?;
-                for i in 0..float_array.len() {
-                    let value = if float_array.is_null(i) {
-                        Value::Null
-                    } else {
-                        // Convert f64 to Decimal
-                        match Decimal::try_from(float_array.value(i)) {
-                            Ok(d) => Value::Decimal(d),
-                            Err(_) => Value::String(float_array.value(i).to_string()),
-                        }
-                    };
-                    values.push((column_name.to_string(), value));
-                }
-            }
-            DataType::Boolean => {
-                let bool_array =
-                    array
-                        .as_any()
-                        .downcast_ref::<BooleanArray>()
-                        .ok_or_else(|| {
-                            TinyEtlError::DataTransfer(
-                                "Failed to downcast to BooleanArray".to_string(),
-                            )
-                        })?;
-                for i in 0..bool_array.len() {
-                    let value = if bool_array.is_null(i) {
-                        Value::Null
-                    } else {
-                        Value::Boolean(bool_array.value(i))
-                    };
-                    values.push((column_name.to_string(), value));
-                }
-            }
-            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
-                let ts_array = array
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .ok_or_else(|| {
-                        TinyEtlError::DataTransfer(
-                            "Failed to downcast to TimestampNanosecondArray".to_string(),
-                        )
-                    })?;
-                for i in 0..ts_array.len() {
-                    let value = if ts_array.is_null(i) {
-                        Value::Null
-                    } else {
-                        let timestamp_ns = ts_array.value(i);
-                        let timestamp_s = timestamp_ns / 1_000_000_000;
-                        let nanoseconds = (timestamp_ns % 1_000_000_000) as u32;
-                        match chrono::DateTime::from_timestamp(timestamp_s, nanoseconds) {
-                            Some(dt) => Value::Date(dt),
-                            None => Value::Null,
-                        }
-                    };
-                    values.push((column_name.to_string(), value));
-                }
-            }
-            _ => {
-                // For unsupported types, convert to string representation
-                for i in 0..array.len() {
-                    let value = if array.is_null(i) {
-                        Value::Null
-                    } else {
-                        // This is a fallback - in production you might want more sophisticated conversion
-                        Value::String(format!("unsupported_type_row_{}", i))
-                    };
-                    values.push((column_name.to_string(), value));
-                }
-            }
-        }
-
-        Ok(values)
-    }
-
-    fn record_batch_to_rows(batch: &RecordBatch) -> Result<Vec<Row>> {
-        let num_rows = batch.num_rows();
-        let mut rows = vec![HashMap::new(); num_rows];
-
-        let schema = batch.schema();
-        for (col_index, field) in schema.fields().iter().enumerate() {
-            let column = batch.column(col_index);
-            let column_values = Self::arrow_array_to_values(column.as_ref(), field.name(), field)?;
-
-            for (row_index, (column_name, value)) in column_values.into_iter().enumerate() {
-                if row_index < num_rows {
-                    rows[row_index].insert(column_name, value);
-                }
-            }
-        }
-
-        Ok(rows)
     }
 }
 
@@ -283,7 +112,7 @@ impl Source for ParquetSource {
         let batch = &self.all_batches[self.current_batch_index];
         self.current_batch_index += 1;
 
-        let mut rows = Self::record_batch_to_rows(batch)?;
+        let mut rows = crate::connectors::arrow_values::record_batch_to_rows(batch)?;
 
         // If requested batch size is smaller than the record batch, we need to split it
         if rows.len() > batch_size {
@@ -516,6 +345,7 @@ impl Target for ParquetTarget {
 mod tests {
     use super::*;
     use crate::schema::{Column, DataType};
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     #[tokio::test]

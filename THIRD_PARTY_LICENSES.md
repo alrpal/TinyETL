@@ -1,15 +1,17 @@
 # Third-Party Licenses
 
 TinyETL is licensed under the Apache License 2.0 with additional commercial terms (see [LICENSE](LICENSE)).
-The Linux and macOS release binaries also contain the following libraries, which are **statically linked**
-so that the binary has no runtime dependencies. These libraries are **not** covered by TinyETL's license.
-They remain under their own licenses, reproduced in [`licenses/`](licenses/).
+The release binaries also contain the following libraries, which are **statically linked** so that the
+binary has no runtime dependencies. These libraries are **not** covered by TinyETL's license. They remain
+under their own licenses, reproduced in [`licenses/`](licenses/).
 
 The additional commercial licensing terms in `LICENSE` do not apply to these libraries.
 
-The Windows binary does not include them. It uses the ODBC driver manager built into Windows.
-The Linux binary additionally contains OpenSSL (see below); the macOS and Windows binaries use the
-operating system's TLS libraries instead.
+| Library | Linux | macOS | Windows |
+|---|---|---|---|
+| unixODBC (LGPL) | yes | yes | no: uses the ODBC driver manager built into Windows |
+| OpenSSL | yes | no: uses the system's TLS | no: uses the system's TLS |
+| AWS-LC | yes | yes | yes |
 
 ## unixODBC
 
@@ -31,6 +33,17 @@ operating system's TLS libraries instead.
 - **Source used for the binaries:** the [`openssl-src` crate](https://crates.io/crates/openssl-src), which vendors
   the unmodified OpenSSL sources. The exact version is pinned in each release's `Cargo.lock` and recorded in
   `licenses/BUILD-INFO.txt` in the Linux download. Upstream source: <https://www.openssl.org/source/>.
+
+## AWS-LC
+
+- **What:** the cryptography library behind the TLS connections of the Snowflake and S3 connectors (through `rustls`)
+- **License:** permissive: ISC, Apache License 2.0, MIT and BSD-3-Clause for different parts
+  ([`licenses/AWS-LC-LICENSE.txt`](licenses/AWS-LC-LICENSE.txt))
+- **Copyright:** Amazon.com, Inc. or its affiliates; Google Inc. (BoringSSL); the OpenSSL Project and others, as
+  listed in the license file
+- **Source used for the binaries:** the [`aws-lc-sys` crate](https://crates.io/crates/aws-lc-sys), which vendors the
+  AWS-LC sources. The exact version is pinned in each release's `Cargo.lock`. Upstream source:
+  <https://github.com/aws/aws-lc>.
 
 ## Your rights under the LGPL
 

@@ -27,9 +27,11 @@ if [ "${1:-}" != "--no-build" ]; then
     echo "Building the Linux binary (first build takes several minutes; needs ~6 GB of Docker memory)..."
     docker volume create tinyetl-linux-build >/dev/null
     docker volume create tinyetl-linux-target >/dev/null
-    # Tracked files plus uncommitted changes, without untracked files or build output
-    TREE=$(cd "$REPO" && git stash create)
-    (cd "$REPO" && git archive --format=tar "${TREE:-HEAD}") | docker run --rm -i \
+    # The working tree as it is (tracked and new files, uncommitted changes), minus anything
+    # gitignored such as target/
+    (cd "$REPO" && git ls-files -z --cached --others --exclude-standard |
+        while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done |
+        tar --null -T - -cf -) | docker run --rm -i \
         -v tinyetl-linux-build:/out -v tinyetl-linux-target:/src/target "$RUST_IMAGE" bash -c '
         set -eo pipefail
         mkdir -p /src && tar -xf - -C /src && cd /src
