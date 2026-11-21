@@ -217,8 +217,9 @@ please contact licensing@tinyetl.com for additional commercial licensing terms.
 
 THIRD-PARTY COMPONENTS
 
-The Linux and macOS binaries of TinyETL include third-party libraries
-(unixODBC and GNU libltdl) that are licensed under the GNU Lesser General
-Public License. These libraries are not covered by this License, and the
+The Linux and macOS binaries of TinyETL include the third-party unixODBC
+library, licensed under the GNU Lesser General Public License, and the Linux
+binary also includes OpenSSL, licensed under the Apache License 2.0. These
+libraries are not covered by this License, and the
 Additional Commercial Licensing Terms above do not apply to them. They
 remain under their own licenses. See THIRD_PARTY_LICENSES.md.

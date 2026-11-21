@@ -85,12 +85,9 @@ Expand-Archive -Path "tinyetl.zip" -DestinationPath "."
 cargo install tinyetl
 ```
 
-Building from source needs Rust 1.94 or later (`rustup update`), a C compiler, and the static GNU libltdl library, which is linked into the binary together with the bundled unixODBC:
-- Debian/Ubuntu: `sudo apt install build-essential pkg-config perl libltdl-dev` (OpenSSL is compiled from source, which needs `perl`), then build with the library directory set:
-  ```bash
-  ODBC_SYS_STATIC_PATH=/usr/lib/$(gcc -print-multiarch) cargo install tinyetl
-  ```
-- macOS: `xcode-select --install` and `brew install libtool`
+Building from source needs Rust 1.94 or later (`rustup update`) and a C/C++ compiler. The bundled unixODBC (and, on Linux, OpenSSL) are compiled from source, so no system libraries are needed:
+- Debian/Ubuntu: `sudo apt install build-essential perl` (`perl` is used to build OpenSSL)
+- macOS: `xcode-select --install`
 
 **Verify installation**:
 ```bash
@@ -256,7 +253,7 @@ TinyETL supports two main categories of data sources and targets:
 - **PostgreSQL** - Advanced open-source database
 - **MySQL** - Popular relational database
 - **DuckDB** - Embedded analytical database optimized for OLAP workloads
-- **ODBC** - Universal database connectivity (SQL Server, Oracle, DB2, and more)
+- **ODBC** - Any database with an ODBC driver (tested: SQL Server, PostgreSQL, MySQL/MariaDB, SQLite)
 
 **Connection Examples:**
 ```bash
@@ -276,18 +273,9 @@ tinyetl data.csv "mysql://user:@localhost:3306/mydb#sales"
 tinyetl "products.duckdb#inventory" output.csv
 tinyetl data.csv "analytics.duckdb#sales"
 
-# ODBC - SQL Server (Windows with Trusted Auth)
-tinyetl data.csv "odbc://Driver={ODBC Driver 18 for SQL Server};Server=localhost\MSSQLSERVER01;Database=master;Trusted_Connection=Yes;TrustServerCertificate=Yes#customers"
-
-# ODBC - SQL Server (with username/password)
-tinyetl data.csv "odbc://Driver={SQL Server};Server=localhost;Database=mydb;UID=sa;PWD=MyPass123#orders"
-
-# ODBC - Reading from SQL Server
-tinyetl "odbc://Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=master;Trusted_Connection=Yes#employees" output.csv
-
-# DuckDB
-tinyetl "products.duckdb#inventory" output.csv
-tinyetl data.csv "analytics.duckdb#sales"
+# ODBC (any database with an ODBC driver; see "ODBC" below)
+tinyetl data.csv "odbc://Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=mydb;UID=sa;PWD=MyPass123;TrustServerCertificate=yes#orders"
+tinyetl "odbc://Driver={PostgreSQL Unicode};Server=localhost;Database=mydb;UID=user;PWD=pass#public.orders" output.csv
 ```
 
 #### Source Type Override
@@ -361,41 +349,52 @@ tinyetl "products.duckdb#inventory" output.csv
 tinyetl "analytics.duckdb#daily_sales" report.parquet
 ```
 
-**ODBC (Universal Database Connectivity):**
+**ODBC:**
 
-ODBC provides connectivity to SQL Server, Oracle, DB2, and many other databases. The connection string format varies by driver.
+`odbc://` works with any database that has an ODBC driver. Everything after `odbc://` up to the last `#` is passed to the driver unchanged, and the text after `#` is the table (`table`, or `schema.table`).
 
 ```bash
-# SQL Server with Windows Authentication (Trusted Connection)
+# SQL Server (Microsoft ODBC Driver 18)
+tinyetl data.csv "odbc://Driver={ODBC Driver 18 for SQL Server};Server=localhost,1433;Database=mydb;UID=sa;PWD=MyPass123;TrustServerCertificate=yes#customers"
+
+# SQL Server with Windows Authentication
 tinyetl data.csv "odbc://Driver={ODBC Driver 18 for SQL Server};Server=localhost\MSSQLSERVER01;Database=master;Trusted_Connection=Yes;TrustServerCertificate=Yes#customers"
 
-# SQL Server with SQL Authentication
-tinyetl data.csv "odbc://Driver={SQL Server};Server=localhost;Database=mydb;UID=sa;PWD=MyPass123#orders"
+# PostgreSQL (psqlODBC)
+tinyetl "odbc://Driver={PostgreSQL Unicode};Server=localhost;Port=5432;Database=mydb;UID=user;PWD=pass#public.orders" orders.parquet
 
-# SQL Server - Reading data
-tinyetl "odbc://Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=mydb;Trusted_Connection=Yes#sales" output.csv
+# MySQL / MariaDB (MariaDB Connector/ODBC also works with MySQL servers)
+tinyetl data.csv "odbc://Driver={MariaDB Unicode};Server=localhost;Port=3306;Database=mydb;UID=user;PWD=pass#sales"
 
-# Oracle Database
-tinyetl data.csv "odbc://Driver={Oracle ODBC Driver};Server=localhost:1521;Database=orcl;UID=user;PWD=pass#employees"
+# SQLite (SQLite ODBC driver)
+tinyetl data.csv "odbc://Driver={SQLite3};Database=/path/to/file.db#customers"
 
-# IBM DB2
-tinyetl data.csv "odbc://Driver={IBM DB2 ODBC DRIVER};Database=sample;Hostname=localhost;Port=50000;UID=db2admin;PWD=pass#customers"
+# A DSN configured in odbc.ini, or a driver library given by path
+tinyetl "odbc://DSN=warehouse;UID=user;PWD=pass#facts" facts.csv
+tinyetl data.csv "odbc://Driver=/opt/homebrew/lib/psqlodbcw.so;Server=localhost;Database=mydb;UID=user;PWD=pass#customers"
 ```
+
+How it works:
+- **Reading** runs one `SELECT * FROM <table>` and streams the rows. Column types come from the driver, so integers, decimals, booleans and dates keep their types
+- **Writing** creates the table if it doesn't exist, using column types for the database the driver reports: SQL Server, PostgreSQL, MySQL/MariaDB and SQLite get the same types as TinyETL's native connectors; other databases get standard ANSI SQL types (`VARCHAR(4000)`, `BIGINT`, `DECIMAL(38,10)`, `BOOLEAN`, `DATE`, `TIMESTAMP`). To control the types, create the table yourself first. Rows are inserted in batches with ODBC parameter arrays inside one transaction, committed at the end
+- Identifiers are quoted the way the driver reports (`"name"` for most databases, `` `name` `` for MySQL)
+- Text is exchanged with the driver as UTF-16, so any Unicode text works
+
+Tested with SQL Server (ODBC Driver 18), PostgreSQL (psqlODBC), MySQL (MariaDB Connector/ODBC) and SQLite (SQLite ODBC Driver); see `test_env/odbc/`. Other databases (Oracle, DB2, Snowflake, …) should work through the ANSI fallback but haven't been tested.
 
 **ODBC Driver Requirements:**
 
 TinyETL includes the ODBC driver manager, so you only need the driver for your database. You do not need to install unixODBC.
-- **Windows**: Drivers are typically pre-installed or available via vendor installers. TinyETL uses the driver manager built into Windows
-- **macOS**: Install drivers via Homebrew (e.g. `brew install microsoft/mssql-release/msodbcsql18`). TinyETL finds drivers registered in Homebrew's `odbcinst.ini` automatically
-- **Linux**: Install drivers via your package manager. They are registered in `/etc/odbcinst.ini`
+- **Windows**: Drivers are typically pre-installed or available via vendor installers. TinyETL uses the driver manager built into Windows. Non-ASCII text on Windows hasn't been tested yet
+- **macOS**: Install drivers via Homebrew (e.g. `brew install microsoft/mssql-release/msodbcsql18`, `brew install psqlodbc`). TinyETL finds drivers registered in Homebrew's `odbcinst.ini` automatically. Oracle's MySQL Connector/ODBC for macOS is built for the iODBC driver manager and needs `libiodbc` installed; the MariaDB driver doesn't
+- **Linux**: Install drivers via your package manager (`apt install odbc-postgresql odbc-mariadb libsqliteodbc`, Microsoft's `msodbcsql18`). Drivers registered by file name in `/etc/odbcinst.ini`, as Debian and Ubuntu do, are found in `/usr/lib/<arch>/odbc/` when you name them with `Driver=`. For a DSN in `odbc.ini`, give its `Driver` as a full library path (or set `LD_LIBRARY_PATH=/usr/lib/<arch>/odbc`)
 - Drivers and DSNs are read from `odbcinst.ini` / `odbc.ini` in `/etc`, or from the directory in the `ODBCSYSINI` environment variable if set. You can also skip registration and give the driver's library path: `Driver=/path/to/libdriver.so`
 
 **Important ODBC Notes:**
-- Connection strings must be URL-encoded if they contain special characters
-- The database must exist before using TinyETL
-- Table names are specified after `#` separator
 - Always quote ODBC connection strings to prevent shell interpretation
-- For SQL Server driver names: `ODBC Driver 18 for SQL Server` (latest), `ODBC Driver 17 for SQL Server`, or `SQL Server` (older)
+- Put values containing `;` in braces, e.g. `PWD={pa;ss}`
+- The database must exist before using TinyETL
+- For SQL Server driver names: `ODBC Driver 18 for SQL Server` (latest), `ODBC Driver 17 for SQL Server`, or `SQL Server` (older). Driver 18 encrypts by default; add `TrustServerCertificate=yes` for servers with self-signed certificates
 
 **Important Notes:**
 - Table names are automatically created if they don't exist
@@ -1124,7 +1123,7 @@ This project is licensed under a modified Apache License 2.0 - see the [LICENSE]
 
 Commercial use is explicitly allowed with the exception of reselling TinyETL in a cloud SaaS format, please contact licensing@tinyetl.com for additional commercial licensing terms.
 
-**Bundled third-party libraries:** to keep the binary free of runtime dependencies, the Linux and macOS binaries statically link the [unixODBC](https://www.unixodbc.org/) driver manager (2.3.14) and GNU libltdl. Both are licensed under the GNU LGPL (v2.1 or later and v2 or later, respectively), not under TinyETL's license, and the commercial terms above do not apply to them. Their license texts ship with every download, and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) explains where to get their source and how to rebuild TinyETL against modified versions.
+**Bundled third-party libraries:** to keep the binary free of runtime dependencies, the Linux and macOS binaries statically link the [unixODBC](https://www.unixodbc.org/) driver manager (2.3.14), licensed under the GNU LGPL v2.1 or later, and the Linux binary also includes OpenSSL (Apache License 2.0). They are not covered by TinyETL's license, and the commercial terms above do not apply to them. Their license texts ship with every download, and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) explains where to get their source and how to rebuild TinyETL against a modified unixODBC.
 
 
 ---

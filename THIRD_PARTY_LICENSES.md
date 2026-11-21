@@ -18,19 +18,10 @@ operating system's TLS libraries instead.
 - **License:** GNU Lesser General Public License v2.1 or later ([`licenses/LGPL-2.1.txt`](licenses/LGPL-2.1.txt))
 - **Copyright:** the unixODBC authors (see `AUTHORS` in the unixODBC source)
 - **Source used for the binaries:** the [`unix-odbc` crate, version 0.1.4](https://crates.io/crates/unix-odbc/0.1.4),
-  which vendors the unmodified unixODBC 2.3.14 sources. The exact crate version for each release is pinned in that
-  release's `Cargo.lock`, and the crate archive on crates.io is immutable. The upstream source is
-  [unixODBC-2.3.14.tar.gz](https://www.unixodbc.org/unixODBC-2.3.14.tar.gz).
-
-## GNU libltdl
-
-- **What:** the dynamic-loading library from GNU Libtool, which unixODBC uses to open ODBC driver libraries
-- **License:** GNU Lesser General Public License v2 or later ([`licenses/LGPL-2.1.txt`](licenses/LGPL-2.1.txt))
-- **Copyright:** Free Software Foundation, Inc.
-- **Source used for the binaries:** the libltdl static library from the build machine (the `libltdl-dev` package on
-  Linux, the Homebrew `libtool` formula on macOS). The exact version in each binary is recorded in
-  `licenses/BUILD-INFO.txt` inside that release download. Source code for any GNU Libtool version is available from
-  <https://ftp.gnu.org/gnu/libtool/>.
+  which vendors the unmodified unixODBC 2.3.14 sources. The crate compiles them with its own small `ltdl.h`, which
+  loads drivers with the system's `dlopen()` instead of GNU libltdl, so libltdl is not part of the binary. The exact
+  crate version for each release is pinned in that release's `Cargo.lock`, and the crate archive on crates.io is
+  immutable. The upstream source is [unixODBC-2.3.14.tar.gz](https://www.unixodbc.org/unixODBC-2.3.14.tar.gz).
 
 ## OpenSSL (Linux binary only)
 
@@ -43,7 +34,7 @@ operating system's TLS libraries instead.
 
 ## Your rights under the LGPL
 
-You may modify these libraries and use your modified versions with TinyETL. Because they are statically linked,
+You may modify unixODBC and use your modified version with TinyETL. Because it is statically linked,
 the LGPL requires that you be able to relink TinyETL against a modified version. TinyETL's complete source code
 is public, and every release is tagged in this repository with its `Cargo.lock`, so you can rebuild any released
 binary:
@@ -55,9 +46,6 @@ binary:
    [patch.crates-io]
    unix-odbc = { path = "../my-unix-odbc" }
    ```
-
-   For a modified libltdl, put your `libltdl.a` first on the linker path instead:
-   `RUSTFLAGS="-L /path/to/my/libltdl/lib"`.
 3. Build with `cargo build --release --locked`.
 
 If you need help obtaining the source of a specific release, contact licensing@tinyetl.com.

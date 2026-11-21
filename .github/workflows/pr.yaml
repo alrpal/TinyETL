@@ -27,14 +27,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          # libltdl-dev provides the static libltdl.a for the bundled unixODBC; do not install unixodbc-dev
-          sudo apt-get install -y pkg-config libltdl-dev
-          # rustc only finds static libraries on explicit search paths; point odbc-sys at libltdl.a
-          echo "ODBC_SYS_STATIC_PATH=/usr/lib/$(gcc -print-multiarch)" >> $GITHUB_ENV
-
       - name: Cargo fmt
         run: cargo fmt --all -- --check
 

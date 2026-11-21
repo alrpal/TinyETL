@@ -15,8 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS build (Apple Silicon only; Homebrew no longer supports Intel Macs, so there
-          # is no way to get an x86_64 libltdl.a on the runner)
+          # macOS build (Apple Silicon only; Intel Macs are not built)
           - target: aarch64-apple-darwin
             os: macos-latest
             name: tinyetl-macos-apple-silicon-aarch64
@@ -57,20 +56,10 @@ jobs:
     - name: Install system dependencies (Ubuntu)
       if: startsWith(matrix.os, 'ubuntu')
       run: |
-        sudo apt-get update
-        # libltdl-dev provides the static libltdl.a linked into the binary with the bundled unixODBC.
-        # unixodbc-dev must NOT be installed: its libodbc would be linked instead of the bundled copy.
-        sudo apt-get install -y pkg-config libltdl-dev
-        # rustc only finds static libraries on explicit search paths; point odbc-sys at libltdl.a
-        echo "ODBC_SYS_STATIC_PATH=/usr/lib/$(gcc -print-multiarch)" >> $GITHUB_ENV
-
-    - name: Install system dependencies (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        # libtool provides the static libltdl.a linked into the binary with the bundled unixODBC.
-        # The -L flag puts libtool's own lib directory first on the linker search path.
-        brew list libtool >/dev/null 2>&1 || brew install libtool
-        echo "RUSTFLAGS=-L /opt/homebrew/opt/libtool/lib" >> $GITHUB_ENV
+        # Nothing beyond the runner's compiler and perl (for OpenSSL) is needed: unixODBC and OpenSSL
+        # are compiled from vendored sources. Don't install unixodbc-dev: its libodbc could be linked
+        # instead of the bundled copy.
+        echo "No extra packages needed"
 
     - name: Install system dependencies (Windows)
       if: matrix.os == 'windows-latest'
@@ -90,7 +79,7 @@ jobs:
         echo "::notice::This platform will be skipped in the release"
         exit 1
 
-    # The binary must run on a machine with nothing installed (no libodbc, libltdl, etc.)
+    # The binary must run on a machine with nothing installed (no libodbc, libssl, etc.)
     - name: Verify no third-party shared libraries (Linux)
       if: startsWith(matrix.os, 'ubuntu')
       run: |
@@ -128,17 +117,11 @@ jobs:
         # The binary bundles unixODBC (LGPL-2.1-or-later); ship the license texts with it
         cp LICENSE THIRD_PARTY_LICENSES.md dist/
         cp -r licenses dist/
-        # Record the exact versions of the statically linked LGPL libraries
-        if [ "$RUNNER_OS" = "Linux" ]; then
-          LTDL="libltdl-dev $(dpkg-query -W -f='${Version}' libltdl-dev) (Ubuntu package)"
-        else
-          LTDL="Homebrew $(brew list --versions libtool)"
-        fi
+        # Record the exact versions of the statically linked third-party libraries
         UNIX_ODBC=$(grep -A1 '^name = "unix-odbc"' Cargo.lock | grep version | cut -d'"' -f2)
         {
           echo "TinyETL ${{ github.ref_name }} (${{ matrix.target }}), commit ${{ github.sha }}"
           echo "unixODBC: 2.3.14 via the unix-odbc crate ${UNIX_ODBC} (https://crates.io/crates/unix-odbc/${UNIX_ODBC})"
-          echo "GNU libltdl: ${LTDL}"
           if [ "$RUNNER_OS" = "Linux" ]; then
             OPENSSL_SRC=$(grep -A1 '^name = "openssl-src"' Cargo.lock | grep version | cut -d'"' -f2)
             echo "OpenSSL: ${OPENSSL_SRC#*+} via the openssl-src crate ${OPENSSL_SRC} (https://crates.io/crates/openssl-src/${OPENSSL_SRC})"
@@ -227,6 +210,6 @@ jobs:
         body: |
           ### License notice
 
-          The Linux and macOS binaries include the [unixODBC](https://www.unixodbc.org/) driver manager (version 2.3.14) and GNU libltdl, statically linked and licensed under the **GNU LGPL v2.1 or later**. TinyETL itself is licensed under Apache 2.0; the LGPL applies only to those bundled libraries, and the additional commercial terms in `LICENSE` do not apply to them. License texts are included in each download (`THIRD_PARTY_LICENSES.md` and `licenses/`). See [THIRD_PARTY_LICENSES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_LICENSES.md) for source and relinking information.
+          The Linux and macOS binaries include the [unixODBC](https://www.unixodbc.org/) driver manager (version 2.3.14), statically linked and licensed under the **GNU LGPL v2.1 or later**. The Linux binary also includes OpenSSL (Apache License 2.0). TinyETL itself is licensed under Apache 2.0; the LGPL applies only to unixODBC, and the additional commercial terms in `LICENSE` do not apply to the bundled libraries. License texts are included in each download (`THIRD_PARTY_LICENSES.md` and `licenses/`). See [THIRD_PARTY_LICENSES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_LICENSES.md) for source and relinking information.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

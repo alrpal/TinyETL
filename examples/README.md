@@ -113,6 +113,21 @@ tinyetl "postgres://testuser:testpass@localhost:5432/testdb#customers" customers
 - `--truncate`, so re-runs replace the rows instead of appending
 - Reading a table back out, including one TinyETL didn't create (the seeded `employees` table)
 
+### 21_csv_to_postgres_odbc
+**PostgreSQL Round Trip through ODBC**
+
+The same round trip as example 20, but through the `odbc://` connector and the PostgreSQL ODBC driver (`brew install psqlodbc` or `apt install odbc-postgresql`). Needs the `tinyetl-postgres` container; skips if the container or driver is missing.
+
+```bash
+tinyetl customers.csv "odbc://Driver=/opt/homebrew/lib/psqlodbcw.so;Server=localhost;Port=5432;Database=testdb;UID=testuser;PWD=testpass#customers_odbc" --truncate
+```
+
+**What it tests:**
+- Creating a table through ODBC with PostgreSQL column types
+- Reading it back through ODBC with the table's column order
+
+For ODBC against SQL Server, MySQL and SQLite too, run `test_env/odbc/run.sh` (Linux, in Docker).
+
 ## Protocol Architecture
 
 ### Current Implementation Status

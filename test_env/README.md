@@ -118,6 +118,18 @@ See [`http-server/README.md`](http-server/README.md) for detailed documentation.
 There is no local S3 service in this environment; the S3 protocol is tested against a real bucket.
 See [`examples/19_s3`](../examples/19_s3/) for the setup.
 
+## ODBC Testing
+
+`odbc/run.sh` tests the `odbc://` connector on Linux against the SQL Server, PostgreSQL and MySQL containers above, and a SQLite file, each through its ODBC driver:
+
+```bash
+docker-compose up -d          # the databases
+odbc/run.sh                   # build a Linux binary in Docker, then run the tests
+odbc/run.sh --no-build        # reuse the last Linux build
+```
+
+It builds TinyETL from your working tree in a `rust` container (no system OpenSSL or unixODBC, like a release build) and runs it in a Debian image with Microsoft's ODBC Driver 18, psqlODBC, MariaDB Connector/ODBC and the SQLite ODBC driver (`odbc/Dockerfile`; installing Driver 18 accepts Microsoft's EULA). For each database it writes `odbc/typed.csv` (decimals, booleans, NULLs, Unicode, a 9,000-character value) to a new table, reads it back and compares the values and column order, then checks that a second run appends and that `--truncate` replaces the rows. The first build needs about 6 GB of Docker memory (`colima start --memory 8`).
+
 ## Troubleshooting
 
 ### Check if services are running

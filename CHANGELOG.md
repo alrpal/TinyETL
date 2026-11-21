@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Example `21_csv_to_postgres_odbc`: a CSV → PostgreSQL → CSV round trip through the PostgreSQL ODBC driver
+- `test_env/odbc/run.sh`: tests the `odbc://` connector on Linux against SQL Server, PostgreSQL, MySQL and SQLite with their ODBC drivers
 - **S3 Protocol**: `s3://bucket/path/file.ext` as both a source and a target for CSV, JSON, Parquet and Avro files
   - Works with Amazon S3 and S3-compatible stores (e.g. Cloudflare R2) via the `endpoint` option
   - Credentials from `AWS_*` environment variables, IAM roles, or per-endpoint YAML options (`region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`, `allow_http`, `path_style`)
@@ -16,11 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Example `20_csv_to_postgres`: a CSV → PostgreSQL → CSV round trip against the `test_env` Postgres container
 
 ### Fixed
-- **Linux and macOS binaries no longer need unixODBC installed** ([#25](https://github.com/alrpal/TinyETL/issues/25)). The binaries failed to start on machines without `libodbc` (`error while loading shared libraries: libodbc.so.2`). The unixODBC driver manager and GNU libltdl are now compiled into the binary, so it has no runtime dependencies again
+- **Linux and macOS binaries no longer need unixODBC installed** ([#25](https://github.com/alrpal/TinyETL/issues/25)). The binaries failed to start on machines without `libodbc` (`error while loading shared libraries: libodbc.so.2`). The unixODBC driver manager is now compiled into the binary, so it has no runtime dependencies again
   - On macOS, drivers registered by Homebrew are still found automatically. Set `ODBCSYSINI` to use a different `odbcinst.ini` location
 - **The Linux binary no longer needs OpenSSL installed.** It linked the system's `libssl.so.3`, so it failed to start on systems without it (such as `debian:12-slim`). OpenSSL is now compiled into the Linux binary; it still uses the system's CA certificates. macOS and Windows use the operating system's TLS libraries as before
 - The Linux binary is now built on Ubuntu 22.04, so it runs on systems with glibc 2.35 or later (Ubuntu 22.04+, Debian 12+, Fedora 36+). Built on Ubuntu 24.04, it required glibc 2.38 and failed on Debian 12 and Ubuntu 22.04
 - Reading from PostgreSQL or MySQL now keeps the table's column order. Previously the columns in the output file came out in a random order
+- **`odbc://` works with any ODBC driver, not just SQL Server.** The connector used SQL Server-only SQL (`[name]` quoting, `OFFSET … FETCH` paging, `SET IMPLICIT_TRANSACTIONS ON`, multi-row `VALUES`), so it failed on other databases. It now quotes identifiers the way the driver reports, reads with a single streaming `SELECT`, uses standard ODBC transactions and parameter-array inserts, and picks `CREATE TABLE` column types for SQL Server, PostgreSQL, MySQL/MariaDB and SQLite (ANSI SQL types for other databases). Tested with SQL Server (ODBC Driver 18), PostgreSQL (psqlODBC), MySQL (MariaDB Connector/ODBC) and SQLite (SQLite ODBC)
+  - Values read through ODBC keep their types (integers, decimals, booleans, dates) instead of all becoming text
+  - Text is exchanged as UTF-16, so non-Latin characters survive (SQL Server stored them as `?`)
+  - `schema.table` names are quoted part by part, and strings are no longer limited to `VARCHAR(255)` on SQL Server
+  - A row was dropped at every batch boundary when reading through ODBC
+  - On Debian and Ubuntu, drivers installed with `apt` (registered by file name, such as `Driver={PostgreSQL Unicode}`) can now be loaded; TinyETL resolves them to `/usr/lib/<arch>/odbc/`
+  - TinyETL switches to a UTF-8 character locale when the environment has none (common in containers), which some drivers need to convert text
 - Reading a PostgreSQL table that hadn't been analyzed yet logged `Copying 18446744073709551615 rows`. TinyETL now falls back to an exact row count
 
 ### Changed
@@ -28,11 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `duckdb` from 1.4.1 to 1.4.5, which builds with Visual Studio 2026 (MSVC 14.5x). 1.4.1's bundled `fmt` library used `stdext::checked_array_iterator`, which that compiler removed, so Windows builds failed
 - **Building from source now requires Rust 1.94 or later** (`rust-version` was previously listed as 1.70, which the dependencies had already outgrown). TinyETL builds on current stable Rust again: `sqlx` 0.6 and `mlua` 0.8 no longer compiled on Rust 1.100, so they are upgraded to `sqlx` 0.9 and `mlua` 0.12
 - Building from source on Linux no longer needs `libssl-dev`: sqlx's unused query macros are disabled, which built a second, non-vendored OpenSSL for the build host
-- **No more prebuilt binary for Intel Macs.** Homebrew no longer supports Intel Macs, so the release build can't get the libraries it needs for them. Intel Mac users can still build from source with `cargo install tinyetl`
-- Release workflow checks that binaries link no third-party shared libraries and run in clean `ubuntu:24.04` and `debian:12-slim` containers
+- **No more prebuilt binary for Intel Macs.** Intel Mac users can still build from source with `cargo install tinyetl`
+- Release workflow checks that binaries link no third-party shared libraries and run in clean `ubuntu:22.04`, `debian:12-slim` and `ubuntu:24.04` containers
+- Building from source no longer needs unixODBC installed (`unixodbc-dev` / `brew install unixodbc`): it is compiled from the vendored sources. A C/C++ compiler (plus `perl` on Linux, for OpenSSL) is all that's required
 
 ### Licensing
-- The Linux and macOS binaries include unixODBC 2.3.14 and GNU libltdl under the GNU LGPL. The Linux binary also includes OpenSSL (Apache License 2.0). License texts ship with each download; see `THIRD_PARTY_LICENSES.md`. `LICENSE` now states that its additional commercial terms do not apply to these bundled libraries
+- The Linux and macOS binaries include unixODBC 2.3.14 under the GNU LGPL. The Linux binary also includes OpenSSL (Apache License 2.0). License texts ship with each download; see `THIRD_PARTY_LICENSES.md`. `LICENSE` now states that its additional commercial terms do not apply to these bundled libraries
 
 ## [0.10.0] - 2024-12-03
 
