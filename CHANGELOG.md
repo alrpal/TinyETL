@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reading Parquet with `--batch-size` below 1,024 dropped rows: each 1,024-row chunk was cut to the batch size and the rest discarded
 - Writing Parquet failed for `Date` columns, and an empty source produced no Parquet file at all (now a valid file with the schema)
 - Counting rows in a CSV for the progress bar read the whole file into memory; it now counts lines in chunks
+- `--preview` printed values in Rust's debug format (`Integer(0)`, `String("ALGERIA…`), in a random column order, in fixed 15-character columns that broke the table's borders. It now prints plain values in the schema's column order, with columns sized to their contents
 - `nullable` in a schema file is optional again and defaults to `true`, as documented (leaving it out was an error)
 - Creating a decimal column on CrateDB failed (`NUMERIC storage is only supported if precision and scale are specified`). TinyETL detects CrateDB and creates `NUMERIC(38,10)` there
 

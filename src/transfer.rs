@@ -219,7 +219,7 @@ impl TransferEngine {
         source.reset().await?;
         let sample_data = source.read_batch(preview_rows).await?;
 
-        let (_final_schema, final_data) = if transformer.is_enabled() && !sample_data.is_empty() {
+        let (final_schema, final_data) = if transformer.is_enabled() && !sample_data.is_empty() {
             println!("\nApplying transformations...");
             let transformed_data = transformer.transform_batch(&sample_data)?;
 
@@ -234,8 +234,8 @@ impl TransferEngine {
             (schema, sample_data)
         };
 
-        println!("\nData Preview ({} rows):", preview_rows);
-        Self::print_data_table(&final_data);
+        println!("\nData Preview ({} rows):", final_data.len());
+        Self::print_data_table(final_schema, &final_data);
 
         Ok(TransferStats {
             total_rows: 0,
@@ -246,79 +246,98 @@ impl TransferEngine {
     }
 
     fn print_schema(schema: &Schema) {
-        println!("┌─────────────────────┬───────────────┬──────────┐");
-        println!("│ Column              │ Type          │ Nullable │");
-        println!("├─────────────────────┼───────────────┼──────────┤");
-
-        for column in &schema.columns {
-            println!(
-                "│ {:<19} │ {:<13} │ {:<8} │",
-                column.name,
-                format!("{}", column.data_type),
-                format!("{}", column.nullable)
-            );
-        }
-        println!("└─────────────────────┴───────────────┴──────────┘");
+        let rows: Vec<Vec<String>> = schema
+            .columns
+            .iter()
+            .map(|c| {
+                vec![
+                    c.name.clone(),
+                    c.data_type.to_string(),
+                    c.nullable.to_string(),
+                ]
+            })
+            .collect();
+        Self::print_table(&["Column", "Type", "Nullable"], &rows);
     }
 
-    fn print_data_table(data: &[crate::schema::Row]) {
+    /// Preview rows in the schema's column order, as plain values.
+    fn print_data_table(schema: &Schema, data: &[crate::schema::Row]) {
         if data.is_empty() {
             println!("No data to display");
             return;
         }
+        let headers: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        let rows: Vec<Vec<String>> = data
+            .iter()
+            .map(|row| {
+                headers
+                    .iter()
+                    .map(|name| match row.get(*name) {
+                        None | Some(crate::schema::Value::Null) => "NULL".to_string(),
+                        Some(crate::schema::Value::Date(dt)) => {
+                            let naive = dt.naive_utc();
+                            if naive.time() == chrono::NaiveTime::MIN {
+                                naive.format("%Y-%m-%d").to_string()
+                            } else {
+                                naive.format("%Y-%m-%d %H:%M:%S%.f").to_string()
+                            }
+                        }
+                        Some(value) => value.to_string_for_arrow().unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .collect();
+        Self::print_table(&headers, &rows);
+    }
 
-        // Print column headers
-        let headers: Vec<&String> = data[0].keys().collect();
-
-        // Print top border
-        print!("┌");
-        for i in 0..headers.len() {
-            print!("─────────────────");
-            if i < headers.len() - 1 {
-                print!("┬");
+    /// A box-drawn table; columns are as wide as their contents, up to 30 characters.
+    fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+        const MAX_WIDTH: usize = 30;
+        let fit = |text: &str| -> String {
+            let flat: String = text
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            if flat.chars().count() > MAX_WIDTH {
+                flat.chars().take(MAX_WIDTH - 1).chain(['…']).collect()
+            } else {
+                flat
             }
+        };
+        let headers: Vec<String> = headers.iter().map(|h| fit(h)).collect();
+        let rows: Vec<Vec<String>> = rows
+            .iter()
+            .map(|row| row.iter().map(|v| fit(v)).collect())
+            .collect();
+        let widths: Vec<usize> = (0..headers.len())
+            .map(|i| {
+                rows.iter()
+                    .filter_map(|row| row.get(i))
+                    .chain([&headers[i]])
+                    .map(|v| v.chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let line = |left: &str, mid: &str, right: &str| {
+            let parts: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+            println!("{}{}{}", left, parts.join(mid), right);
+        };
+        let cells = |values: &[String]| {
+            let parts: Vec<String> = values
+                .iter()
+                .zip(&widths)
+                .map(|(v, w)| format!(" {}{} ", v, " ".repeat(w - v.chars().count())))
+                .collect();
+            println!("│{}│", parts.join("│"));
+        };
+        line("┌", "┬", "┐");
+        cells(&headers);
+        line("├", "┼", "┤");
+        for row in &rows {
+            cells(row);
         }
-        println!("┐");
-
-        // Print headers
-        print!("│");
-        for header in &headers {
-            print!(" {:<15} │", header);
-        }
-        println!();
-
-        // Print separator
-        print!("├");
-        for i in 0..headers.len() {
-            print!("─────────────────");
-            if i < headers.len() - 1 {
-                print!("┼");
-            }
-        }
-        println!("┤");
-
-        // Print data rows
-        for row in data {
-            print!("│");
-            for header in &headers {
-                let value_str = match row.get(*header) {
-                    Some(value) => format!("{:?}", value).chars().take(15).collect(),
-                    None => "NULL".to_string(),
-                };
-                print!(" {:<15} │", value_str);
-            }
-            println!();
-        }
-
-        // Print bottom border
-        print!("└");
-        for i in 0..headers.len() {
-            print!("─────────────────");
-            if i < headers.len() - 1 {
-                print!("┴");
-            }
-        }
-        println!("┘");
+        line("└", "┴", "┘");
     }
 
     async fn handle_dry_run(
