@@ -2,101 +2,114 @@ use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
+use parquet::arrow::{
+    arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
+    ArrowWriter,
+};
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
+use std::collections::VecDeque;
+use std::fs::File;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::{
-    connectors::{Source, Target},
+    connectors::{output_file::OutputFile, Source, Target},
     schema::{Row, Schema, Value},
     Result, TinyEtlError,
 };
 
+/// Rows decoded per Arrow batch when reading.
+const READ_BATCH_ROWS: usize = 8192;
+
+/// Rows per row group when writing. The writer buffers one row group (encoded) in memory.
+const ROW_GROUP_ROWS: usize = 128 * 1024;
+
+/// Reads a Parquet file batch by batch, keeping one reader open.
 pub struct ParquetSource {
     file_path: PathBuf,
-    all_batches: Vec<RecordBatch>,
-    current_batch_index: usize,
+    // Mutex only to make the reader Sync (Source requires it); reached through get_mut
+    reader: Option<Mutex<ParquetRecordBatchReader>>,
+    arrow_schema: Option<SchemaRef>,
+    /// Rows decoded but not yet returned (an Arrow batch rarely matches the requested size)
+    pending: VecDeque<Row>,
     total_row_count: Option<usize>,
+    exhausted: bool,
+    /// Whether rows have been read since the file was opened
+    consumed: bool,
 }
 
 impl ParquetSource {
     pub fn new(file_path: &str) -> Result<Self> {
         Ok(Self {
             file_path: PathBuf::from(file_path),
-            all_batches: Vec::new(),
-            current_batch_index: 0,
+            reader: None,
+            arrow_schema: None,
+            pending: VecDeque::new(),
             total_row_count: None,
+            exhausted: true,
+            consumed: false,
         })
     }
 
     fn arrow_type_to_schema_type(arrow_type: &DataType) -> crate::schema::DataType {
         crate::schema::DataType::from_arrow(arrow_type)
     }
-}
 
-#[async_trait]
-impl Source for ParquetSource {
-    async fn connect(&mut self) -> Result<()> {
+    fn open(&mut self) -> Result<()> {
         if !self.file_path.exists() {
             return Err(TinyEtlError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Parquet file not found: {}", self.file_path.display()),
             )));
         }
-
-        let file = std::fs::File::open(&self.file_path).map_err(TinyEtlError::Io)?;
-
+        let file = File::open(&self.file_path).map_err(TinyEtlError::Io)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
             TinyEtlError::Connection(format!("Failed to create reader builder: {}", e))
         })?;
-
-        // Get total row count from metadata
-        let metadata = builder.metadata();
-        let total_rows: usize = metadata
-            .row_groups()
-            .iter()
-            .map(|rg| rg.num_rows() as usize)
-            .sum();
-        self.total_row_count = Some(total_rows);
-
-        // Read all batches upfront
-        let batch_reader = builder.build().map_err(|e| {
-            TinyEtlError::DataTransfer(format!("Failed to create batch reader: {}", e))
-        })?;
-
-        for batch_result in batch_reader {
-            let batch = batch_result
-                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to read batch: {}", e)))?;
-            self.all_batches.push(batch);
-        }
-
+        self.total_row_count = Some(
+            builder
+                .metadata()
+                .row_groups()
+                .iter()
+                .map(|rg| rg.num_rows() as usize)
+                .sum(),
+        );
+        self.arrow_schema = Some(builder.schema().clone());
+        let reader = builder
+            .with_batch_size(READ_BATCH_ROWS)
+            .build()
+            .map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to create batch reader: {}", e))
+            })?;
+        self.reader = Some(Mutex::new(reader));
+        self.pending.clear();
+        self.exhausted = self.total_row_count == Some(0);
+        self.consumed = false;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Source for ParquetSource {
+    async fn connect(&mut self) -> Result<()> {
+        self.open()
     }
 
     async fn infer_schema(&mut self, _sample_size: usize) -> Result<Schema> {
-        if self.all_batches.is_empty() {
-            return Ok(Schema {
-                columns: Vec::new(),
-                estimated_rows: Some(0),
-                primary_key_candidate: None,
-            });
+        if self.arrow_schema.is_none() {
+            self.open()?;
         }
-
-        let arrow_schema = self.all_batches[0].schema();
-
+        let arrow_schema = self.arrow_schema.as_ref().expect("opened above");
         let columns = arrow_schema
             .fields()
             .iter()
-            .map(|field| {
-                let data_type = Self::arrow_type_to_schema_type(field.data_type());
-                crate::schema::Column {
-                    name: field.name().clone(),
-                    data_type,
-                    nullable: field.is_nullable(),
-                }
+            .map(|field| crate::schema::Column {
+                name: field.name().clone(),
+                data_type: Self::arrow_type_to_schema_type(field.data_type()),
+                nullable: field.is_nullable(),
             })
             .collect();
-
         Ok(Schema {
             columns,
             estimated_rows: self.total_row_count,
@@ -105,24 +118,27 @@ impl Source for ParquetSource {
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
-        if self.current_batch_index >= self.all_batches.len() {
-            return Ok(Vec::new()); // No more data
+        while self.pending.len() < batch_size && !self.exhausted {
+            let Some(reader) = self.reader.as_mut() else {
+                break;
+            };
+            let reader = reader.get_mut().unwrap_or_else(|e| e.into_inner());
+            match reader.next() {
+                Some(batch) => {
+                    let batch = batch.map_err(|e| {
+                        TinyEtlError::DataTransfer(format!("Failed to read batch: {}", e))
+                    })?;
+                    self.pending
+                        .extend(crate::connectors::arrow_values::record_batch_to_rows(
+                            &batch,
+                        )?);
+                }
+                None => self.exhausted = true,
+            }
         }
-
-        let batch = &self.all_batches[self.current_batch_index];
-        self.current_batch_index += 1;
-
-        let mut rows = crate::connectors::arrow_values::record_batch_to_rows(batch)?;
-
-        // If requested batch size is smaller than the record batch, we need to split it
-        if rows.len() > batch_size {
-            rows.truncate(batch_size);
-            // For simplicity, we'll just return the first batch_size rows
-            // In a more sophisticated implementation, you'd store the remaining rows
-            // and return them in subsequent calls
-        }
-
-        Ok(rows)
+        let n = batch_size.min(self.pending.len());
+        self.consumed |= n > 0;
+        Ok(self.pending.drain(..n).collect())
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
@@ -130,20 +146,24 @@ impl Source for ParquetSource {
     }
 
     async fn reset(&mut self) -> Result<()> {
-        self.current_batch_index = 0;
+        if self.consumed || self.reader.is_none() {
+            self.open()?;
+        }
         Ok(())
     }
 
     fn has_more(&self) -> bool {
-        self.current_batch_index < self.all_batches.len()
+        !self.pending.is_empty() || !self.exhausted
     }
 }
 
+/// Writes a Parquet file, one record batch per incoming batch, Snappy-compressed.
 pub struct ParquetTarget {
     file_path: PathBuf,
     schema: Option<Arc<arrow::datatypes::Schema>>,
-    buffered_rows: Vec<Row>,
-    is_finalized: bool,
+    // Mutex only to make the writer Sync (Target requires it); reached through get_mut
+    writer: Option<Mutex<ArrowWriter<File>>>,
+    output: Option<OutputFile>,
 }
 
 impl ParquetTarget {
@@ -151,8 +171,8 @@ impl ParquetTarget {
         Ok(Self {
             file_path: PathBuf::from(file_path),
             schema: None,
-            buffered_rows: Vec::new(),
-            is_finalized: false,
+            writer: None,
+            output: None,
         })
     }
 
@@ -179,9 +199,11 @@ impl ParquetTarget {
                     for row in rows {
                         match row.get(column_name) {
                             Some(Value::String(s)) => builder.append_value(s),
-                            Some(Value::Json(j)) => builder.append_value(j.to_string()),
                             Some(Value::Null) => builder.append_null(),
-                            Some(other) => builder.append_value(format!("{:?}", other)),
+                            Some(other) => match other.to_string_for_arrow() {
+                                Some(text) => builder.append_value(text),
+                                None => builder.append_null(),
+                            },
                             None => builder.append_null(),
                         }
                     }
@@ -222,6 +244,16 @@ impl ParquetTarget {
                             Some(Value::Boolean(b)) => builder.append_value(*b),
                             Some(Value::Null) => builder.append_null(),
                             None => builder.append_null(),
+                            _ => builder.append_null(),
+                        }
+                    }
+                    arrays.push(Arc::new(builder.finish()));
+                }
+                DataType::Date64 => {
+                    let mut builder = Date64Builder::new();
+                    for row in rows {
+                        match row.get(column_name) {
+                            Some(Value::Date(dt)) => builder.append_value(dt.timestamp_millis()),
                             _ => builder.append_null(),
                         }
                     }
@@ -272,13 +304,18 @@ impl Target for ParquetTarget {
 
     async fn create_table(&mut self, _table_name: &str, schema: &Schema) -> Result<()> {
         let arrow_schema = Self::schema_to_arrow_schema(schema);
+        let (output, file) = OutputFile::create(&self.file_path)?;
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
+            .build();
+        let writer =
+            ArrowWriter::try_new(file, arrow_schema.clone(), Some(properties)).map_err(|e| {
+                TinyEtlError::Connection(format!("Failed to create parquet writer: {}", e))
+            })?;
         self.schema = Some(arrow_schema);
-
-        // Create parent directory if it doesn't exist
-        if let Some(parent) = self.file_path.parent() {
-            std::fs::create_dir_all(parent).map_err(TinyEtlError::Io)?;
-        }
-
+        self.writer = Some(Mutex::new(writer));
+        self.output = Some(output);
         Ok(())
     }
 
@@ -286,42 +323,32 @@ impl Target for ParquetTarget {
         if rows.is_empty() {
             return Ok(0);
         }
-
-        // Buffer the rows - we'll write them all at once during finalize
-        self.buffered_rows.extend_from_slice(rows);
-        Ok(rows.len())
-    }
-
-    async fn finalize(&mut self) -> Result<()> {
-        if self.is_finalized || self.buffered_rows.is_empty() {
-            return Ok(());
-        }
-
         let schema = self
             .schema
             .as_ref()
             .ok_or_else(|| TinyEtlError::Configuration("Schema not set".to_string()))?;
-
-        // Create the file and writer
-        let file = std::fs::File::create(&self.file_path).map_err(TinyEtlError::Io)?;
-
-        let mut writer = ArrowWriter::try_new(file, schema.clone(), None).map_err(|e| {
-            TinyEtlError::Connection(format!("Failed to create parquet writer: {}", e))
-        })?;
-
-        // Convert all buffered rows to record batch and write
-        let batch = Self::rows_to_record_batch(&self.buffered_rows, schema)?;
-
+        let batch = Self::rows_to_record_batch(rows, schema)?;
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| TinyEtlError::Configuration("Schema not set".to_string()))?
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner());
         writer
             .write(&batch)
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to write batch: {}", e)))?;
+        Ok(rows.len())
+    }
 
+    async fn finalize(&mut self) -> Result<()> {
+        let (Some(writer), Some(output)) = (self.writer.take(), self.output.take()) else {
+            return Ok(());
+        };
+        let writer = writer.into_inner().unwrap_or_else(|e| e.into_inner());
         writer.close().map_err(|e| {
             TinyEtlError::Connection(format!("Failed to close parquet writer: {}", e))
         })?;
-
-        self.is_finalized = true;
-        Ok(())
+        output.commit()
     }
 
     async fn exists(&self, _table_name: &str) -> Result<bool> {
@@ -329,8 +356,7 @@ impl Target for ParquetTarget {
     }
 
     async fn truncate(&mut self, _table_name: &str) -> Result<()> {
-        // For Parquet files, truncation means clearing buffered rows
-        self.buffered_rows.clear();
+        // The file is replaced when the transfer finishes
         Ok(())
     }
 
@@ -347,6 +373,156 @@ mod tests {
     use crate::schema::{Column, DataType};
     use std::collections::HashMap;
     use tempfile::tempdir;
+
+    fn column(name: &str, data_type: DataType) -> Column {
+        Column {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+        }
+    }
+
+    fn one_column_schema() -> Schema {
+        Schema {
+            columns: vec![column("id", DataType::Integer)],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        }
+    }
+
+    fn id_rows(range: std::ops::Range<i64>) -> Vec<Row> {
+        range
+            .map(|i| HashMap::from([("id".to_string(), Value::Integer(i))]))
+            .collect()
+    }
+
+    async fn read_all(path: &str, batch_size: usize) -> Vec<Row> {
+        let mut source = ParquetSource::new(path).unwrap();
+        source.connect().await.unwrap();
+        source.infer_schema(100).await.unwrap();
+        source.reset().await.unwrap();
+        let mut rows = Vec::new();
+        while source.has_more() {
+            let batch = source.read_batch(batch_size).await.unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            assert!(batch.len() <= batch_size);
+            rows.extend(batch);
+        }
+        rows
+    }
+
+    #[tokio::test]
+    async fn test_streams_many_batches_without_losing_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("many.parquet");
+        let path = path.to_str().unwrap();
+        let mut target = ParquetTarget::new(path).unwrap();
+        target
+            .create_table("t", &one_column_schema())
+            .await
+            .unwrap();
+        for start in (0..30_000).step_by(7_000) {
+            let end = (start + 7_000).min(30_000);
+            target.write_batch(&id_rows(start..end)).await.unwrap();
+        }
+        target.finalize().await.unwrap();
+
+        // Batch sizes smaller and larger than the reader's Arrow batches (8192 rows)
+        for batch_size in [500, 10_000] {
+            let rows = read_all(path, batch_size).await;
+            assert_eq!(rows.len(), 30_000, "batch size {}", batch_size);
+            assert_eq!(rows[29_999]["id"], Value::Integer(29_999));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reset_reads_again() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("reset.parquet");
+        let path = path.to_str().unwrap();
+        let mut target = ParquetTarget::new(path).unwrap();
+        target
+            .create_table("t", &one_column_schema())
+            .await
+            .unwrap();
+        target.write_batch(&id_rows(0..10)).await.unwrap();
+        target.finalize().await.unwrap();
+
+        let mut source = ParquetSource::new(path).unwrap();
+        source.connect().await.unwrap();
+        assert_eq!(source.read_batch(4).await.unwrap().len(), 4);
+        source.reset().await.unwrap();
+        assert_eq!(source.read_batch(100).await.unwrap().len(), 10);
+        assert!(!source.has_more());
+    }
+
+    #[tokio::test]
+    async fn test_empty_input_writes_a_valid_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.parquet");
+        let path = path.to_str().unwrap();
+        let mut target = ParquetTarget::new(path).unwrap();
+        target
+            .create_table("t", &one_column_schema())
+            .await
+            .unwrap();
+        target.finalize().await.unwrap();
+
+        let mut source = ParquetSource::new(path).unwrap();
+        source.connect().await.unwrap();
+        let schema = source.infer_schema(100).await.unwrap();
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].name, "id");
+        assert!(!source.has_more());
+    }
+
+    #[tokio::test]
+    async fn test_unfinished_write_keeps_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("keep.parquet");
+        std::fs::write(&path, b"previous contents").unwrap();
+        let mut target = ParquetTarget::new(path.to_str().unwrap()).unwrap();
+        target
+            .create_table("t", &one_column_schema())
+            .await
+            .unwrap();
+        target.write_batch(&id_rows(0..10)).await.unwrap();
+        drop(target); // the transfer failed before finalize
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous contents");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_date_columns() {
+        use chrono::{TimeZone, Utc};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dates.parquet");
+        let path = path.to_str().unwrap();
+        let schema = Schema {
+            columns: vec![
+                column("day", DataType::Date),
+                column("at", DataType::DateTime),
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        let day = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
+        let at = Utc.with_ymd_and_hms(2024, 1, 15, 10, 30, 5).unwrap();
+        let row: Row = HashMap::from([
+            ("day".to_string(), Value::Date(day)),
+            ("at".to_string(), Value::Date(at)),
+        ]);
+        let mut target = ParquetTarget::new(path).unwrap();
+        target.create_table("t", &schema).await.unwrap();
+        target.write_batch(&[row]).await.unwrap();
+        target.finalize().await.unwrap();
+
+        let rows = read_all(path, 10).await;
+        assert_eq!(rows[0]["day"], Value::Date(day));
+        assert_eq!(rows[0]["at"], Value::Date(at));
+    }
 
     #[tokio::test]
     async fn test_parquet_target_creation() {
