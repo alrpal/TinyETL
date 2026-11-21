@@ -84,6 +84,21 @@ tinyetl input.csv "snowflake://user:pass@account.region.cloud/db/schema?warehous
 - Temporary file handling
 - Mock data import simulation
 
+### 20_csv_to_postgres
+**PostgreSQL Round Trip**
+
+Loads a CSV into PostgreSQL, checks the stored values with `psql`, then exports the table back to CSV. Needs the `tinyetl-postgres` container from `test_env` (`cd test_env && docker-compose up -d postgres`); skips if it isn't running.
+
+```bash
+tinyetl customers.csv "postgres://testuser:testpass@localhost:5432/testdb#customers" --truncate
+tinyetl "postgres://testuser:testpass@localhost:5432/testdb#customers" customers_export.csv
+```
+
+**What it tests:**
+- Creating a PostgreSQL table from an inferred CSV schema
+- `--truncate`, so re-runs replace the rows instead of appending
+- Reading a table back out, including one TinyETL didn't create (the seeded `employees` table)
+
 ## Protocol Architecture
 
 ### Current Implementation Status
