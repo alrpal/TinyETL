@@ -41,8 +41,10 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 
 Visit the [releases page](https://github.com/alrpal/tinyetl/releases/latest) and download the appropriate binary for your platform:
 - Linux x64, Linux ARM64
-- macOS Intel, macOS Apple Silicon  
+- macOS Apple Silicon
 - Windows x64, Windows ARM64
+
+There is no prebuilt binary for Intel Macs; build from source with Cargo (below).
 
 Each download is a single self-contained binary with nothing else to install. The Linux and macOS binaries include the unixODBC driver manager (LGPL-2.1-or-later); see [License](#license).
 
@@ -57,13 +59,6 @@ sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
 **Linux ARM64:**
 ```bash
 curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-linux-arm64.tar.gz | tar xz
-chmod +x tinyetl
-sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
-```
-
-**macOS Intel:**
-```bash
-curl -L https://github.com/alrpal/tinyetl/releases/latest/download/tinyetl-macos-intel.tar.gz | tar xz
 chmod +x tinyetl
 sudo mv tinyetl /usr/local/bin/  # Optional: add to PATH
 ```

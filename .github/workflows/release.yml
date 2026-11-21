@@ -15,10 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS builds (native)
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            name: tinyetl-macos-intel-x86_64
+          # macOS build (Apple Silicon only; Homebrew no longer supports Intel Macs, so there
+          # is no way to get an x86_64 libltdl.a on the runner)
           - target: aarch64-apple-darwin
             os: macos-latest
             name: tinyetl-macos-apple-silicon-aarch64
@@ -69,18 +67,9 @@ jobs:
       if: matrix.os == 'macos-latest'
       run: |
         # libtool provides the static libltdl.a linked into the binary with the bundled unixODBC.
-        # The -L flag makes the linker use the libltdl.a for the target architecture.
-        if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
-          echo "⚙️ Installing x86 Homebrew (Rosetta) for Intel build..."
-          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          arch -x86_64 /usr/local/bin/brew install openssl@3 libtool
-          echo "RUSTFLAGS=-L /usr/local/opt/libtool/lib" >> $GITHUB_ENV
-        else
-          echo "⚙️ Installing ARM Homebrew dependencies..."
-          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
-          brew list libtool >/dev/null 2>&1 || brew install libtool
-          echo "RUSTFLAGS=-L /opt/homebrew/opt/libtool/lib" >> $GITHUB_ENV
-        fi
+        # The -L flag puts libtool's own lib directory first on the linker search path.
+        brew list libtool >/dev/null 2>&1 || brew install libtool
+        echo "RUSTFLAGS=-L /opt/homebrew/opt/libtool/lib" >> $GITHUB_ENV
 
     - name: Install system dependencies (Windows)
       if: matrix.os == 'windows-latest'
@@ -136,8 +125,6 @@ jobs:
         # Record the exact versions of the statically linked LGPL libraries
         if [ "$RUNNER_OS" = "Linux" ]; then
           LTDL="libltdl-dev $(dpkg-query -W -f='${Version}' libltdl-dev) (Ubuntu package)"
-        elif [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
-          LTDL="Homebrew $(/usr/local/bin/brew list --versions libtool)"
         else
           LTDL="Homebrew $(brew list --versions libtool)"
         fi

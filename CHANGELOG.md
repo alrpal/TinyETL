@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Upgraded `odbc-api` from 8.x to 30.x (required for the bundled unixODBC)
 - **Building from source now requires Rust 1.94 or later** (`rust-version` was previously listed as 1.70, which the dependencies had already outgrown). TinyETL builds on current stable Rust again: `sqlx` 0.6 and `mlua` 0.8 no longer compiled on Rust 1.100, so they are upgraded to `sqlx` 0.9 and `mlua` 0.12
+- **No more prebuilt binary for Intel Macs.** Homebrew no longer supports Intel Macs, so the release build can't get the libraries it needs for them. Intel Mac users can still build from source with `cargo install tinyetl`
 - Release workflow checks that binaries link no third-party shared libraries and run in clean `ubuntu:24.04` and `debian:12-slim` containers
 
 ### Licensing
