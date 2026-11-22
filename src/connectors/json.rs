@@ -1,5 +1,7 @@
 //! JSON files: an array of objects (`.json`) or one object per line (JSON Lines: `.jsonl`,
 //! `.ndjson`). Both are read and written as streams, so memory stays at about one batch.
+//! A `.json` file that starts with `{` is read as a sequence of objects, which covers JSON
+//! Lines saved as `.json`, pretty-printed objects one after another, and a single object.
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -26,6 +28,8 @@ enum JsonFormat {
     Array,
     /// One object per line
     Lines,
+    /// Objects one after another, separated by any whitespace (read only)
+    Sequence,
 }
 
 impl JsonFormat {
@@ -62,12 +66,18 @@ impl JsonValues {
         let file = File::open(path).map_err(|e| {
             TinyEtlError::Connection(format!("Failed to open {}: {}", path.display(), e))
         })?;
+        let mut reader = BufReader::new(file);
+        // Skip a UTF-8 byte order mark, which serde_json rejects
+        if reader.fill_buf()?.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            reader.consume(3);
+        }
         let (sender, receiver) = sync_channel(READ_AHEAD);
         std::thread::Builder::new()
             .name("tinyetl-json-reader".to_string())
             .spawn(move || match format {
-                JsonFormat::Array => read_array(BufReader::new(file), &sender),
-                JsonFormat::Lines => read_lines(BufReader::new(file), &sender),
+                JsonFormat::Array => read_array(reader, &sender),
+                JsonFormat::Lines => read_lines(reader, &sender),
+                JsonFormat::Sequence => read_sequence(reader, &sender),
             })
             .map_err(TinyEtlError::Io)?;
         let mut values = Self {
@@ -156,6 +166,39 @@ fn read_lines(reader: BufReader<File>, sender: &SyncSender<Item>) {
     }
 }
 
+/// Send each top-level value of a file of whitespace-separated JSON values.
+fn read_sequence(reader: BufReader<File>, sender: &SyncSender<Item>) {
+    let values = serde_json::Deserializer::from_reader(reader).into_iter::<serde_json::Value>();
+    for value in values {
+        let item = value.map_err(|e| format!("Invalid JSON: {}", e));
+        let failed = item.is_err();
+        if sender.send(item).is_err() || failed {
+            break;
+        }
+    }
+}
+
+/// The first byte that isn't whitespace (or a UTF-8 byte order mark), to tell a JSON array
+/// from a sequence of objects.
+fn first_significant_byte(path: &Path) -> Result<Option<u8>> {
+    use std::io::Read;
+    let mut buffer = [0u8; 4096];
+    let mut file = File::open(path)?;
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let found = buffer[..n]
+            .iter()
+            .copied()
+            .find(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0xEF | 0xBB | 0xBF));
+        if found.is_some() {
+            return Ok(found);
+        }
+    }
+}
+
 /// Lines in a JSON Lines file, for the progress bar (blank lines are counted too, so this
 /// can be slightly high).
 fn count_lines(mut file: File) -> Result<usize> {
@@ -173,13 +216,13 @@ fn count_lines(mut file: File) -> Result<usize> {
     Ok(lines + usize::from(last != b'\n'))
 }
 
-/// Elements of the top-level array, counted by scanning for commas outside strings and
-/// nested values.
-fn count_array_elements(mut file: File) -> Result<usize> {
+/// Elements of the top-level array (counted by commas outside strings and nested values), or
+/// with `sequence`, the top-level objects and arrays of a sequence of values.
+fn count_array_elements(mut file: File, sequence: bool) -> Result<usize> {
     use std::io::Read;
     let mut buffer = vec![0u8; 1 << 20];
     let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
-    let (mut commas, mut any_element) = (0usize, false);
+    let (mut commas, mut any_element, mut top_level) = (0usize, false, 0usize);
     loop {
         let n = file.read(&mut buffer)?;
         if n == 0 {
@@ -218,6 +261,7 @@ fn count_array_elements(mut file: File) -> Result<usize> {
                 }
                 b'[' | b'{' => {
                     any_element |= depth == 1;
+                    top_level += usize::from(depth == 0);
                     depth += 1;
                 }
                 b']' | b'}' => depth = depth.saturating_sub(1),
@@ -227,7 +271,13 @@ fn count_array_elements(mut file: File) -> Result<usize> {
             }
         }
     }
-    Ok(if any_element { commas + 1 } else { 0 })
+    Ok(if sequence {
+        top_level
+    } else if any_element {
+        commas + 1
+    } else {
+        0
+    })
 }
 
 fn json_value_to_value(json_val: &serde_json::Value) -> Value {
@@ -250,9 +300,8 @@ fn json_value_to_value(json_val: &serde_json::Value) -> Value {
         }
         serde_json::Value::Bool(b) => Value::Boolean(*b),
         serde_json::Value::Null => Value::Null,
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Value::String(json_val.to_string())
-        }
+        // Nested objects and arrays stay JSON (a JSON/JSONB column, nested in JSON output)
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => Value::Json(json_val.clone()),
     }
 }
 
@@ -291,6 +340,13 @@ impl JsonSource {
                 "JSON file not found: {}",
                 self.file_path.display()
             )));
+        }
+        // A .json file of objects rather than an array: JSON Lines, or objects back to back
+        if self.format != JsonFormat::Lines {
+            self.format = match first_significant_byte(&self.file_path)? {
+                Some(b'{') => JsonFormat::Sequence,
+                _ => JsonFormat::Array,
+            };
         }
         let mut values = JsonValues::open(&self.file_path, self.format)?;
         // Report a file that isn't a JSON array (or valid JSON Lines) here, not mid-transfer
@@ -358,7 +414,8 @@ impl Source for JsonSource {
         let file = File::open(&self.file_path)?;
         Ok(Some(match self.format {
             JsonFormat::Lines => count_lines(file)?,
-            JsonFormat::Array => count_array_elements(file)?,
+            JsonFormat::Array => count_array_elements(file, false)?,
+            JsonFormat::Sequence => count_array_elements(file, true)?,
         }))
     }
 
@@ -457,7 +514,7 @@ impl JsonTarget {
                 serde_json::to_writer(&mut *writer, value)?;
                 writer.write_all(b"\n")?;
             }
-            JsonFormat::Array => {
+            JsonFormat::Array | JsonFormat::Sequence => {
                 // Same layout as serde_json::to_string_pretty for the whole array
                 writer.write_all(if self.written == 0 {
                     b"[\n  "
@@ -703,14 +760,22 @@ mod tests {
     #[tokio::test]
     async fn test_bad_input_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let object = dir.path().join("object.json");
-        std::fs::write(&object, r#"{"a": 1}"#).unwrap();
-        let err = JsonSource::new(object.to_str().unwrap())
+        let scalar = dir.path().join("scalar.json");
+        std::fs::write(&scalar, "42").unwrap();
+        let err = JsonSource::new(scalar.to_str().unwrap())
             .unwrap()
             .connect()
             .await
             .unwrap_err();
         assert!(err.to_string().contains("array of objects"), "{}", err);
+
+        // A sequence of objects that breaks partway reports where
+        let broken = dir.path().join("broken.json");
+        std::fs::write(&broken, "{\"a\": 1}\n{\"a\": 2\n").unwrap();
+        let mut source = JsonSource::new(broken.to_str().unwrap()).unwrap();
+        source.connect().await.unwrap();
+        let err = source.read_batch(10).await.unwrap_err();
+        assert!(err.to_string().contains("Invalid JSON"), "{}", err);
 
         let lines = dir.path().join("bad.jsonl");
         std::fs::write(&lines, "{\"a\": 1}\n\n{oops}\n").unwrap();
@@ -789,7 +854,7 @@ mod tests {
     #[tokio::test]
     async fn test_json_invalid_format() {
         let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, r#"{{"not": "an array"}}"#).unwrap();
+        writeln!(temp_file, r#""not an array""#).unwrap();
 
         let mut source = JsonSource::new(temp_file.path().to_str().unwrap()).unwrap();
         let result = source.connect().await;
@@ -926,5 +991,81 @@ mod tests {
         assert_eq!(array.len(), 2);
         assert_eq!(array[0]["name"], "Alice");
         assert_eq!(array[1]["name"], "Bob");
+    }
+
+    #[tokio::test]
+    async fn test_json_file_of_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in [
+            // JSON Lines saved as .json (gharchive, the CrateDB datasets)
+            ("lines.json", "{\"id\": 1}\n{\"id\": 2}\n\n{\"id\": 3}\n"),
+            // Pretty-printed objects back to back
+            (
+                "pretty.json",
+                "{\n  \"id\": 1\n}\n{\n  \"id\": 2\n}{\"id\": 3}",
+            ),
+            // A byte order mark and leading whitespace
+            (
+                "bom.json",
+                "\u{feff}\n  {\"id\": 1}\n{\"id\": 2}\n{\"id\": 3}",
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            let (schema, rows) = read(&path, 2).await;
+            assert_eq!(schema.columns[0].name, "id", "{}", name);
+            assert_eq!(rows.len(), 3, "{}", name);
+            assert_eq!(rows[2]["id"], Value::Integer(3), "{}", name);
+            let source = JsonSource::new(path.to_str().unwrap()).unwrap();
+            let mut source = source;
+            source.connect().await.unwrap();
+            assert_eq!(
+                source.estimated_row_count().await.unwrap(),
+                Some(3),
+                "{}",
+                name
+            );
+        }
+
+        // A single object is one row
+        let single = dir.path().join("single.json");
+        std::fs::write(&single, "{\"a\": 1, \"b\": \"x\"}").unwrap();
+        let (_, rows) = read(&single, 10).await;
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_nested_values_stay_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested.jsonl");
+        std::fs::write(
+            &path,
+            "{\"id\": 1, \"actor\": {\"login\": \"a\"}, \"tags\": [1, 2]}\n{\"id\": 2, \"actor\": {\"login\": \"b\"}, \"tags\": []}\n",
+        )
+        .unwrap();
+        let (schema, rows) = read(&path, 10).await;
+        let types: Vec<_> = schema.columns.iter().map(|c| c.data_type.clone()).collect();
+        use crate::schema::DataType;
+        assert_eq!(types, [DataType::Integer, DataType::Json, DataType::Json]);
+        assert_eq!(
+            rows[0]["actor"],
+            Value::Json(serde_json::json!({"login": "a"}))
+        );
+
+        // Written back out, they're nested, not quoted
+        let out = dir.path().join("out.jsonl");
+        let mut target = JsonTarget::new(out.to_str().unwrap()).unwrap();
+        target.connect().await.unwrap();
+        target.create_table("t", &schema).await.unwrap();
+        target.write_batch(&rows).await.unwrap();
+        target.finalize().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+            r#"{"id":1,"actor":{"login":"a"},"tags":[1,2]}"#
+        );
     }
 }

@@ -209,7 +209,7 @@ TinyETL supports two main categories of data sources and targets:
 
 **File Formats:**
 - **CSV** - Comma-separated values; tab, semicolon and pipe delimiters are detected, and `.tsv` files are tab-separated (see "CSV Delimiters" below)
-- **JSON** - JavaScript Object Notation (array of objects)
+- **JSON** - An array of objects. A `.json` file that starts with `{` is read as objects one after another, so JSON Lines saved as `.json`, pretty-printed objects back to back and a single object all work. Nested objects and arrays are kept as JSON: a `jsonb` column in PostgreSQL, nested in JSON output, compact JSON text in CSV and Parquet
 - **JSON Lines** - One JSON object per line (`.jsonl`, `.ndjson`)
 - **Compressed files** - Add `.gz` (gzip) or `.zst` (Zstandard) to any file format: `data.csv.gz`, `events.jsonl.gz`, `trips.parquet.zst`. Sources are decompressed to a temporary file as they're read, targets are compressed when the transfer finishes. Works locally and over HTTP, SSH and S3
 - **Parquet** - Columnar storage format (written with Snappy compression)
