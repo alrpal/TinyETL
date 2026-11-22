@@ -210,16 +210,36 @@ jobs:
           exit 1
         fi
 
+    - name: Write release notes from CHANGELOG.md
+      run: |
+        VERSION="${GITHUB_REF_NAME#v}"
+        # The section for this version: from its "## [x.y.z]" heading to the next "## [" heading
+        awk -v ver="$VERSION" '
+          index($0, "## [" ver "]") == 1 { found = 1; next }
+          found && /^## \[/ { exit }
+          found { print }
+        ' CHANGELOG.md > changes.md
+        if [ ! -s changes.md ]; then
+          echo "::warning::No CHANGELOG.md section for $VERSION; the release has only the license notice"
+        fi
+        {
+          cat changes.md
+          echo
+          echo "### License notice"
+          echo
+          echo "The Linux and macOS binaries include the [unixODBC](https://www.unixodbc.org/) driver manager (version 2.3.14), statically linked and licensed under the **GNU LGPL v2.1 or later**. The Linux binary also includes OpenSSL (Apache License 2.0), and every binary includes AWS-LC (ISC/Apache-2.0). TinyETL itself is licensed under Apache 2.0; the LGPL applies only to unixODBC, and the additional commercial terms in \`LICENSE\` do not apply to the bundled libraries. License texts are included in each download (\`THIRD_PARTY_LICENSES.md\` and \`licenses/\`). See [THIRD_PARTY_LICENSES.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/THIRD_PARTY_LICENSES.md) for source and relinking information."
+        } > release-notes.md
+        cat release-notes.md
+
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
         files: release-assets/*
         draft: false
         prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+        # The CHANGELOG section plus the license notice; GitHub appends its list of merged
+        # pull requests and the compare link
+        body_path: release-notes.md
         generate_release_notes: true
-        body: |
-          ### License notice
-
-          The Linux and macOS binaries include the [unixODBC](https://www.unixodbc.org/) driver manager (version 2.3.14), statically linked and licensed under the **GNU LGPL v2.1 or later**. The Linux binary also includes OpenSSL (Apache License 2.0), and every binary includes AWS-LC (ISC/Apache-2.0). TinyETL itself is licensed under Apache 2.0; the LGPL applies only to unixODBC, and the additional commercial terms in `LICENSE` do not apply to the bundled libraries. License texts are included in each download (`THIRD_PARTY_LICENSES.md` and `licenses/`). See [THIRD_PARTY_LICENSES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_LICENSES.md) for source and relinking information.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
