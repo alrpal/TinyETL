@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Example `24_database_correctness`: for SQLite, DuckDB, PostgreSQL, MySQL and SQL Server, checks that reads return every row exactly once and that a failed load (with or without `--truncate`) leaves the table unchanged. Run against v0.11.0, it reproduces all three database bugs fixed in 0.11.1
+
 ## [0.11.1] - 2026-11-22
 
 ### Fixed

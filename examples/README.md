@@ -116,6 +116,11 @@ tinyetl employees.csv employees.xlsx
 tinyetl "book.xlsx#Staff" staff.json
 ```
 
+### 24_database_correctness
+**Database Reads and Loads Are Correct and All-or-Nothing**
+
+For SQLite, DuckDB and (when their containers are running) PostgreSQL, MySQL and SQL Server: reads 300,000 rows back and checks each comes back exactly once with the same values; checks that a load failing partway leaves the table unchanged, with and without `--truncate`; and checks append, `--truncate` and `--truncate` with an empty source. `TINYETL=/path/to/binary` runs it against another build.
+
 ### Current Implementation Status
 
 | Protocol | Status | Description |
