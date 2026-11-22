@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--truncate` never worked on the native SQL Server target.** The check for an existing table always reported that it didn't exist, so rows were appended instead
 - Reading DuckDB now keeps decimals, timestamps and dates as their types (they were read as text)
 - SQLite `BLOB` values holding text (such as JSON written as bytes) were read as NULL; they are now read as text, and other binary values as hex ([#13](https://github.com/alrpal/TinyETL/issues/13))
+- SQLite and DuckDB columns declared `JSON` are read as JSON, so they become `JSONB` in PostgreSQL, `VARIANT` in Snowflake, `JSON` in DuckDB and MySQL, and nested values in JSON output ([#13](https://github.com/alrpal/TinyETL/issues/13)). A SQLite `json` column is read as text if a sampled value isn't valid JSON (SQLite doesn't enforce it)
+- SQLite declared types are matched the way SQLite does (by substring), so `VARCHAR(255)`, `DECIMAL(10,2)`, `BIGINT` and similar are recognised; they were all read as text
 - A CSV with a header and no rows produced a schema with no columns, so loading it into a database failed (MySQL) or created an empty table; its columns are now kept as text columns
 
 ## [0.11.0] - 2026-11-21

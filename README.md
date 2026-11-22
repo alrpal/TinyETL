@@ -364,6 +364,7 @@ tinyetl data.csv /path/to/database.db   # Creates table named 'database'
 # Explicit table name using connection string format
 tinyetl data.csv "sqlite:///path/to/database.db#custom_table"
 ```
+When reading, column types come from the declared types (`INTEGER`, `VARCHAR(255)`, `DECIMAL(10,2)`, `DATETIME`, …). Columns declared `JSON` are read as JSON, including JSON stored as `BLOB`, unless sampled values aren't valid JSON, in which case they're read as text. Other `BLOB` values are read as text if they're valid UTF-8, and as hex otherwise.
 
 **SQL Server (native):**
 ```bash

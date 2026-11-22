@@ -11,6 +11,33 @@ use crate::{
     Result, TinyEtlError,
 };
 
+/// TinyETL type for a SQLite declared column type, following SQLite's own affinity rules
+/// (substring matches, so `VARCHAR(255)` and `DECIMAL(10,2)` are recognised), plus the
+/// conventional `JSON`, `BOOLEAN`, `DATE` and `DATETIME` names.
+fn declared_type(sql_type: &str) -> DataType {
+    let t = sql_type.to_ascii_uppercase();
+    if t.contains("JSON") {
+        DataType::Json
+    } else if t.contains("BOOL") {
+        DataType::Boolean
+    } else if t.contains("DATE") && !t.contains("TIME") {
+        DataType::Date
+    } else if t.contains("DATETIME") || t.contains("TIMESTAMP") {
+        DataType::DateTime
+    } else if t.contains("INT") {
+        DataType::Integer
+    } else if t.contains("CHAR") || t.contains("CLOB") || t.contains("TEXT") {
+        DataType::String
+    } else if ["REAL", "FLOA", "DOUB", "NUMERIC", "DECIMAL"]
+        .iter()
+        .any(|k| t.contains(k))
+    {
+        DataType::Decimal
+    } else {
+        DataType::String // BLOB, no declared type, or anything else
+    }
+}
+
 pub struct SqliteSource {
     connection_string: String,
     pool: Option<SqlitePool>,
@@ -131,7 +158,7 @@ impl Source for SqliteSource {
         }
     }
 
-    async fn infer_schema(&mut self, _sample_size: usize) -> Result<Schema> {
+    async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
         if self.pool.is_none() {
             self.connect().await?;
         }
@@ -152,21 +179,46 @@ impl Source for SqliteSource {
             let sql_type: String = row.get(2);
             let not_null: bool = row.get(3);
 
-            let data_type = match sql_type.to_uppercase().as_str() {
-                "INTEGER" | "INT" => DataType::Integer,
-                "REAL" | "FLOAT" | "DOUBLE" | "NUMERIC" | "DECIMAL" => DataType::Decimal,
-                "TEXT" | "VARCHAR" => DataType::String,
-                "BOOLEAN" | "BOOL" => DataType::Boolean,
-                "DATE" => DataType::Date,
-                "DATETIME" | "TIMESTAMP" => DataType::DateTime,
-                _ => DataType::String,
-            };
+            let data_type = declared_type(&sql_type);
 
             columns.push(SchemaColumn {
                 name,
                 data_type,
                 nullable: !not_null,
             });
+        }
+
+        // SQLite doesn't enforce JSON in a JSON-declared column: read a sample, and keep a
+        // column as text if any sampled value isn't valid JSON
+        let json_columns: Vec<String> = columns
+            .iter()
+            .filter(|c| c.data_type == DataType::Json)
+            .map(|c| c.name.clone())
+            .collect();
+        if !json_columns.is_empty() {
+            let select = json_columns
+                .iter()
+                .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sample = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT {} FROM \"{}\" LIMIT {}",
+                select, self.table_name, sample_size
+            )))
+            .fetch_all(pool)
+            .await?;
+            for (i, name) in json_columns.iter().enumerate() {
+                let all_json = sample.iter().all(|row| match Self::value_at(row, i) {
+                    Value::Null => true,
+                    Value::String(text) => serde_json::from_str::<serde_json::Value>(&text).is_ok(),
+                    _ => true, // numbers are valid JSON scalars
+                });
+                if !all_json {
+                    if let Some(column) = columns.iter_mut().find(|c| &c.name == name) {
+                        column.data_type = DataType::String;
+                    }
+                }
+            }
         }
 
         // Get estimated row count
@@ -519,6 +571,70 @@ impl Target for SqliteTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_declared_types() {
+        let cases = [
+            ("json", DataType::Json),
+            ("JSON", DataType::Json),
+            ("VARCHAR(255)", DataType::String),
+            ("TEXT", DataType::String),
+            ("DECIMAL(10,2)", DataType::Decimal),
+            ("REAL", DataType::Decimal),
+            ("INTEGER", DataType::Integer),
+            ("BIGINT", DataType::Integer),
+            ("BOOLEAN", DataType::Boolean),
+            ("DATE", DataType::Date),
+            ("DATETIME", DataType::DateTime),
+            ("TIMESTAMP", DataType::DateTime),
+            ("BLOB", DataType::String),
+            ("", DataType::String),
+        ];
+        for (declared, expected) in cases {
+            assert_eq!(declared_type(declared), expected, "{:?}", declared);
+        }
+    }
+
+    async fn schema_of(sql: &[&str]) -> Schema {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let pool = SqlitePool::connect_with(
+            SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        for statement in sql {
+            sqlx::query(sqlx::AssertSqlSafe(*statement))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool.close().await;
+        let mut source = SqliteSource::new(&format!("{}#t", path.display())).unwrap();
+        source.connect().await.unwrap();
+        source.infer_schema(1000).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_json_columns() {
+        // JSON stored as BLOB (issue #13) and as TEXT is read as a JSON column
+        let schema = schema_of(&[
+            "CREATE TABLE t (id TEXT, doc json)",
+            r#"INSERT INTO t VALUES ('a', CAST('{"k": [1, 2]}' AS BLOB)), ('b', '{"k": 3}'), ('c', NULL)"#,
+        ])
+        .await;
+        assert_eq!(schema.columns[1].data_type, DataType::Json);
+
+        // A JSON-declared column holding text that isn't JSON stays text
+        let schema = schema_of(&[
+            "CREATE TABLE t (id TEXT, doc json)",
+            r#"INSERT INTO t VALUES ('a', '{"k": 1}'), ('b', 'not json')"#,
+        ])
+        .await;
+        assert_eq!(schema.columns[1].data_type, DataType::String);
+    }
 
     #[tokio::test]
     async fn test_sqlite_source_new() {

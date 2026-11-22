@@ -275,6 +275,7 @@ impl Source for DuckdbSource {
                 {
                     DataType::Decimal
                 }
+                t if t.contains("JSON") => DataType::Json,
                 t if t.contains("VARCHAR") || t.contains("TEXT") || t.contains("STRING") => {
                     DataType::String
                 }
