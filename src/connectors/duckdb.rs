@@ -604,6 +604,18 @@ impl Target for DuckdbTarget {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn test_database_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("{}#t", dir.path().join("contract.duckdb").display());
+        let source_url = url.clone();
+        crate::connectors::db_contract::run_all(
+            Box::new(move || Box::new(DuckdbSource::new(&source_url).unwrap())),
+            Box::new(move || Box::new(DuckdbTarget::new(&url).unwrap())),
+        )
+        .await;
+    }
+
     #[test]
     fn test_duckdb_source_new() {
         let source = DuckdbSource::new("test.duckdb#users");

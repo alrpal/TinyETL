@@ -1,6 +1,8 @@
 mod arrow_values;
 pub mod avro;
 pub mod csv;
+#[cfg(test)]
+mod db_contract;
 pub mod duckdb;
 pub mod excel;
 pub mod json;

@@ -560,6 +560,386 @@ mod tests {
         assert_eq!(stats.batches_processed, 1);
     }
 
+    // ---- Engine contract tests: a source with a fixed schema and a target that records
+    // every call, so the order of exists / truncate / create_table / write / finalize can
+    // be checked for each case
+
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Log {
+        calls: Vec<String>,
+        rows: Vec<Row>,
+        created_with: Option<(String, Schema)>,
+    }
+
+    struct FakeSource {
+        schema: Schema,
+        rows: Vec<Row>,
+        position: usize,
+    }
+
+    impl FakeSource {
+        fn new(columns: &[(&str, DataType)], rows: Vec<Row>) -> Self {
+            Self {
+                schema: Schema {
+                    columns: columns
+                        .iter()
+                        .map(|(name, data_type)| Column {
+                            name: name.to_string(),
+                            data_type: data_type.clone(),
+                            nullable: true,
+                        })
+                        .collect(),
+                    estimated_rows: Some(rows.len()),
+                    primary_key_candidate: None,
+                },
+                rows,
+                position: 0,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Source for FakeSource {
+        async fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn infer_schema(&mut self, _sample_size: usize) -> Result<Schema> {
+            Ok(self.schema.clone())
+        }
+        async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
+            let end = (self.position + batch_size).min(self.rows.len());
+            let batch = self.rows[self.position..end].to_vec();
+            self.position = end;
+            Ok(batch)
+        }
+        async fn estimated_row_count(&self) -> Result<Option<usize>> {
+            Ok(Some(self.rows.len()))
+        }
+        async fn reset(&mut self) -> Result<()> {
+            self.position = 0;
+            Ok(())
+        }
+        fn has_more(&self) -> bool {
+            self.position < self.rows.len()
+        }
+    }
+
+    struct RecordingTarget {
+        log: Arc<Mutex<Log>>,
+        exists: bool,
+        appendable: bool,
+        /// Fail the write that would bring the total past this many rows
+        fail_after_rows: Option<usize>,
+    }
+
+    impl RecordingTarget {
+        fn new(exists: bool, appendable: bool) -> (Self, Arc<Mutex<Log>>) {
+            let log = Arc::new(Mutex::new(Log::default()));
+            (
+                Self {
+                    log: log.clone(),
+                    exists,
+                    appendable,
+                    fail_after_rows: None,
+                },
+                log,
+            )
+        }
+        fn record(&self, call: impl Into<String>) {
+            self.log.lock().unwrap().calls.push(call.into());
+        }
+    }
+
+    #[async_trait]
+    impl Target for RecordingTarget {
+        async fn connect(&mut self) -> Result<()> {
+            self.record("connect");
+            Ok(())
+        }
+        async fn create_table(&mut self, table_name: &str, schema: &Schema) -> Result<()> {
+            self.record("create_table");
+            self.log.lock().unwrap().created_with = Some((table_name.to_string(), schema.clone()));
+            Ok(())
+        }
+        async fn write_batch(&mut self, rows: &[Row]) -> Result<usize> {
+            let mut log = self.log.lock().unwrap();
+            if let Some(limit) = self.fail_after_rows {
+                if log.rows.len() + rows.len() > limit {
+                    log.calls.push("write_batch failed".to_string());
+                    return Err(crate::TinyEtlError::DataTransfer("disk full".to_string()));
+                }
+            }
+            log.calls.push(format!("write_batch({})", rows.len()));
+            log.rows.extend_from_slice(rows);
+            Ok(rows.len())
+        }
+        async fn finalize(&mut self) -> Result<()> {
+            self.record("finalize");
+            Ok(())
+        }
+        async fn exists(&self, _table_name: &str) -> Result<bool> {
+            self.record("exists");
+            Ok(self.exists)
+        }
+        async fn truncate(&mut self, _table_name: &str) -> Result<()> {
+            self.record("truncate");
+            Ok(())
+        }
+        fn supports_append(&self) -> bool {
+            self.appendable
+        }
+    }
+
+    fn id_rows(n: i64) -> Vec<Row> {
+        (0..n)
+            .map(|i| {
+                HashMap::from([
+                    ("id".to_string(), Value::Integer(i)),
+                    ("name".to_string(), Value::String(format!("n{}", i))),
+                ])
+            })
+            .collect()
+    }
+
+    fn config(target: &str) -> Config {
+        Config {
+            source: "source.csv".to_string(),
+            target: target.to_string(),
+            batch_size: 10,
+            ..Default::default()
+        }
+    }
+
+    async fn run(config: &Config, source: FakeSource, target: RecordingTarget) -> Result<usize> {
+        TransferEngine::execute(config, Box::new(source), Box::new(target))
+            .await
+            .map(|stats| stats.total_rows)
+    }
+
+    fn calls(log: &Arc<Mutex<Log>>) -> Vec<String> {
+        log.lock().unwrap().calls.clone()
+    }
+
+    const ID_NAME: &[(&str, DataType)] = &[("id", DataType::Integer), ("name", DataType::String)];
+
+    #[tokio::test]
+    async fn test_new_target_is_created_written_in_batches_and_finalized() {
+        let (target, log) = RecordingTarget::new(false, true);
+        let source = FakeSource::new(ID_NAME, id_rows(25));
+        assert_eq!(
+            run(&config("out.db#users"), source, target).await.unwrap(),
+            25
+        );
+        assert_eq!(
+            calls(&log),
+            [
+                "connect",
+                "exists",
+                "create_table",
+                "write_batch(10)",
+                "write_batch(10)",
+                "write_batch(5)",
+                "finalize"
+            ]
+        );
+        // The table name comes from the text after '#'
+        let (table, _) = log.lock().unwrap().created_with.clone().unwrap();
+        assert_eq!(table, "users");
+    }
+
+    #[tokio::test]
+    async fn test_existing_target_is_appended_to() {
+        let (target, log) = RecordingTarget::new(true, true);
+        run(
+            &config("t.db#t"),
+            FakeSource::new(ID_NAME, id_rows(3)),
+            target,
+        )
+        .await
+        .unwrap();
+        let calls = calls(&log);
+        assert!(!calls.contains(&"truncate".to_string()), "{:?}", calls);
+        // create_table is still called: it's how the target learns the schema
+        assert!(calls.contains(&"create_table".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_truncate_runs_before_create_table() {
+        let (target, log) = RecordingTarget::new(true, true);
+        let mut cfg = config("t.db#t");
+        cfg.truncate = true;
+        run(&cfg, FakeSource::new(ID_NAME, id_rows(3)), target)
+            .await
+            .unwrap();
+        assert_eq!(&calls(&log)[1..4], ["exists", "truncate", "create_table"]);
+    }
+
+    #[tokio::test]
+    async fn test_existing_target_that_cannot_append_is_truncated() {
+        let (target, log) = RecordingTarget::new(true, false);
+        run(
+            &config("out.parquet"),
+            FakeSource::new(ID_NAME, id_rows(3)),
+            target,
+        )
+        .await
+        .unwrap();
+        assert!(calls(&log).contains(&"truncate".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_missing_target_is_not_truncated_even_with_the_flag() {
+        let (target, log) = RecordingTarget::new(false, true);
+        let mut cfg = config("t.db#t");
+        cfg.truncate = true;
+        run(&cfg, FakeSource::new(ID_NAME, id_rows(3)), target)
+            .await
+            .unwrap();
+        assert!(!calls(&log).contains(&"truncate".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_empty_source_still_creates_and_finalizes() {
+        let (target, log) = RecordingTarget::new(false, true);
+        assert_eq!(
+            run(&config("t.db#t"), FakeSource::new(ID_NAME, vec![]), target)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            calls(&log),
+            ["connect", "exists", "create_table", "finalize"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_write_stops_before_finalize() {
+        // Database targets commit in finalize, so it must not run after a failure
+        let (mut target, log) = RecordingTarget::new(false, true);
+        target.fail_after_rows = Some(15);
+        let err = run(
+            &config("t.db#t"),
+            FakeSource::new(ID_NAME, id_rows(25)),
+            target,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("disk full"));
+        let calls = calls(&log);
+        assert_eq!(calls.last().unwrap(), "write_batch failed");
+        assert!(!calls.contains(&"finalize".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_values_are_converted_to_the_column_type_before_writing() {
+        // The schema came from a sample: later rows disagree with it
+        let rows = vec![
+            HashMap::from([
+                ("amount".to_string(), Value::Integer(84)),
+                ("code".to_string(), Value::Integer(7)),
+            ]),
+            HashMap::from([
+                ("amount".to_string(), Value::String(" ".to_string())),
+                ("code".to_string(), Value::String("x".to_string())),
+            ]),
+        ];
+        let source = FakeSource::new(
+            &[("amount", DataType::Decimal), ("code", DataType::String)],
+            rows,
+        );
+        let (target, log) = RecordingTarget::new(false, true);
+        run(&config("t.db#t"), source, target).await.unwrap();
+        let written = log.lock().unwrap().rows.clone();
+        assert_eq!(
+            written[0]["amount"],
+            Value::Decimal(rust_decimal::Decimal::from(84))
+        );
+        assert_eq!(written[0]["code"], Value::String("7".to_string()));
+        assert_eq!(written[1]["amount"], Value::Null); // blank in a numeric column
+    }
+
+    #[tokio::test]
+    async fn test_transform_changes_the_schema_and_rows() {
+        let (target, log) = RecordingTarget::new(false, true);
+        let mut cfg = config("t.db#t");
+        cfg.transform =
+            crate::transformer::TransformConfig::Inline("double=row.id * 2".to_string());
+        run(&cfg, FakeSource::new(ID_NAME, id_rows(3)), target)
+            .await
+            .unwrap();
+        let log = log.lock().unwrap();
+        let (_, schema) = log.created_with.clone().unwrap();
+        assert!(schema.columns.iter().any(|c| c.name == "double"));
+        assert_eq!(log.rows.len(), 3);
+        assert_eq!(log.rows[2]["double"], Value::Integer(4));
+        assert_eq!(log.rows[2]["name"], Value::String("n2".to_string())); // kept
+    }
+
+    #[tokio::test]
+    async fn test_schema_file_rejects_a_bad_row_before_finalize() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema_path = dir.path().join("schema.yaml");
+        std::fs::write(
+            &schema_path,
+            "columns:\n  - name: id\n    type: Integer\n  - name: name\n    type: String\n    pattern: '^n[0-9]$'\n",
+        )
+        .unwrap();
+        let mut cfg = config("t.db#t");
+        cfg.schema_file = Some(schema_path.to_string_lossy().into_owned());
+        // n0..n9 match, n10 doesn't: the second batch fails validation
+        let (target, log) = RecordingTarget::new(false, true);
+        let err = run(&cfg, FakeSource::new(ID_NAME, id_rows(12)), target)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("does not match pattern"),
+            "{}",
+            err
+        );
+        let calls = calls(&log);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.starts_with("write_batch"))
+                .count(),
+            1
+        );
+        assert!(!calls.contains(&"finalize".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_preview_and_dry_run_never_write() {
+        for mode in ["preview", "dry_run"] {
+            let (target, log) = RecordingTarget::new(true, true);
+            let mut cfg = config("t.db#t");
+            if mode == "preview" {
+                cfg.preview = Some(2);
+            } else {
+                cfg.dry_run = true;
+            }
+            run(&cfg, FakeSource::new(ID_NAME, id_rows(5)), target)
+                .await
+                .unwrap();
+            let calls = calls(&log);
+            for forbidden in ["truncate", "create_table", "finalize"] {
+                assert!(
+                    !calls.contains(&forbidden.to_string()),
+                    "{}: {:?}",
+                    mode,
+                    calls
+                );
+            }
+            assert!(
+                !calls.iter().any(|c| c.starts_with("write_batch")),
+                "{}",
+                mode
+            );
+        }
+    }
+
     #[test]
     fn test_extract_table_name() {
         assert_eq!(TransferEngine::extract_table_name("test.db#users"), "users");
