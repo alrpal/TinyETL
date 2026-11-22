@@ -32,8 +32,10 @@ fn schema() -> Schema {
     }
 }
 
+/// Every 50th row has no `name` key (an optional field in JSON), including the first row of
+/// each batch, which must not decide the columns written.
 fn row(i: i64) -> Row {
-    HashMap::from([
+    let mut row = HashMap::from([
         ("id".to_string(), Value::Integer(i)),
         (
             "name".to_string(),
@@ -48,7 +50,11 @@ fn row(i: i64) -> Row {
             "at".to_string(),
             Value::Date(Utc.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap()),
         ),
-    ])
+    ]);
+    if i % 50 == 0 {
+        row.remove("name");
+    }
+    row
 }
 
 fn rows(range: std::ops::Range<i64>) -> Vec<Row> {
@@ -118,6 +124,14 @@ pub(crate) async fn run_all(make_source: MakeSource, make_target: MakeTarget) {
         other => panic!("price is {:?}", other),
     };
     assert_eq!(price, Decimal::from_str("26.25").unwrap());
+    let names = read
+        .iter()
+        .filter(|r| matches!(r.get("name"), Some(Value::String(_))))
+        .count();
+    assert_eq!(
+        names, 245,
+        "a key missing from some rows is NULL only in those rows"
+    );
 
     // reset() after reading starts over
     let mut source = make_source();

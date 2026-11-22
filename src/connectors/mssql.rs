@@ -687,15 +687,8 @@ impl Target for MssqlTarget {
                 insert_sql.push_str(&column_names.join(", "));
                 insert_sql.push_str(") VALUES ");
 
+                // A key missing from a row (optional JSON fields) is written as NULL
                 for (row_idx, row) in chunk.iter().enumerate() {
-                    if row.len() != schema.columns.len() {
-                        return Err(TinyEtlError::DataTransfer(format!(
-                            "Row has {} values but schema expects {}",
-                            row.len(),
-                            schema.columns.len()
-                        )));
-                    }
-
                     if row_idx > 0 {
                         insert_sql.push_str(", ");
                     }

@@ -292,6 +292,8 @@ pub struct SqliteTarget {
     tx: Option<Mutex<sqlx::Transaction<'static, sqlx::Sqlite>>>,
     /// truncate() was called: empty the table inside the load's transaction
     truncate_table: Option<String>,
+    /// Column names from create_table; every row is written with all of them
+    columns: Vec<String>,
 }
 
 impl SqliteTarget {
@@ -348,6 +350,7 @@ impl SqliteTarget {
             table_name: table.to_string(),
             tx: None,
             truncate_table: None,
+            columns: Vec::new(),
         })
     }
 
@@ -402,6 +405,7 @@ impl Target for SqliteTarget {
         if self.pool.is_none() {
             self.connect().await?;
         }
+        self.columns = schema.columns.iter().map(|c| c.name.clone()).collect();
 
         let pool = self.pool.as_ref().unwrap();
 
@@ -457,8 +461,18 @@ impl Target for SqliteTarget {
             .into_inner()
             .unwrap_or_else(|e| e.into_inner());
 
-        // Get column names from first row
-        let columns: Vec<String> = rows[0].keys().cloned().collect();
+        // The schema's columns (a key missing from a row is NULL), or without create_table,
+        // every key seen in the batch
+        if self.columns.is_empty() {
+            for row in rows {
+                for key in row.keys() {
+                    if !self.columns.contains(key) {
+                        self.columns.push(key.clone());
+                    }
+                }
+            }
+        }
+        let columns = self.columns.clone();
 
         // Quote column names to handle reserved keywords
         let quoted_columns: Vec<String> =

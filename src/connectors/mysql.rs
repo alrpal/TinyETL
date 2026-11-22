@@ -341,6 +341,8 @@ pub struct MysqlTarget {
     tx: Option<Mutex<sqlx::Transaction<'static, sqlx::MySql>>>,
     /// truncate() was called: empty the table inside the load's transaction
     truncate_table: Option<String>,
+    /// Column names from create_table; every row is written with all of them
+    columns: Vec<String>,
 }
 
 impl MysqlTarget {
@@ -354,6 +356,7 @@ impl MysqlTarget {
             max_batch_size: 1000, // Default to 1000 rows per batch
             tx: None,
             truncate_table: None,
+            columns: Vec::new(),
         })
     }
 
@@ -468,15 +471,13 @@ impl MysqlTarget {
 
     async fn write_chunk(
         table_name: &str,
+        columns: &[String],
         conn: &mut sqlx::MySqlConnection,
         rows: &[Row],
     ) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
         }
-
-        // Get column names from the first row
-        let columns: Vec<String> = rows[0].keys().cloned().collect();
         let num_columns = columns.len();
 
         // Build the base INSERT statement with multiple VALUES clauses
@@ -503,12 +504,11 @@ impl MysqlTarget {
 
         // Build the query with all parameter bindings
         let mut query = sqlx::query(sqlx::AssertSqlSafe(insert_sql.as_str()));
-        let default_value = Value::String("".to_string());
 
-        // Bind all values for all rows in the correct order
+        // Bind all values for all rows in the correct order; a missing key is NULL
         for row in rows {
-            for column in &columns {
-                let value = row.get(column).unwrap_or(&default_value);
+            for column in columns {
+                let value = row.get(column).unwrap_or(&Value::Null);
                 query = match value {
                     Value::Integer(i) => query.bind(i),
                     Value::Decimal(d) => {
@@ -565,6 +565,7 @@ impl Target for MysqlTarget {
         self.table_name = actual_table_name.clone();
 
         // Get pool after updating table name to avoid borrowing conflicts
+        self.columns = schema.columns.iter().map(|c| c.name.clone()).collect();
         let pool = self.get_pool().await?;
 
         let mut columns = Vec::new();
@@ -609,8 +610,19 @@ impl Target for MysqlTarget {
         let mut total_affected = 0;
 
         // Process rows in chunks to avoid hitting MySQL limits
+        if self.columns.is_empty() {
+            // create_table wasn't called: every key seen in the batch, in first-seen order
+            for row in rows {
+                for key in row.keys() {
+                    if !self.columns.contains(key) {
+                        self.columns.push(key.clone());
+                    }
+                }
+            }
+        }
         for chunk in rows.chunks(self.max_batch_size) {
-            total_affected += Self::write_chunk(&self.table_name, &mut tx, chunk).await?;
+            total_affected +=
+                Self::write_chunk(&self.table_name, &self.columns, &mut tx, chunk).await?;
         }
         self.tx = Some(Mutex::new(tx));
 
