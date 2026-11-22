@@ -1,10 +1,11 @@
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use sqlx::{sqlite::SqliteConnectOptions, Column, Row as SqlxRow, SqlitePool};
 use std::path::PathBuf;
 
 use crate::{
-    connectors::{Source, Target},
+    connectors::{row_stream::RowStream, Source, Target},
     schema::{Column as SchemaColumn, DataType, Row, Schema, Value},
     Result, TinyEtlError,
 };
@@ -13,9 +14,9 @@ pub struct SqliteSource {
     connection_string: String,
     pool: Option<SqlitePool>,
     table_name: String,
-    query: Option<String>,
-    current_offset: usize,
-    total_rows: Option<usize>,
+    /// One streaming `SELECT` for the whole read (no OFFSET paging)
+    stream: Option<RowStream>,
+    consumed: bool,
 }
 
 impl SqliteSource {
@@ -39,10 +40,74 @@ impl SqliteSource {
             connection_string: format!("sqlite:{}", db_path),
             pool: None,
             table_name: table.to_string(),
-            query: None,
-            current_offset: 0,
-            total_rows: None,
+            stream: None,
+            consumed: false,
         })
+    }
+
+    /// Run `SELECT *` once on its own connection and stream the rows.
+    fn start_stream(&self) -> Result<RowStream> {
+        let pool = self
+            .pool
+            .clone()
+            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
+        let sql = format!("SELECT * FROM \"{}\"", self.table_name);
+        Ok(RowStream::spawn(move |mut sink| async move {
+            let mut conn = match pool.acquire().await {
+                Ok(conn) => conn,
+                Err(e) => return sink.fail(format!("Failed to connect: {}", e)).await,
+            };
+            let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&mut *conn);
+            while let Some(row) = rows.next().await {
+                match row {
+                    Ok(row) => {
+                        if !sink.push(Self::row_values(&row)).await {
+                            return;
+                        }
+                    }
+                    Err(e) => return sink.fail(format!("Failed to fetch rows: {}", e)).await,
+                }
+            }
+            drop(rows);
+            sink.finish().await;
+        }))
+    }
+
+    fn row_values(row: &sqlx::sqlite::SqliteRow) -> Row {
+        row.columns()
+            .iter()
+            .enumerate()
+            .map(|(i, column)| (column.name().to_string(), Self::value_at(row, i)))
+            .collect()
+    }
+
+    /// A column value by its stored type (SQLite types each value, not each column).
+    fn value_at(row: &sqlx::sqlite::SqliteRow, i: usize) -> Value {
+        if let Ok(val) = row.try_get::<Option<String>, _>(i) {
+            val.map_or(Value::Null, Value::String)
+        } else if let Ok(val) = row.try_get::<Option<i64>, _>(i) {
+            val.map_or(Value::Null, Value::Integer)
+        } else if let Ok(val) = row.try_get::<Option<f64>, _>(i) {
+            match val {
+                Some(f) => match Decimal::try_from(f) {
+                    Ok(d) => Value::Decimal(d),
+                    Err(_) => Value::String(f.to_string()),
+                },
+                None => Value::Null,
+            }
+        } else if let Ok(val) = row.try_get::<Option<Vec<u8>>, _>(i) {
+            // BLOB: text stored as bytes (such as JSON written by some drivers) is read as
+            // text; other bytes as hex
+            match val {
+                Some(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => Value::String(text),
+                    Err(e) => Value::String(format!("0x{}", hex::encode(e.as_bytes()))),
+                },
+                None => Value::Null,
+            }
+        } else {
+            Value::Null
+        }
     }
 }
 
@@ -112,9 +177,6 @@ impl Source for SqliteSource {
         .await?;
         let estimated_rows: i64 = count_result.get("count");
 
-        // Store total rows for pagination
-        self.total_rows = Some(estimated_rows as usize);
-
         Ok(Schema {
             columns,
             estimated_rows: Some(estimated_rows as usize),
@@ -126,62 +188,17 @@ impl Source for SqliteSource {
         if self.pool.is_none() {
             self.connect().await?;
         }
-
-        let pool = self.pool.as_ref().unwrap();
-
-        // Use LIMIT and OFFSET for proper pagination
-        let query = format!(
-            "SELECT * FROM \"{}\" LIMIT {} OFFSET {}",
-            self.table_name, batch_size, self.current_offset
-        );
-        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
-            .fetch_all(pool)
-            .await?;
-
-        // Update offset for next batch
-        self.current_offset += rows.len();
-
-        let mut result_rows = Vec::new();
-        for row in rows {
-            let mut data_row = Row::new();
-
-            // Get column info
-            for (i, column) in row.columns().iter().enumerate() {
-                let column_name = column.name();
-
-                // This is a simplified value extraction - in practice we'd need proper type handling
-                let value = if let Ok(val) = row.try_get::<Option<String>, _>(i) {
-                    match val {
-                        Some(s) => Value::String(s),
-                        None => Value::Null,
-                    }
-                } else if let Ok(val) = row.try_get::<Option<i64>, _>(i) {
-                    match val {
-                        Some(i) => Value::Integer(i),
-                        None => Value::Null,
-                    }
-                } else if let Ok(val) = row.try_get::<Option<f64>, _>(i) {
-                    match val {
-                        Some(f) => {
-                            // Convert f64 to Decimal
-                            match Decimal::try_from(f) {
-                                Ok(d) => Value::Decimal(d),
-                                Err(_) => Value::String(f.to_string()),
-                            }
-                        }
-                        None => Value::Null,
-                    }
-                } else {
-                    Value::Null
-                };
-
-                data_row.insert(column_name.to_string(), value);
-            }
-
-            result_rows.push(data_row);
+        if self.stream.is_none() {
+            self.stream = Some(self.start_stream()?);
         }
-
-        Ok(result_rows)
+        let rows = self
+            .stream
+            .as_mut()
+            .expect("started above")
+            .next_batch(batch_size)
+            .await?;
+        self.consumed |= !rows.is_empty();
+        Ok(rows)
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
@@ -200,19 +217,16 @@ impl Source for SqliteSource {
     }
 
     async fn reset(&mut self) -> Result<()> {
-        // Reset pagination state
-        self.current_offset = 0;
-        self.query = None;
+        // The query runs again on the next read, but only if rows were already read
+        if self.consumed {
+            self.stream = None;
+            self.consumed = false;
+        }
         Ok(())
     }
 
     fn has_more(&self) -> bool {
-        // Check if there are more rows to read based on pagination state
-        if let Some(total) = self.total_rows {
-            self.current_offset < total
-        } else {
-            false
-        }
+        self.stream.as_ref().is_none_or(RowStream::has_more)
     }
 }
 

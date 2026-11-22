@@ -10,6 +10,7 @@ pub mod odbc;
 mod output_file;
 pub mod parquet;
 pub mod postgres;
+mod row_stream;
 pub mod snowflake;
 pub mod sqlite;
 

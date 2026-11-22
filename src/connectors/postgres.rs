@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use chrono::TimeZone;
+use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use sqlx::{postgres::PgConnectOptions, Column, PgPool, Row as SqlxRow};
 use std::str::FromStr;
 
 use crate::{
-    connectors::{Source, Target},
+    connectors::{row_stream::RowStream, Source, Target},
     schema::{DataType, Row, Schema, SchemaInferer, Value},
     Result, TinyEtlError,
 };
@@ -15,8 +16,9 @@ pub struct PostgresSource {
     pool: Option<PgPool>,
     table_name: String,
     query: Option<String>,
-    current_offset: usize,
-    total_rows: Option<usize>,
+    /// One streaming `SELECT` for the whole read (no OFFSET paging)
+    stream: Option<RowStream>,
+    consumed: bool,
 }
 
 impl PostgresSource {
@@ -42,8 +44,8 @@ impl PostgresSource {
             pool: None,
             table_name: table.to_string(),
             query: None,
-            current_offset: 0,
-            total_rows: None,
+            stream: None,
+            consumed: false,
         })
     }
 
@@ -59,8 +61,8 @@ impl PostgresSource {
             pool: None,
             table_name: String::new(),
             query: Some(query.to_string()),
-            current_offset: 0,
-            total_rows: None,
+            stream: None,
+            consumed: false,
         })
     }
 }
@@ -116,7 +118,7 @@ impl Source for PostgresSource {
             let mut schema_row = Row::new();
             for column in row.columns() {
                 let col_name = column.name();
-                let value = self.extract_value(row, column)?;
+                let value = Self::extract_value(row, column)?;
                 schema_row.insert(col_name.to_string(), value);
             }
             schema_rows.push(schema_row);
@@ -139,41 +141,17 @@ impl Source for PostgresSource {
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
-        let pool = self
-            .pool
-            .as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
-
-        let query = if let Some(ref custom_query) = self.query {
-            format!(
-                "SELECT * FROM ({}) AS subquery OFFSET {} LIMIT {}",
-                custom_query, self.current_offset, batch_size
-            )
-        } else {
-            format!(
-                "SELECT * FROM {} OFFSET {} LIMIT {}",
-                self.table_name, self.current_offset, batch_size
-            )
-        };
-
-        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
-            .fetch_all(pool)
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch batch: {}", e)))?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            let mut schema_row = Row::new();
-            for column in row.columns() {
-                let col_name = column.name();
-                let value = self.extract_value(&row, column)?;
-                schema_row.insert(col_name.to_string(), value);
-            }
-            result.push(schema_row);
+        if self.stream.is_none() {
+            self.stream = Some(self.start_stream()?);
         }
-
-        self.current_offset += result.len();
-        Ok(result)
+        let rows = self
+            .stream
+            .as_mut()
+            .expect("started above")
+            .next_batch(batch_size)
+            .await?;
+        self.consumed |= !rows.is_empty();
+        Ok(rows)
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
@@ -218,23 +196,62 @@ impl Source for PostgresSource {
     }
 
     async fn reset(&mut self) -> Result<()> {
-        self.current_offset = 0;
+        // The query runs again on the next read, but only if rows were already read
+        if self.consumed {
+            self.stream = None;
+            self.consumed = false;
+        }
         Ok(())
     }
 
     fn has_more(&self) -> bool {
-        if let Some(total) = self.total_rows {
-            self.current_offset < total
-        } else {
-            // If we don't know the total, assume there might be more
-            true
-        }
+        self.stream.as_ref().is_none_or(RowStream::has_more)
     }
 }
 
 impl PostgresSource {
+    /// Run the query once on its own connection and stream the rows.
+    fn start_stream(&self) -> Result<RowStream> {
+        let pool = self
+            .pool
+            .clone()
+            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
+        let sql = match &self.query {
+            Some(query) => format!("SELECT * FROM ({}) AS subquery", query),
+            None => format!("SELECT * FROM {}", self.table_name),
+        };
+        Ok(RowStream::spawn(move |mut sink| async move {
+            let mut conn = match pool.acquire().await {
+                Ok(conn) => conn,
+                Err(e) => return sink.fail(format!("Failed to connect: {}", e)).await,
+            };
+            let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&mut *conn);
+            while let Some(row) = rows.next().await {
+                let converted = row
+                    .map_err(|e| format!("Failed to fetch rows: {}", e))
+                    .and_then(|row| Self::row_values(&row).map_err(|e| e.to_string()));
+                match converted {
+                    Ok(values) => {
+                        if !sink.push(values).await {
+                            return; // the reader is gone
+                        }
+                    }
+                    Err(message) => return sink.fail(message).await,
+                }
+            }
+            drop(rows);
+            sink.finish().await;
+        }))
+    }
+
+    fn row_values(row: &sqlx::postgres::PgRow) -> Result<Row> {
+        row.columns()
+            .iter()
+            .map(|column| Ok((column.name().to_string(), Self::extract_value(row, column)?)))
+            .collect()
+    }
+
     fn extract_value(
-        &self,
         row: &sqlx::postgres::PgRow,
         column: &sqlx::postgres::PgColumn,
     ) -> Result<Value> {
@@ -737,8 +754,7 @@ mod tests {
     fn test_postgres_source_initial_state() {
         let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
 
-        assert_eq!(source.current_offset, 0);
-        assert_eq!(source.total_rows, None);
+        assert!(source.stream.is_none());
         assert!(source.pool.is_none());
         assert!(source.query.is_none());
     }
@@ -836,29 +852,10 @@ mod tests {
     }
 
     #[test]
-    fn test_postgres_source_has_more_with_total() {
-        let mut source =
-            PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
-
-        // When total_rows is set and current_offset < total
-        source.total_rows = Some(100);
-        source.current_offset = 50;
-        assert!(source.has_more());
-
-        // When current_offset == total
-        source.current_offset = 100;
-        assert!(!source.has_more());
-
-        // When current_offset > total
-        source.current_offset = 150;
-        assert!(!source.has_more());
-    }
-
-    #[test]
     fn test_postgres_source_has_more_without_total() {
         let source = PostgresSource::new("postgres://user:pass@localhost:5432/db#table").unwrap();
 
-        // When total_rows is None, always return true
+        // Before the query has run, there may be rows
         assert!(source.has_more());
     }
 

@@ -3,7 +3,6 @@ use chrono::{NaiveDateTime, TimeZone, Utc};
 use futures_util::stream::TryStreamExt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::time::Duration;
 use tiberius::{AuthMethod, Client, Config, EncryptionLevel};
 use tokio::net::TcpStream;
@@ -12,7 +11,7 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 use url::Url;
 
 use crate::{
-    connectors::{Source, Target},
+    connectors::{row_stream::RowStream, Source, Target},
     schema::{Column, DataType, Row, Schema, Value},
     Result, TinyEtlError,
 };
@@ -24,9 +23,11 @@ pub struct MssqlSource {
     client: Option<MssqlClient>,
     table_name: String,
     query: Option<String>,
-    current_offset: usize,
     total_rows: Option<usize>,
     schema: Option<Schema>,
+    /// One streaming `SELECT` for the whole read (no OFFSET paging), on its own connection
+    stream: Option<RowStream>,
+    consumed: bool,
 }
 
 impl MssqlSource {
@@ -38,8 +39,9 @@ impl MssqlSource {
             client: None,
             table_name: table,
             query: None,
-            current_offset: 0,
             total_rows: None,
+            stream: None,
+            consumed: false,
             schema: None,
         })
     }
@@ -229,83 +231,16 @@ impl Source for MssqlSource {
                 "Not connected to MSSQL".to_string(),
             ));
         }
-
-        // Ensure we have schema
-        if self.schema.is_none() {
-            self.infer_schema(1000).await?;
+        if self.stream.is_none() {
+            self.stream = Some(self.start_stream());
         }
-
-        let client = self.client.as_mut().unwrap();
-        let schema = self.schema.as_ref().unwrap();
-
-        let query = if let Some(ref custom_query) = self.query {
-            format!(
-                "{} ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
-                custom_query, self.current_offset, batch_size
-            )
-        } else {
-            format!(
-                "SELECT * FROM {} ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
-                self.table_name, self.current_offset, batch_size
-            )
-        };
-
-        let mut stream = client
-            .query(query, &[])
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))?;
-
-        let mut rows = Vec::new();
-
-        while let Some(item) = stream
-            .try_next()
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch results: {}", e)))?
-        {
-            if let tiberius::QueryItem::Row(row) = item {
-                let mut row_data = HashMap::new();
-                for (i, column) in schema.columns.iter().enumerate() {
-                    let value = match row.try_get::<&str, usize>(i) {
-                        Ok(Some(s)) => Value::String(s.to_string()),
-                        Ok(None) => Value::Null,
-                        Err(_) => {
-                            // Try different types
-                            if let Ok(Some(v)) = row.try_get::<i64, usize>(i) {
-                                Value::Integer(v)
-                            } else if let Ok(Some(v)) = row.try_get::<i32, usize>(i) {
-                                Value::Integer(v.into())
-                            } else if let Ok(Some(v)) = row.try_get::<i16, usize>(i) {
-                                Value::Integer(v.into())
-                            } else if let Ok(Some(v)) = row.try_get::<u8, usize>(i) {
-                                Value::Integer(v.into())
-                            } else if let Ok(Some(v)) = row.try_get::<Decimal, usize>(i) {
-                                // DECIMAL / NUMERIC / MONEY
-                                Value::Decimal(v)
-                            } else if let Ok(Some(v)) = row.try_get::<f64, usize>(i) {
-                                // Shortest decimal that round-trips (7.1234, not 7.12340000000000017…)
-                                Decimal::try_from(v)
-                                    .map(Value::Decimal)
-                                    .unwrap_or_else(|_| Value::String(v.to_string()))
-                            } else if let Ok(Some(v)) = row.try_get::<f32, usize>(i) {
-                                Decimal::try_from(v)
-                                    .map(Value::Decimal)
-                                    .unwrap_or_else(|_| Value::String(v.to_string()))
-                            } else if let Ok(Some(v)) = row.try_get::<bool, usize>(i) {
-                                Value::Boolean(v)
-                            } else if let Ok(Some(v)) = row.try_get::<NaiveDateTime, usize>(i) {
-                                // Convert NaiveDateTime to DateTime<Utc>
-                                Value::Date(Utc.from_utc_datetime(&v))
-                            } else {
-                                Value::Null
-                            }
-                        }
-                    };
-                    row_data.insert(column.name.clone(), value);
-                }
-                rows.push(row_data);
-            }
-        }
-        self.current_offset += rows.len();
+        let rows = self
+            .stream
+            .as_mut()
+            .expect("started above")
+            .next_batch(batch_size)
+            .await?;
+        self.consumed |= !rows.is_empty();
         Ok(rows)
     }
 
@@ -318,14 +253,96 @@ impl Source for MssqlSource {
     }
 
     async fn reset(&mut self) -> Result<()> {
-        self.current_offset = 0;
+        // The query runs again on the next read, but only if rows were already read
+        if self.consumed {
+            self.stream = None;
+            self.consumed = false;
+        }
         Ok(())
     }
 
     fn has_more(&self) -> bool {
-        // This is a simple heuristic - in a real implementation, you might want to
-        // track this more precisely
-        true
+        self.stream.as_ref().is_none_or(RowStream::has_more)
+    }
+}
+
+impl MssqlSource {
+    /// Run the query once on a new connection and stream the rows.
+    fn start_stream(&self) -> RowStream {
+        let connection_string = self.connection_string.clone();
+        let sql = match &self.query {
+            Some(query) => query.clone(),
+            None => format!("SELECT * FROM {}", self.table_name),
+        };
+        RowStream::spawn(move |mut sink| async move {
+            let client = Self::create_client(&connection_string)
+                .await
+                .map_err(|e| e.to_string());
+            let mut client = match client {
+                Ok(client) => client,
+                Err(message) => return sink.fail(message).await,
+            };
+            let mut stream = match client.query(sql, &[]).await {
+                Ok(stream) => stream.into_row_stream(),
+                Err(e) => return sink.fail(format!("Failed to execute query: {}", e)).await,
+            };
+            loop {
+                match stream.try_next().await {
+                    Ok(Some(row)) => {
+                        let values: Row = row
+                            .columns()
+                            .iter()
+                            .enumerate()
+                            .map(|(i, column)| (column.name().to_string(), value_at(&row, i)))
+                            .collect();
+                        if !sink.push(values).await {
+                            return;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => return sink.fail(format!("Failed to fetch results: {}", e)).await,
+                }
+            }
+            drop(stream);
+            sink.finish().await;
+        })
+    }
+}
+
+/// A SQL Server value as a TinyETL value, trying the column's possible types in turn.
+fn value_at(row: &tiberius::Row, i: usize) -> Value {
+    match row.try_get::<&str, usize>(i) {
+        Ok(Some(s)) => Value::String(s.to_string()),
+        Ok(None) => Value::Null,
+        Err(_) => {
+            if let Ok(Some(v)) = row.try_get::<i64, usize>(i) {
+                Value::Integer(v)
+            } else if let Ok(Some(v)) = row.try_get::<i32, usize>(i) {
+                Value::Integer(v.into())
+            } else if let Ok(Some(v)) = row.try_get::<i16, usize>(i) {
+                Value::Integer(v.into())
+            } else if let Ok(Some(v)) = row.try_get::<u8, usize>(i) {
+                Value::Integer(v.into())
+            } else if let Ok(Some(v)) = row.try_get::<Decimal, usize>(i) {
+                // DECIMAL / NUMERIC / MONEY
+                Value::Decimal(v)
+            } else if let Ok(Some(v)) = row.try_get::<f64, usize>(i) {
+                // Shortest decimal that round-trips (7.1234, not 7.12340000000000017…)
+                Decimal::try_from(v)
+                    .map(Value::Decimal)
+                    .unwrap_or_else(|_| Value::String(v.to_string()))
+            } else if let Ok(Some(v)) = row.try_get::<f32, usize>(i) {
+                Decimal::try_from(v)
+                    .map(Value::Decimal)
+                    .unwrap_or_else(|_| Value::String(v.to_string()))
+            } else if let Ok(Some(v)) = row.try_get::<bool, usize>(i) {
+                Value::Boolean(v)
+            } else if let Ok(Some(v)) = row.try_get::<NaiveDateTime, usize>(i) {
+                Value::Date(Utc.from_utc_datetime(&v))
+            } else {
+                Value::Null
+            }
+        }
     }
 }
 
@@ -761,7 +778,7 @@ mod tests {
         assert!(source.is_ok());
         let source = source.unwrap();
         assert_eq!(source.table_name, "testtable");
-        assert_eq!(source.current_offset, 0);
+        assert!(source.stream.is_none());
         assert!(source.client.is_none());
         assert!(source.schema.is_none());
     }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    connectors::{Source, Target},
+    connectors::{row_stream::RowStream, Source, Target},
     schema::{Column as SchemaColumn, DataType, Row, Schema, Value},
     Result, TinyEtlError,
 };
@@ -80,9 +80,9 @@ pub struct DuckdbSource {
     connection_string: String,
     connection: Option<Arc<Mutex<Connection>>>,
     table_name: String,
-    query: Option<String>,
-    current_offset: usize,
-    total_rows: Option<usize>,
+    /// One streaming `SELECT` for the whole read (no OFFSET paging), on its own thread
+    stream: Option<RowStream>,
+    consumed: bool,
 }
 
 impl DuckdbSource {
@@ -106,10 +106,112 @@ impl DuckdbSource {
             connection_string: db_path.to_string(),
             connection: None,
             table_name: table.to_string(),
-            query: None,
-            current_offset: 0,
-            total_rows: None,
+            stream: None,
+            consumed: false,
         })
+    }
+
+    /// Run `SELECT *` once on a cloned connection, on its own thread, and stream the rows.
+    fn start_stream(&self) -> Result<RowStream> {
+        let conn = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_clone()
+            .map_err(|e| TinyEtlError::Connection(format!("Failed to open a connection: {}", e)))?;
+        let sql = format!("SELECT * FROM \"{}\"", self.table_name);
+        RowStream::spawn_blocking(move |mut sink| {
+            let result = (|| -> std::result::Result<(), String> {
+                let mut stmt = conn
+                    .prepare(&sql)
+                    .map_err(|e| format!("Failed to prepare query: {}", e))?;
+                let mut rows = stmt
+                    .query([])
+                    .map_err(|e| format!("Failed to execute query: {}", e))?;
+                let mut names: Vec<String> = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .map_err(|e| format!("Failed to fetch row: {}", e))?
+                {
+                    if names.is_empty() {
+                        let count = row.as_ref().column_count();
+                        names = (0..count)
+                            .map(|i| {
+                                row.as_ref()
+                                    .column_name(i)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|_| format!("column_{}", i))
+                            })
+                            .collect();
+                    }
+                    let values: Row = names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| (name.clone(), value_at(row, i)))
+                        .collect();
+                    if !sink.blocking_push(values) {
+                        return Ok(()); // the reader is gone
+                    }
+                }
+                Ok(())
+            })();
+            match result {
+                Ok(()) => sink.blocking_finish(),
+                Err(message) => sink.blocking_fail(message),
+            }
+        })
+    }
+}
+
+/// A DuckDB value as a TinyETL value, keeping numeric and date/time types.
+fn value_at(row: &duckdb::Row, i: usize) -> Value {
+    let Ok(value_ref) = row.get_ref(i) else {
+        return Value::Null;
+    };
+    match value_ref {
+        ValueRef::Null => Value::Null,
+        ValueRef::Boolean(b) => Value::Boolean(b),
+        ValueRef::TinyInt(n) => Value::Integer(n as i64),
+        ValueRef::SmallInt(n) => Value::Integer(n as i64),
+        ValueRef::Int(n) => Value::Integer(n as i64),
+        ValueRef::BigInt(n) => Value::Integer(n),
+        ValueRef::HugeInt(n) => match i64::try_from(n) {
+            Ok(n) => Value::Integer(n),
+            Err(_) => Value::String(n.to_string()),
+        },
+        ValueRef::UTinyInt(n) => Value::Integer(n as i64),
+        ValueRef::USmallInt(n) => Value::Integer(n as i64),
+        ValueRef::UInt(n) => Value::Integer(n as i64),
+        ValueRef::UBigInt(n) => match i64::try_from(n) {
+            Ok(n) => Value::Integer(n),
+            Err(_) => Value::String(n.to_string()),
+        },
+        ValueRef::Float(f) => match Decimal::try_from(f) {
+            Ok(d) => Value::Decimal(d),
+            Err(_) => Value::String(f.to_string()),
+        },
+        ValueRef::Double(f) => match Decimal::try_from(f) {
+            Ok(d) => Value::Decimal(d),
+            Err(_) => Value::String(f.to_string()),
+        },
+        ValueRef::Decimal(d) => Value::Decimal(d),
+        ValueRef::Timestamp(unit, value) => {
+            let micros = unit.to_micros(value);
+            match DateTime::<Utc>::from_timestamp_micros(micros) {
+                Some(dt) => Value::Date(dt),
+                None => Value::Null,
+            }
+        }
+        ValueRef::Date32(days) => DateTime::<Utc>::from_timestamp(days as i64 * 86_400, 0)
+            .map_or(Value::Null, Value::Date),
+        ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+            Ok(s) => Value::String(s.to_string()),
+            Err(_) => Value::Null,
+        },
+        ValueRef::Blob(bytes) => Value::String(general_purpose::STANDARD.encode(bytes)),
+        _ => row.get::<_, String>(i).map_or(Value::Null, Value::String),
     }
 }
 
@@ -197,8 +299,6 @@ impl Source for DuckdbSource {
             .query_row(&count_query, [], |row| row.get(0))
             .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to count rows: {}", e)))?;
 
-        self.total_rows = Some(count as usize);
-
         Ok(Schema {
             columns,
             estimated_rows: Some(count as usize),
@@ -210,119 +310,19 @@ impl Source for DuckdbSource {
         if self.connection.is_none() {
             self.connect().await?;
         }
-
-        let conn = self.connection.as_ref().unwrap();
-        let conn = conn.lock().unwrap();
-
-        // Use LIMIT and OFFSET for proper pagination
-        let query = format!(
-            "SELECT * FROM \"{}\" LIMIT {} OFFSET {}",
-            self.table_name, batch_size, self.current_offset
-        );
-
-        let mut stmt = conn
-            .prepare(&query)
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to prepare query: {}", e)))?;
-
-        // Execute the query first to get the rows iterator
-        let mut rows_iter = stmt
-            .query([])
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to execute query: {}", e)))?;
-
-        let mut result_rows = Vec::new();
-
-        // Process each row
-        while let Some(row) = rows_iter
-            .next()
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch row: {}", e)))?
-        {
-            let mut data_row = Row::new();
-
-            // Use row.as_ref() to get column count from the row itself
-            let column_count = row.as_ref().column_count();
-
-            for i in 0..column_count {
-                // Get column name from the row
-                let column_name = row
-                    .as_ref()
-                    .column_name(i)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|_| format!("column_{}", i));
-
-                let value = match row.get_ref(i) {
-                    Ok(value_ref) => match value_ref {
-                        ValueRef::Null => Value::Null,
-                        ValueRef::Boolean(b) => Value::Boolean(b),
-                        ValueRef::TinyInt(n) => Value::Integer(n as i64),
-                        ValueRef::SmallInt(n) => Value::Integer(n as i64),
-                        ValueRef::Int(n) => Value::Integer(n as i64),
-                        ValueRef::BigInt(n) => Value::Integer(n),
-                        ValueRef::HugeInt(n) => Value::Integer(n as i64),
-                        ValueRef::UTinyInt(n) => Value::Integer(n as i64),
-                        ValueRef::USmallInt(n) => Value::Integer(n as i64),
-                        ValueRef::UInt(n) => Value::Integer(n as i64),
-                        ValueRef::UBigInt(n) => Value::Integer(n as i64),
-                        ValueRef::Float(f) => match Decimal::try_from(f) {
-                            Ok(d) => Value::Decimal(d),
-                            Err(_) => Value::String(f.to_string()),
-                        },
-                        ValueRef::Double(f) => match Decimal::try_from(f) {
-                            Ok(d) => Value::Decimal(d),
-                            Err(_) => Value::String(f.to_string()),
-                        },
-                        ValueRef::Decimal(d) => {
-                            // Convert DuckDB decimal to rust_decimal
-                            Value::String(d.to_string())
-                        }
-                        ValueRef::Timestamp(_unit, value) => {
-                            // DuckDB timestamp is stored as microseconds since epoch
-                            // Convert to a timestamp string in ISO 8601 format
-                            let micros = value;
-                            let seconds = micros / 1_000_000;
-                            let nanos = ((micros % 1_000_000) * 1000) as u32;
-
-                            match DateTime::<Utc>::from_timestamp(seconds, nanos) {
-                                Some(dt) => Value::String(dt.to_rfc3339()),
-                                None => Value::Null,
-                            }
-                        }
-                        ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
-                            Ok(s) => Value::String(s.to_string()),
-                            Err(_) => Value::Null,
-                        },
-                        ValueRef::Blob(bytes) => {
-                            // Convert blob to base64 string
-                            Value::String(general_purpose::STANDARD.encode(bytes))
-                        }
-                        ValueRef::Date32(_) => {
-                            // Get as string
-                            match row.get::<_, String>(i) {
-                                Ok(s) => Value::String(s),
-                                Err(_) => Value::Null,
-                            }
-                        }
-                        _ => {
-                            // Fallback: try to get as string
-                            match row.get::<_, String>(i) {
-                                Ok(s) => Value::String(s),
-                                Err(_) => Value::Null,
-                            }
-                        }
-                    },
-                    Err(_) => Value::Null,
-                };
-
-                data_row.insert(column_name, value);
-            }
-
-            result_rows.push(data_row);
+        if self.stream.is_none() {
+            self.stream = Some(self.start_stream()?);
         }
-
-        // Update offset for next batch
-        self.current_offset += result_rows.len();
-
-        Ok(result_rows)
+        let rows = self
+            .stream
+            .as_mut()
+            .expect("started above")
+            .next_batch(batch_size)
+            .await?;
+        self.consumed |= !rows.is_empty();
+        Ok(rows)
     }
+
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
         if let Some(conn) = &self.connection {
             let conn = conn.lock().unwrap();
@@ -337,19 +337,16 @@ impl Source for DuckdbSource {
     }
 
     async fn reset(&mut self) -> Result<()> {
-        // Reset pagination state
-        self.current_offset = 0;
-        self.query = None;
+        // The query runs again on the next read, but only if rows were already read
+        if self.consumed {
+            self.stream = None;
+            self.consumed = false;
+        }
         Ok(())
     }
 
     fn has_more(&self) -> bool {
-        // Check if there are more rows to read based on pagination state
-        if let Some(total) = self.total_rows {
-            self.current_offset < total
-        } else {
-            false
-        }
+        self.stream.as_ref().is_none_or(RowStream::has_more)
     }
 }
 

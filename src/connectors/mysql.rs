@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde_json;
 use sqlx::{Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
 use url::Url;
 
 use crate::{
-    connectors::{Source, Target},
+    connectors::{row_stream::RowStream, Source, Target},
     schema::{DataType, Row, Schema, SchemaInferer, Value},
     Result, TinyEtlError,
 };
@@ -15,8 +16,9 @@ pub struct MysqlSource {
     database_url: String,
     table_name: String,
     pool: Option<MySqlPool>,
-    current_offset: usize,
-    total_rows: Option<usize>,
+    /// One streaming `SELECT` for the whole read (no OFFSET paging)
+    stream: Option<RowStream>,
+    consumed: bool,
 }
 
 impl MysqlSource {
@@ -27,8 +29,8 @@ impl MysqlSource {
             database_url: db_url,
             table_name,
             pool: None,
-            current_offset: 0,
-            total_rows: None,
+            stream: None,
+            consumed: false,
         })
     }
 
@@ -49,8 +51,44 @@ impl MysqlSource {
             .ok_or_else(|| TinyEtlError::Connection("MySQL connection not established".to_string()))
     }
 
+    /// Run `SELECT *` once on its own connection and stream the rows.
+    fn start_stream(&self) -> Result<RowStream> {
+        let pool = self.pool.clone().ok_or_else(|| {
+            TinyEtlError::Connection("MySQL connection not established".to_string())
+        })?;
+        let sql = format!("SELECT * FROM `{}`", self.table_name);
+        Ok(RowStream::spawn(move |mut sink| async move {
+            let mut conn = match pool.acquire().await {
+                Ok(conn) => conn,
+                Err(e) => return sink.fail(format!("Failed to connect: {}", e)).await,
+            };
+            let mut rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch(&mut *conn);
+            while let Some(row) = rows.next().await {
+                let converted = row
+                    .map_err(|e| format!("Failed to fetch rows: {}", e))
+                    .and_then(|row| Self::row_values(&row).map_err(|e| e.to_string()));
+                match converted {
+                    Ok(values) => {
+                        if !sink.push(values).await {
+                            return;
+                        }
+                    }
+                    Err(message) => return sink.fail(message).await,
+                }
+            }
+            drop(rows);
+            sink.finish().await;
+        }))
+    }
+
+    fn row_values(row: &sqlx::mysql::MySqlRow) -> Result<Row> {
+        row.columns()
+            .iter()
+            .map(|column| Ok((column.name().to_string(), Self::extract_value(row, column)?)))
+            .collect()
+    }
+
     fn extract_value(
-        &self,
         row: &sqlx::mysql::MySqlRow,
         column: &sqlx::mysql::MySqlColumn,
     ) -> Result<Value> {
@@ -211,7 +249,7 @@ impl Source for MysqlSource {
             let mut schema_row = Row::new();
             for column in row.columns() {
                 let col_name = column.name();
-                let value = self.extract_value(row, column)?;
+                let value = Self::extract_value(row, column)?;
                 schema_row.insert(col_name.to_string(), value);
             }
             schema_rows.push(schema_row);
@@ -234,31 +272,17 @@ impl Source for MysqlSource {
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
-        let pool = self.get_pool().await?;
-
-        let query = format!(
-            "SELECT * FROM `{}` LIMIT {} OFFSET {}",
-            self.table_name, batch_size, self.current_offset
-        );
-
-        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
-            .fetch_all(pool)
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to fetch batch: {}", e)))?;
-
-        let mut result = Vec::new();
-        for row in rows {
-            let mut schema_row = Row::new();
-            for column in row.columns() {
-                let col_name = column.name();
-                let value = self.extract_value(&row, column)?;
-                schema_row.insert(col_name.to_string(), value);
-            }
-            result.push(schema_row);
+        if self.stream.is_none() {
+            self.stream = Some(self.start_stream()?);
         }
-
-        self.current_offset += result.len();
-        Ok(result)
+        let rows = self
+            .stream
+            .as_mut()
+            .expect("started above")
+            .next_batch(batch_size)
+            .await?;
+        self.consumed |= !rows.is_empty();
+        Ok(rows)
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
@@ -293,17 +317,16 @@ impl Source for MysqlSource {
     }
 
     async fn reset(&mut self) -> Result<()> {
-        self.current_offset = 0;
+        // The query runs again on the next read, but only if rows were already read
+        if self.consumed {
+            self.stream = None;
+            self.consumed = false;
+        }
         Ok(())
     }
 
     fn has_more(&self) -> bool {
-        if let Some(total) = self.total_rows {
-            self.current_offset < total
-        } else {
-            // If we don't know the total, assume there might be more
-            true
-        }
+        self.stream.as_ref().is_none_or(RowStream::has_more)
     }
 }
 
@@ -1012,7 +1035,7 @@ mod tests {
             "mysql://user:pass@localhost:3306/testdb"
         );
         assert_eq!(source.table_name, "employees");
-        assert_eq!(source.current_offset, 0);
+        assert!(source.stream.is_none());
         assert!(source.pool.is_none());
     }
 
@@ -1046,34 +1069,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_mysql_source_has_more_with_total_rows() {
-        let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#users").unwrap();
-
-        // When total_rows is None, should return true
-        assert!(source.has_more());
-
-        // When current_offset < total_rows, should return true
-        source.total_rows = Some(100);
-        source.current_offset = 50;
-        assert!(source.has_more());
-
-        // When current_offset >= total_rows, should return false
-        source.current_offset = 100;
-        assert!(!source.has_more());
-
-        source.current_offset = 101;
-        assert!(!source.has_more());
-    }
-
     #[tokio::test]
-    async fn test_mysql_source_reset() {
+    async fn test_mysql_source_reset_before_reading() {
+        // Before any read the query hasn't run; reset leaves it to start on the first read
         let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/testdb#users").unwrap();
-        source.current_offset = 500;
-
-        let result = source.reset().await;
-        assert!(result.is_ok());
-        assert_eq!(source.current_offset, 0);
+        assert!(source.has_more());
+        source.reset().await.unwrap();
+        assert!(source.stream.is_none());
+        assert!(source.has_more());
     }
 
     #[test]
@@ -1197,21 +1200,6 @@ mod tests {
             .with_batch_size(10000);
 
         assert_eq!(target.max_batch_size, 10000);
-    }
-
-    #[test]
-    fn test_zero_offset_after_reset() {
-        let mut source = MysqlSource::new("mysql://user:pass@localhost:3306/db#table").unwrap();
-        source.current_offset = 999;
-
-        assert_eq!(source.current_offset, 999);
-        // Reset would set it back to 0
-    }
-
-    #[test]
-    fn test_total_rows_initially_none() {
-        let source = MysqlSource::new("mysql://user:pass@localhost:3306/db#table").unwrap();
-        assert!(source.total_rows.is_none());
     }
 
     #[test]

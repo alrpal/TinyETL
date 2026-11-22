@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Reading from a database could silently return duplicated and missing rows.** PostgreSQL, MySQL, SQLite, DuckDB and SQL Server sources paged through tables with `LIMIT … OFFSET` and no `ORDER BY`, and the database is free to return rows in a different order for each page. Reading a 1M-row PostgreSQL table returned 1,000,000 rows but only 689,360 distinct ones (310,640 missing, 249,200 duplicated). Each source now runs one `SELECT` and streams the result, which also makes reads faster on large tables (1M rows: MySQL 10.4 s → 3.5 s, SQL Server 10.5 s → 2.8 s, PostgreSQL 3.4 s → 2.1 s) with flat memory
+- Reading DuckDB now keeps decimals, timestamps and dates as their types (they were read as text)
+- SQLite `BLOB` values holding text (such as JSON written as bytes) were read as NULL; they are now read as text, and other binary values as hex ([#13](https://github.com/alrpal/TinyETL/issues/13))
+
 ## [0.11.0] - 2026-11-21
 
 ### Added
