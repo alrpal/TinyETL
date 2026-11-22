@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.1] - 2026-11-21
+## [0.11.1] - 2026-11-22
 
 ### Fixed
 - **Reading from a database could silently return duplicated and missing rows.** PostgreSQL, MySQL, SQLite, DuckDB and SQL Server sources paged through tables with `LIMIT … OFFSET` and no `ORDER BY`, and the database is free to return rows in a different order for each page. Reading a 1M-row PostgreSQL table returned 1,000,000 rows but only 689,360 distinct ones (310,640 missing, 249,200 duplicated). Each source now runs one `SELECT` and streams the result, which also makes reads faster on large tables (1M rows: MySQL 10.4 s → 3.5 s, SQL Server 10.5 s → 2.8 s, PostgreSQL 3.4 s → 2.1 s) with flat memory
