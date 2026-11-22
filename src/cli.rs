@@ -69,9 +69,17 @@ pub struct Cli {
     /// Secret ID for destination password (resolves to TINYETL_SECRET_{id})
     #[arg(long, value_name = "ID")]
     pub dest_secret_id: Option<String>,
+    /// Source option, repeatable (e.g. delimiter=tab); the same keys as `options:` in YAML
+    #[arg(long = "source-option", value_name = "KEY=VALUE", value_parser = parse_key_value)]
+    pub source_options: Vec<(String, String)>,
+
+    /// Target option, repeatable (e.g. delimiter=|); the same keys as `options:` in YAML
+    #[arg(long = "target-option", value_name = "KEY=VALUE", value_parser = parse_key_value)]
+    pub target_options: Vec<(String, String)>,
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // parsed once at startup
 pub enum Commands {
     /// Run a job from a YAML configuration file
     Run {
@@ -140,7 +148,25 @@ pub enum Commands {
         /// Secret ID for destination password (resolves to TINYETL_SECRET_{id})
         #[arg(long, value_name = "ID")]
         dest_secret_id: Option<String>,
+
+        /// Source option, repeatable (e.g. delimiter=tab)
+        #[arg(long = "source-option", value_name = "KEY=VALUE", value_parser = parse_key_value)]
+        source_options: Vec<(String, String)>,
+
+        /// Target option, repeatable (e.g. delimiter=|)
+        #[arg(long = "target-option", value_name = "KEY=VALUE", value_parser = parse_key_value)]
+        target_options: Vec<(String, String)>,
     },
+}
+
+/// Parse a `KEY=VALUE` option; the value may itself contain `=`
+pub fn parse_key_value(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((key, value)) if !key.trim().is_empty() => {
+            Ok((key.trim().to_string(), value.to_string()))
+        }
+        _ => Err(format!("expected KEY=VALUE, got {:?}", s)),
+    }
 }
 
 impl Cli {
@@ -205,8 +231,8 @@ impl From<Cli> for Config {
             source_type: cli.source_type,
             source_secret_id: cli.source_secret_id,
             dest_secret_id: cli.dest_secret_id,
-            source_options: std::collections::HashMap::new(), // CLI doesn't support options yet
-            target_options: std::collections::HashMap::new(), // CLI doesn't support options yet
+            source_options: cli.source_options.into_iter().collect(),
+            target_options: cli.target_options.into_iter().collect(),
         }
     }
 }
@@ -337,5 +363,32 @@ mod tests {
         assert!(!cli.is_config_mode());
         assert!(!cli.is_generate_config_mode());
         assert!(!cli.has_direct_params());
+    }
+
+    #[test]
+    fn test_endpoint_options() {
+        let cli = Cli::try_parse_from([
+            "tinyetl",
+            "in.csv",
+            "out.csv",
+            "--source-option",
+            "delimiter=;",
+            "--source-option",
+            "header.X-Token=a=b",
+            "--target-option",
+            "delimiter=tab",
+        ])
+        .unwrap();
+        let config: Config = cli.into();
+        assert_eq!(config.source_options["delimiter"], ";");
+        assert_eq!(config.source_options["header.X-Token"], "a=b");
+        assert_eq!(config.target_options["delimiter"], "tab");
+
+        assert!(
+            Cli::try_parse_from(["tinyetl", "a.csv", "b.csv", "--source-option", "nokey"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["tinyetl", "a.csv", "b.csv", "--source-option", "=x"]).is_err()
+        );
     }
 }

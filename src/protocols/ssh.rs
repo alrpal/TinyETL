@@ -1,5 +1,5 @@
 use crate::{
-    connectors::{create_source, Source, Target},
+    connectors::{create_source_with_options, Source, Target},
     protocols::Protocol,
     Result, TinyEtlError,
 };
@@ -163,7 +163,7 @@ impl Protocol for SshProtocol {
     async fn create_source(
         &self,
         url: &Url,
-        _options: &HashMap<String, String>,
+        options: &HashMap<String, String>,
     ) -> Result<Box<dyn Source>> {
         // SSH protocol could use options for:
         // - identity_file: path to SSH key
@@ -176,7 +176,7 @@ impl Protocol for SshProtocol {
         // Create source using the temporary file path
         // Note: Similar limitation as HTTP - the temp file lifetime management
         // could be improved
-        create_source(&temp_path)
+        create_source_with_options(&temp_path, options)
     }
 
     async fn create_target(

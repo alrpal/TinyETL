@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use csv::{ReaderBuilder, WriterBuilder};
 use rust_decimal::Decimal;
 use serde_json;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use crate::{
     connectors::{Source, Target},
@@ -11,8 +13,87 @@ use crate::{
     Result, TinyEtlError,
 };
 
+/// Whether a path is read and written by the CSV connector (`.csv`, or `.tsv` for tabs)
+pub fn is_csv(path: &str) -> bool {
+    path.ends_with(".csv") || is_tsv(path)
+}
+
+fn is_tsv(path: &str) -> bool {
+    path.ends_with(".tsv")
+}
+
+/// The `delimiter` endpoint option: one ASCII character, or `tab` / `\t`
+fn delimiter_option(options: &HashMap<String, String>) -> Result<Option<u8>> {
+    let Some(value) = options.get("delimiter") else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "tab" | "\\t" | "\t" => Ok(Some(b'\t')),
+        v if v.len() == 1 && v.is_ascii() => Ok(Some(v.as_bytes()[0])),
+        v => Err(TinyEtlError::Configuration(format!(
+            "Invalid delimiter {:?}: use a single character, or \"tab\"",
+            v
+        ))),
+    }
+}
+
+/// Characters tried when a CSV file's delimiter isn't given
+const DELIMITER_CANDIDATES: [u8; 4] = *b",\t;|";
+
+/// Guess the delimiter from the first lines of a file: the candidate that appears the same
+/// (non-zero) number of times, outside quotes, on every sampled line. Comma when nothing fits.
+fn sniff_delimiter(sample: &[u8], complete: bool) -> u8 {
+    let mut lines: Vec<[usize; 4]> = Vec::new();
+    let mut counts = [0usize; 4];
+    let mut in_quotes = false;
+    let mut line_has_content = false;
+    for &b in sample {
+        match b {
+            b'"' => in_quotes = !in_quotes,
+            b'\n' if !in_quotes => {
+                if line_has_content {
+                    lines.push(counts);
+                }
+                counts = [0; 4];
+                line_has_content = false;
+                if lines.len() == 20 {
+                    break;
+                }
+                continue;
+            }
+            _ if !in_quotes => {
+                if let Some(i) = DELIMITER_CANDIDATES.iter().position(|&c| c == b) {
+                    counts[i] += 1;
+                }
+            }
+            _ => {}
+        }
+        if b != b'\r' {
+            line_has_content = true;
+        }
+    }
+    // A last line without a newline counts only if the sample is the whole file
+    if line_has_content && complete && lines.len() < 20 {
+        lines.push(counts);
+    }
+    let Some(header) = lines.first() else {
+        return b',';
+    };
+    let mut best: Option<(usize, usize)> = None; // (candidate index, count per line)
+    for i in 0..DELIMITER_CANDIDATES.len() {
+        let n = header[i];
+        if n > 0 && lines.iter().all(|line| line[i] == n) && best.is_none_or(|(_, m)| n > m) {
+            best = Some((i, n));
+        }
+    }
+    best.map_or(b',', |(i, _)| DELIMITER_CANDIDATES[i])
+}
+
 pub struct CsvSource {
     file_path: PathBuf,
+    /// From the `delimiter` option or a `.tsv` name; otherwise detected in `connect`
+    delimiter_option: Option<u8>,
+    delimiter: u8,
     reader: Option<csv::Reader<std::fs::File>>,
     headers: Vec<String>,
     current_position: u64,
@@ -21,13 +102,36 @@ pub struct CsvSource {
 
 impl CsvSource {
     pub fn new(file_path: &str) -> Result<Self> {
+        Self::with_options(file_path, &HashMap::new())
+    }
+
+    pub fn with_options(file_path: &str, options: &HashMap<String, String>) -> Result<Self> {
+        let delimiter_option = delimiter_option(options)?.or(is_tsv(file_path).then_some(b'\t'));
         Ok(Self {
             file_path: PathBuf::from(file_path),
+            delimiter_option,
+            delimiter: delimiter_option.unwrap_or(b','),
             reader: None,
             headers: Vec::new(),
             current_position: 0,
             has_more_data: true,
         })
+    }
+
+    fn open_reader(&self) -> Result<csv::Reader<std::fs::File>> {
+        let file = std::fs::File::open(&self.file_path)?;
+        Ok(ReaderBuilder::new()
+            .has_headers(true)
+            .delimiter(self.delimiter)
+            .from_reader(file))
+    }
+
+    fn detect_delimiter(path: &Path) -> Result<u8> {
+        let mut sample = Vec::with_capacity(64 * 1024);
+        let file = std::fs::File::open(path)?;
+        file.take(64 * 1024).read_to_end(&mut sample)?;
+        let complete = (sample.len() as u64) < 64 * 1024;
+        Ok(sniff_delimiter(&sample, complete))
     }
 
     fn parse_value(value: &str) -> Value {
@@ -72,15 +176,21 @@ impl Source for CsvSource {
             )));
         }
 
-        let file = std::fs::File::open(&self.file_path)?;
-        let mut reader = ReaderBuilder::new().has_headers(true).from_reader(file);
+        self.delimiter = match self.delimiter_option {
+            Some(d) => d,
+            None => Self::detect_delimiter(&self.file_path)?,
+        };
+        if self.delimiter != b',' {
+            tracing::info!("Reading with delimiter {:?}", self.delimiter as char);
+        }
+
+        let mut reader = self.open_reader()?;
 
         // Read and store headers
         self.headers = reader.headers()?.iter().map(|h| h.to_string()).collect();
 
         // Reset file for actual reading
-        let file = std::fs::File::open(&self.file_path)?;
-        self.reader = Some(ReaderBuilder::new().has_headers(true).from_reader(file));
+        self.reader = Some(self.open_reader()?);
 
         Ok(())
     }
@@ -163,7 +273,6 @@ impl Source for CsvSource {
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
         // Count lines in chunks rather than loading the file (quoted newlines make this an
         // estimate, which is all the progress bar needs)
-        use std::io::Read;
         let mut file = std::fs::File::open(&self.file_path)?;
         let mut buffer = vec![0u8; 1 << 20];
         let (mut lines, mut last) = (0usize, b'\n');
@@ -183,8 +292,7 @@ impl Source for CsvSource {
     }
 
     async fn reset(&mut self) -> Result<()> {
-        let file = std::fs::File::open(&self.file_path)?;
-        self.reader = Some(ReaderBuilder::new().has_headers(true).from_reader(file));
+        self.reader = Some(self.open_reader()?);
         self.current_position = 0;
         self.has_more_data = true;
         Ok(())
@@ -197,6 +305,7 @@ impl Source for CsvSource {
 
 pub struct CsvTarget {
     file_path: PathBuf,
+    delimiter: u8,
     writer: Option<csv::Writer<std::fs::File>>,
     headers_written: bool,
     column_order: Vec<String>,
@@ -204,12 +313,27 @@ pub struct CsvTarget {
 
 impl CsvTarget {
     pub fn new(file_path: &str) -> Result<Self> {
+        Self::with_options(file_path, &HashMap::new())
+    }
+
+    pub fn with_options(file_path: &str, options: &HashMap<String, String>) -> Result<Self> {
+        let delimiter = delimiter_option(options)?
+            .or(is_tsv(file_path).then_some(b'\t'))
+            .unwrap_or(b',');
         Ok(Self {
             file_path: PathBuf::from(file_path),
+            delimiter,
             writer: None,
             headers_written: false,
             column_order: Vec::new(),
         })
+    }
+
+    fn open_writer(&self) -> Result<csv::Writer<std::fs::File>> {
+        let file = std::fs::File::create(&self.file_path)?;
+        Ok(WriterBuilder::new()
+            .delimiter(self.delimiter)
+            .from_writer(file))
     }
 
     fn value_to_string(value: &Value) -> String {
@@ -233,8 +357,7 @@ impl Target for CsvTarget {
             std::fs::create_dir_all(parent)?;
         }
 
-        let file = std::fs::File::create(&self.file_path)?;
-        self.writer = Some(WriterBuilder::new().from_writer(file));
+        self.writer = Some(self.open_writer()?);
         Ok(())
     }
 
@@ -308,8 +431,7 @@ impl Target for CsvTarget {
 
     async fn truncate(&mut self, _table_name: &str) -> Result<()> {
         // For CSV files, truncation means recreating the file
-        let file = std::fs::File::create(&self.file_path)?;
-        self.writer = Some(WriterBuilder::new().from_writer(file));
+        self.writer = Some(self.open_writer()?);
         self.headers_written = false;
         Ok(())
     }
@@ -653,5 +775,95 @@ mod tests {
             lines[2], "2,blo,aff",
             "Second data row should maintain column order"
         );
+    }
+
+    #[test]
+    fn test_sniff_delimiter() {
+        assert_eq!(sniff_delimiter(b"a,b,c\n1,2,3\n", true), b',');
+        assert_eq!(sniff_delimiter(b"a\tb\tc\n1\t2\t3\n", true), b'\t');
+        assert_eq!(sniff_delimiter(b"a;b\r\n1,5;2\r\n", true), b';');
+        assert_eq!(sniff_delimiter(b"a|b|c\n1|2|3", true), b'|');
+        // Delimiters inside quotes don't count, and quoted fields may span lines
+        assert_eq!(
+            sniff_delimiter(b"name;note\n\"Smith, J\";\"a\nb, c\"\n", true),
+            b';'
+        );
+        // Commas in a tab file's values don't win when they aren't on every line
+        assert_eq!(sniff_delimiter(b"a\tb\n1,5\t2\n3\t4\n", true), b'\t');
+        // One column, or nothing consistent: comma
+        assert_eq!(sniff_delimiter(b"id\n1\n2\n", true), b',');
+        assert_eq!(sniff_delimiter(b"", true), b',');
+        // A cut-off last line in a partial sample is ignored
+        assert_eq!(sniff_delimiter(b"a\tb\n1\t2\n3", false), b'\t');
+    }
+
+    #[test]
+    fn test_delimiter_option() {
+        let opt = |v: &str| HashMap::from([("delimiter".to_string(), v.to_string())]);
+        assert_eq!(delimiter_option(&HashMap::new()).unwrap(), None);
+        assert_eq!(delimiter_option(&opt("|")).unwrap(), Some(b'|'));
+        assert_eq!(delimiter_option(&opt("tab")).unwrap(), Some(b'\t'));
+        assert_eq!(delimiter_option(&opt("\\t")).unwrap(), Some(b'\t'));
+        assert_eq!(delimiter_option(&opt("\t")).unwrap(), Some(b'\t'));
+        assert!(delimiter_option(&opt("||")).is_err());
+        assert!(delimiter_option(&opt("")).is_err());
+    }
+
+    async fn read_all(source: &mut CsvSource) -> (Vec<String>, Vec<Row>) {
+        source.connect().await.unwrap();
+        source.infer_schema(100).await.unwrap();
+        source.reset().await.unwrap();
+        let rows = source.read_batch(100).await.unwrap();
+        (source.headers.clone(), rows)
+    }
+
+    #[tokio::test]
+    async fn test_other_delimiters() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Detected in a .csv file
+        let pipes = dir.path().join("pipes.csv");
+        std::fs::write(&pipes, "id|name\n1|Smith, J\n2|Lee\n").unwrap();
+        let (headers, rows) = read_all(&mut CsvSource::new(pipes.to_str().unwrap()).unwrap()).await;
+        assert_eq!(headers, ["id", "name"]);
+        assert_eq!(rows[0]["name"], Value::String("Smith, J".to_string()));
+
+        // .tsv is tab-separated without detection
+        let tsv = dir.path().join("data.tsv");
+        std::fs::write(&tsv, "id\tnote\n1\ta;b;c\n").unwrap();
+        let (headers, rows) = read_all(&mut CsvSource::new(tsv.to_str().unwrap()).unwrap()).await;
+        assert_eq!(headers, ["id", "note"]);
+        assert_eq!(rows[0]["note"], Value::String("a;b;c".to_string()));
+
+        // The option overrides detection
+        let semi = dir.path().join("semi.csv");
+        std::fs::write(&semi, "a;b\n1;2\n").unwrap();
+        let options = HashMap::from([("delimiter".to_string(), ",".to_string())]);
+        let mut source = CsvSource::with_options(semi.to_str().unwrap(), &options).unwrap();
+        let (headers, _) = read_all(&mut source).await;
+        assert_eq!(headers, ["a;b"]);
+
+        // Targets: .tsv writes tabs, the option writes anything
+        let schema = crate::schema::SchemaInferer::infer_from_rows_ordered(
+            &rows,
+            &["id".to_string(), "note".to_string()],
+        )
+        .unwrap();
+        for (name, options, expected) in [
+            ("out.tsv", HashMap::new(), "id\tnote\n1\ta;b;c\n"),
+            (
+                "out.csv",
+                HashMap::from([("delimiter".to_string(), "|".to_string())]),
+                "id|note\n1|a;b;c\n",
+            ),
+            ("plain.csv", HashMap::new(), "id,note\n1,a;b;c\n"),
+        ] {
+            let path = dir.path().join(name);
+            let mut target = CsvTarget::with_options(path.to_str().unwrap(), &options).unwrap();
+            target.create_table("t", &schema).await.unwrap();
+            target.write_batch(&rows).await.unwrap();
+            target.finalize().await.unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        }
     }
 }

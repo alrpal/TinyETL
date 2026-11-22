@@ -1,5 +1,5 @@
 use crate::{
-    connectors::{create_source, create_target, Source, Target},
+    connectors::{create_source_with_options, create_target_with_options, Source, Target},
     protocols::Protocol,
     Result, TinyEtlError,
 };
@@ -57,23 +57,19 @@ impl Protocol for FileProtocol {
     async fn create_source(
         &self,
         url: &Url,
-        _options: &HashMap<String, String>,
+        options: &HashMap<String, String>,
     ) -> Result<Box<dyn Source>> {
-        // File protocol doesn't use options currently, but could be extended
-        // for future features like compression, encoding, etc.
         let path = self.url_to_path(url)?;
-        create_source(&path)
+        create_source_with_options(&path, options)
     }
 
     async fn create_target(
         &self,
         url: &Url,
-        _options: &HashMap<String, String>,
+        options: &HashMap<String, String>,
     ) -> Result<Box<dyn Target>> {
-        // File protocol doesn't use options currently, but could be extended
-        // for future features like compression, encoding, etc.
         let path = self.url_to_path(url)?;
-        create_target(&path)
+        create_target_with_options(&path, options)
     }
 
     fn validate_url(&self, url: &Url) -> Result<()> {

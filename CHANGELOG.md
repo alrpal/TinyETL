@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Tab, semicolon and pipe delimited files** (#21). CSV sources detect the delimiter from the first lines (comma, tab, semicolon or pipe), `.tsv` files are read and written tab-separated, and the `delimiter` option sets it explicitly for sources and targets, including over HTTP, SSH and S3
+- `--source-option KEY=VALUE` and `--target-option KEY=VALUE` set endpoint options from the command line (HTTP headers and auth, S3 credentials, Snowflake keys, the CSV delimiter), which before could only be set in a YAML config. `generate-config` writes them into the YAML
 - Example `24_database_correctness`: for SQLite, DuckDB, PostgreSQL, MySQL and SQL Server, checks that reads return every row exactly once and that a failed load (with or without `--truncate`) leaves the table unchanged. Run against v0.11.0, it reproduces all three database bugs fixed in 0.11.1
 - Tests for the transfer engine's contract with targets (when tables are created, truncated, appended to and finalized; value conversion; transforms; schema-file rejection; preview and dry run), and a shared database test that SQLite and DuckDB run against temp files (typed round trip, streaming reads, rollback of unfinished loads, deferred truncate)
 

@@ -76,6 +76,8 @@ fn handle_generate_config(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         source_type,
         source_secret_id,
         dest_secret_id,
+        source_options,
+        target_options,
     }) = cli.command
     {
         let transform_config = determine_transform_config(&transform_file, &transform);
@@ -95,8 +97,8 @@ fn handle_generate_config(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             source_type,
             source_secret_id,
             dest_secret_id,
-            source_options: std::collections::HashMap::new(),
-            target_options: std::collections::HashMap::new(),
+            source_options: source_options.into_iter().collect(),
+            target_options: target_options.into_iter().collect(),
         };
 
         let yaml_config = YamlConfig::from_config(config);

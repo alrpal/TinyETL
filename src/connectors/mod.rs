@@ -69,11 +69,26 @@ pub trait Target: Send + Sync {
     fn supports_append(&self) -> bool;
 }
 
+/// Endpoint options read by file connectors rather than by the protocol that fetches the file
+pub const FILE_FORMAT_OPTIONS: &[&str] = &["delimiter"];
+
 /// Factory function to create a source connector from a connection string
 /// For new protocol-based connections (snowflake://, etc.), use create_source_from_url instead
 pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
-    if connection_string.ends_with(".csv") {
-        Ok(Box::new(csv::CsvSource::new(connection_string)?))
+    create_source_with_options(connection_string, &std::collections::HashMap::new())
+}
+
+/// Like [`create_source`], with endpoint options for the connectors that take them (CSV's
+/// `delimiter`, Snowflake's key settings)
+pub fn create_source_with_options(
+    connection_string: &str,
+    options: &std::collections::HashMap<String, String>,
+) -> Result<Box<dyn Source>> {
+    if csv::is_csv(connection_string) {
+        Ok(Box::new(csv::CsvSource::with_options(
+            connection_string,
+            options,
+        )?))
     } else if connection_string.ends_with(".json") || json::is_json_lines(connection_string) {
         Ok(Box::new(json::JsonSource::new(connection_string)?))
     } else if connection_string.ends_with(".parquet") {
@@ -105,11 +120,11 @@ pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
     } else if connection_string.starts_with("snowflake://") {
         Ok(Box::new(snowflake::SnowflakeSource::new(
             connection_string,
-            &std::collections::HashMap::new(),
+            options,
         )?))
     } else {
         Err(crate::TinyEtlError::Configuration(
-            format!("Unsupported source type: {}. Supported formats: file.csv, file.json, file.jsonl, file.parquet, file.avro, file.xlsx[#sheet] (also .xlsm, .xlsb, .xls, .ods), file.db#table, file.duckdb#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table", connection_string)
+            format!("Unsupported source type: {}. Supported formats: file.csv, file.tsv, file.json, file.jsonl, file.parquet, file.avro, file.xlsx[#sheet] (also .xlsm, .xlsb, .xls, .ods), file.db#table, file.duckdb#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table", connection_string)
         ))
     }
 }
@@ -117,6 +132,14 @@ pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
 /// Factory function to create a target connector from a connection string
 /// Supports both protocol-based and legacy file-based connections
 pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
+    create_target_with_options(connection_string, &std::collections::HashMap::new())
+}
+
+/// Like [`create_target`], with endpoint options for the connectors that take them
+pub fn create_target_with_options(
+    connection_string: &str,
+    options: &std::collections::HashMap<String, String>,
+) -> Result<Box<dyn Target>> {
     // Handle protocol-based connections first
     if connection_string.contains("://") {
         if connection_string.starts_with("duckdb://") {
@@ -138,7 +161,7 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
         } else if connection_string.starts_with("snowflake://") {
             return Ok(Box::new(snowflake::SnowflakeTarget::new(
                 connection_string,
-                &std::collections::HashMap::new(),
+                options,
             )?));
         } else {
             return Err(crate::TinyEtlError::Configuration(format!(
@@ -149,8 +172,11 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
     }
 
     // Handle legacy file-based and non-protocol database connections
-    if connection_string.ends_with(".csv") {
-        Ok(Box::new(csv::CsvTarget::new(connection_string)?))
+    if csv::is_csv(connection_string) {
+        Ok(Box::new(csv::CsvTarget::with_options(
+            connection_string,
+            options,
+        )?))
     } else if connection_string.ends_with(".json") || json::is_json_lines(connection_string) {
         Ok(Box::new(json::JsonTarget::new(connection_string)?))
     } else if connection_string.ends_with(".parquet") {
@@ -174,7 +200,7 @@ pub fn create_target(connection_string: &str) -> Result<Box<dyn Target>> {
     } else {
         Err(crate::TinyEtlError::Configuration(format!(
             "Unsupported target type: {}. Supported formats: \
-            file.csv, file.json, file.jsonl, file.parquet, file.avro, file.xlsx[#sheet], file.db, file.db#table, file.duckdb, file.duckdb#table, \
+            file.csv, file.tsv, file.json, file.jsonl, file.parquet, file.avro, file.xlsx[#sheet], file.db, file.db#table, file.duckdb, file.duckdb#table, \
             duckdb://path/file.duckdb#table, sqlite://path/file.db#table, postgres://user:pass@host:port/db#table, mysql://user:pass@host:port/db#table, mssql://user:pass@host:port/db#table, odbc://connection_string#table, snowflake://user@account/db/schema#table",
             connection_string
         )))
@@ -243,8 +269,8 @@ pub async fn create_source_from_url_with_type_and_options(
             .await
         }
     } else {
-        // Fallback to legacy connector system for backward compatibility
-        create_source(connection_string)
+        // Bare paths: the extension-based factory
+        create_source_with_options(connection_string, options)
     }
 }
 
@@ -282,8 +308,8 @@ pub async fn create_target_from_url_with_options(
             crate::protocols::create_target_from_url_with_options(connection_string, options).await
         }
     } else {
-        // Fallback to legacy connector system for backward compatibility
-        create_target(connection_string)
+        // Bare paths: the extension-based factory
+        create_target_with_options(connection_string, options)
     }
 }
 

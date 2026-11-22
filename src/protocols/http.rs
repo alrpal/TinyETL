@@ -1,5 +1,5 @@
 use crate::{
-    connectors::{create_source, Source, Target},
+    connectors::{create_source_with_options, Source, Target},
     protocols::Protocol,
     Result, TinyEtlError,
 };
@@ -161,7 +161,7 @@ impl Protocol for HttpProtocol {
         // Create source using the persistent temporary file path
         // Note: This file will not be automatically cleaned up
         // In a production implementation, we'd want better lifecycle management
-        create_source(&final_path)
+        create_source_with_options(&final_path, options)
     }
 
     async fn create_target(

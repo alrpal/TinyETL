@@ -19,7 +19,9 @@ use tracing::{info, warn};
 use url::Url;
 
 /// File formats that can be staged through S3 (must match the file connectors).
-const SUPPORTED_FORMATS: [&str; 7] = ["csv", "json", "jsonl", "ndjson", "parquet", "avro", "xlsx"];
+const SUPPORTED_FORMATS: [&str; 8] = [
+    "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "avro", "xlsx",
+];
 
 /// S3 protocol for reading and writing single objects (`s3://bucket/path/to/file.ext`).
 ///
@@ -114,6 +116,9 @@ impl S3Protocol {
         let mut http_endpoint = false;
 
         for (key, value) in options {
+            if connectors::FILE_FORMAT_OPTIONS.contains(&key.as_str()) {
+                continue; // for the file connector
+            }
             builder = match key.as_str() {
                 "region" => builder.with_region(value),
                 "endpoint" => {
@@ -132,8 +137,9 @@ impl S3Protocol {
                 }
                 other => {
                     return Err(TinyEtlError::Configuration(format!(
-                        "Unknown S3 option '{}'. Supported options: region, endpoint, access_key_id, secret_access_key, session_token, allow_http, path_style",
-                        other
+                        "Unknown S3 option '{}'. Supported options: region, endpoint, access_key_id, secret_access_key, session_token, allow_http, path_style, plus the file options {}",
+                        other,
+                        connectors::FILE_FORMAT_OPTIONS.join(", ")
                     )))
                 }
             };
@@ -175,7 +181,7 @@ impl Protocol for S3Protocol {
         let location = format!("s3://{}/{}", bucket, key);
 
         Ok(Box::new(
-            S3Source::download(store, &key, &location, &format).await?,
+            S3Source::download(store, &key, &location, &format, options).await?,
         ))
     }
 
@@ -189,7 +195,9 @@ impl Protocol for S3Protocol {
         let store = Self::build_store(&bucket, options)?;
         let location = format!("s3://{}/{}", bucket, key);
 
-        Ok(Box::new(S3Target::new(store, key, location, &format)?))
+        Ok(Box::new(S3Target::new(
+            store, key, location, &format, options,
+        )?))
     }
 
     fn validate_url(&self, url: &Url) -> Result<()> {
@@ -253,6 +261,7 @@ impl S3Source {
         key: &ObjectPath,
         location: &str,
         format: &str,
+        options: &HashMap<String, String>,
     ) -> Result<Self> {
         let staging = staging_dir()?;
         let local_path = staging.path().join(format!("source.{}", format));
@@ -278,7 +287,7 @@ impl S3Source {
 
         info!("Download completed, {} bytes received", total_bytes);
 
-        let inner = connectors::create_source(&local_path.to_string_lossy())?;
+        let inner = connectors::create_source_with_options(&local_path.to_string_lossy(), options)?;
 
         Ok(Self {
             inner,
@@ -334,10 +343,11 @@ impl S3Target {
         key: ObjectPath,
         location: String,
         format: &str,
+        options: &HashMap<String, String>,
     ) -> Result<Self> {
         let staging = staging_dir()?;
         let local_path = staging.path().join(format!("target.{}", format));
-        let inner = connectors::create_target(&local_path.to_string_lossy())?;
+        let inner = connectors::create_target_with_options(&local_path.to_string_lossy(), options)?;
 
         Ok(Self {
             inner,
@@ -464,6 +474,7 @@ mod tests {
             ObjectPath::from(key),
             format!("s3://bucket/{}", key),
             format,
+            &HashMap::new(),
         )
         .unwrap();
 
@@ -479,6 +490,7 @@ mod tests {
             &ObjectPath::from(key),
             &format!("s3://bucket/{}", key),
             format,
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -603,6 +615,7 @@ mod tests {
             &ObjectPath::from("missing.csv"),
             "s3://bucket/missing.csv",
             "csv",
+            &HashMap::new(),
         )
         .await;
 
@@ -620,6 +633,7 @@ mod tests {
             key.clone(),
             "s3://bucket/out/people.csv".to_string(),
             "csv",
+            &HashMap::new(),
         )
         .unwrap();
 

@@ -132,21 +132,23 @@ Arguments:
   [TARGET]  Target connection string (file path or connection string)
 
 Options:
-      --infer-schema             Auto-detect columns and types
-      --schema-file <FILE>       Path to schema file (YAML) to override auto-detection
-      --batch-size <BATCH_SIZE>  Number of rows per batch [default: 10000]
-      --preview <N>              Show first N rows and inferred schema without copying
-      --dry-run                  Validate source/target without transferring data
-      --log-level <LOG_LEVEL>    Log level: info, warn, error [default: info]
-      --skip-existing            Not implemented yet; has no effect
-      --truncate                 Truncate target before writing (overrides append-first behavior)
-      --transform-file <FILE>    Path to Lua file containing a 'transform' function
-      --transform <EXPRESSIONS>  Inline transformation expressions (semicolon-separated, e.g., "new_col=row.old_col * 2; name=row.first .. ' ' .. row.last")
-      --source-type <TYPE>       Force source file type (csv, json, parquet, avro, xlsx, ...) - useful for URLs without clear extensions
-      --source-secret-id <ID>    Secret ID for source password (resolves to TINYETL_SECRET_{id})
-      --dest-secret-id <ID>      Secret ID for destination password (resolves to TINYETL_SECRET_{id})
-  -h, --help                     Print help
-  -V, --version                  Print version
+      --infer-schema               Auto-detect columns and types
+      --schema-file <FILE>         Path to schema file (YAML) to override auto-detection
+      --batch-size <BATCH_SIZE>    Number of rows per batch [default: 10000]
+      --preview <N>                Show first N rows and inferred schema without copying
+      --dry-run                    Validate source/target without transferring data
+      --log-level <LOG_LEVEL>      Log level: info, warn, error [default: info]
+      --skip-existing              Not implemented yet; has no effect
+      --truncate                   Truncate target before writing (overrides append-first behavior)
+      --transform-file <FILE>      Path to Lua file containing a 'transform' function
+      --transform <EXPRESSIONS>    Inline transformation expressions (semicolon-separated, e.g., "new_col=row.old_col * 2; name=row.first .. ' ' .. row.last")
+      --source-type <TYPE>         Force source file type (csv, json, parquet, avro, xlsx, ...) - useful for URLs without clear extensions
+      --source-secret-id <ID>      Secret ID for source password (resolves to TINYETL_SECRET_{id})
+      --dest-secret-id <ID>        Secret ID for destination password (resolves to TINYETL_SECRET_{id})
+      --source-option <KEY=VALUE>  Source option, repeatable (e.g. delimiter=tab); the same keys as `options:` in YAML
+      --target-option <KEY=VALUE>  Target option, repeatable (e.g. delimiter=|); the same keys as `options:` in YAML
+  -h, --help                       Print help
+  -V, --version                    Print version
 ```
 
 </div>
@@ -204,7 +206,7 @@ TinyETL supports two main categories of data sources and targets:
 #### File-Based Sources (Multiple Protocols)
 
 **File Formats:**
-- **CSV** - Comma-separated values
+- **CSV** - Comma-separated values; tab, semicolon and pipe delimiters are detected, and `.tsv` files are tab-separated (see "CSV Delimiters" below)
 - **JSON** - JavaScript Object Notation (array of objects)
 - **JSON Lines** - One JSON object per line (`.jsonl`, `.ndjson`)
 - **Parquet** - Columnar storage format (written with Snappy compression)
@@ -219,11 +221,11 @@ TinyETL supports two main categories of data sources and targets:
   tinyetl /path/to/file.parquet data.csv
   tinyetl data.avro output.json
   ```
-- **HTTP/HTTPS** - Download from web servers (supports authentication and custom headers via YAML config)
+- **HTTP/HTTPS** - Download from web servers (supports authentication and custom headers via endpoint options)
   ```bash
   tinyetl "https://example.com/data.csv" output.parquet
   tinyetl "https://api.example.com/export" data.csv --source-type=csv
-  # For authenticated APIs, use YAML config (see HTTP Source Options section)
+  # For authenticated APIs, use --source-option or a YAML config (see HTTP Source Options section)
   ```
 - **SSH/SCP** - Secure file transfer
   ```bash
@@ -313,7 +315,22 @@ tinyetl "ssh://user@server.com/data/export_20241107" output.parquet --source-typ
 tinyetl data.csv output.json  # No --source-type needed
 ```
 
-**Supported source types:** `csv`, `json`, `jsonl`, `parquet`, `avro`, `xlsx` (and the other spreadsheet extensions above)
+**Supported source types:** `csv`, `tsv`, `json`, `jsonl`, `parquet`, `avro`, `xlsx` (and the other spreadsheet extensions above)
+
+#### Endpoint Options
+
+Some sources and targets take options: HTTP headers and authentication, S3 credentials, Snowflake keys, the CSV delimiter. Set them with `--source-option KEY=VALUE` / `--target-option KEY=VALUE` (repeat the flag for more), or under `options:` for the source or target in a YAML config. The keys are the same either way.
+
+#### CSV Delimiters
+
+When reading a CSV file, TinyETL looks at its first lines and picks comma, tab, semicolon or pipe: the one that appears the same number of times on every line, outside quotes. Comma is the default when nothing fits. Files ending in `.tsv` are read and written tab-separated. Set the delimiter with the `delimiter` option, either a single character or `tab`. This works for local files, HTTP, SSH and S3:
+
+```bash
+tinyetl export.csv data.parquet                                 # pipe-delimited .csv: detected
+tinyetl data.tsv out.csv                                        # tab in, comma out
+tinyetl export.csv out.json --source-option "delimiter=;"       # skip detection
+tinyetl data.parquet out.csv --target-option "delimiter=|"      # write pipes
+```
 
 ### Excel
 
@@ -1025,7 +1042,7 @@ See [Example 18: HTTP with Authentication](examples/18_http_with_auth/) for comp
 
 #### S3 Options
 
-`s3://bucket/path/file.ext` works as both a source and a target for CSV, JSON, JSON Lines, Parquet, Avro and Excel (`.xlsx`) files:
+`s3://bucket/path/file.ext` works as both a source and a target for CSV, TSV, JSON, JSON Lines, Parquet, Avro and Excel (`.xlsx`) files:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -1201,7 +1218,7 @@ Every source and file target streams: rows are read and written a batch at a tim
 ### Roadmap
 
 **Done:**
-- Files: CSV, JSON, JSON Lines, Parquet, Avro, Excel, streamed with flat memory ✅
+- Files: CSV/TSV, JSON, JSON Lines, Parquet, Avro, Excel, streamed with flat memory ✅
 - Databases: SQLite, DuckDB, PostgreSQL, MySQL, SQL Server, CrateDB, any ODBC driver ✅
 - Snowflake (staged bulk loads) ✅
 - Remote files over HTTP(S), SSH and S3 ✅
