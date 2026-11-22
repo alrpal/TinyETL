@@ -1,5 +1,5 @@
 use clap::Parser;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use tinyetl::{
@@ -14,14 +14,24 @@ use tinyetl::{
     yaml_config::YamlConfig,
 };
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
     // Adjusts the process environment, so it must run before the async runtime starts threads.
     tinyetl::connectors::odbc::configure_driver_manager();
 
-    tokio::runtime::Builder::new_multi_thread()
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?
-        .block_on(run())
+        .build()
+        .map_err(Into::into)
+        .and_then(|runtime| runtime.block_on(run()));
+
+    // Print errors as plain text; returning them from main would print their Debug form
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -216,7 +226,7 @@ fn load_config(cli: Cli) -> Result<Config, Box<dyn std::error::Error>> {
         Ok(cli.into())
     } else {
         Err(
-            "Error: SOURCE and TARGET are required.\n\nUsage: tinyetl <SOURCE> <TARGET> [OPTIONS]\n   or: tinyetl <COMMAND>\n\nFor more information, try '--help'".into(),
+            "SOURCE and TARGET are required.\n\nUsage: tinyetl <SOURCE> <TARGET> [OPTIONS]\n   or: tinyetl <COMMAND>\n\nFor more information, try '--help'".into(),
         )
     }
 }
@@ -285,10 +295,7 @@ async fn execute_transfer(
             }
             Ok(())
         }
-        Err(e) => {
-            error!("Transfer failed: {}", e);
-            std::process::exit(1);
-        }
+        Err(e) => Err(e.into()),
     }
 }
 

@@ -39,8 +39,10 @@ pub struct OptionsConfig {
 
 impl YamlConfig {
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)?;
-        let config: YamlConfig = serde_yaml::from_str(&content)?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Can't read config file {}: {}", path, e))?;
+        let config: YamlConfig = serde_yaml::from_str(&content)
+            .map_err(|e| format!("Invalid config file {}: {}", path, e))?;
         Ok(config)
     }
 

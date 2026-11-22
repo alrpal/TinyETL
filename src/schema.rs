@@ -82,9 +82,20 @@ pub struct SchemaFile {
 
 impl SchemaFile {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
+        let path = path.as_ref();
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::TinyEtlError::Configuration(format!(
+                "Can't read schema file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
         let schema_file: SchemaFile = serde_yaml::from_str(&content).map_err(|e| {
-            crate::TinyEtlError::Configuration(format!("Invalid schema file: {}", e))
+            crate::TinyEtlError::Configuration(format!(
+                "Invalid schema file {}: {}",
+                path.display(),
+                e
+            ))
         })?;
 
         // Validate the schema file
