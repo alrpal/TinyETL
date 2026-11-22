@@ -125,7 +125,7 @@ source:
   uri: "employees.csv"            # or database connection string
   # Optional source-specific options (e.g., for HTTP sources)
   # options:
-  #   header.User-Agent: "TinyETL/0.11.0"
+  #   header.User-Agent: "TinyETL/0.11.1"
   #   header.Accept: "text/csv"
   #   auth.basic.username: "user"
   #   auth.basic.password: "${PASSWORD}"

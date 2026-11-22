@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-21
+
 ### Fixed
 - **Reading from a database could silently return duplicated and missing rows.** PostgreSQL, MySQL, SQLite, DuckDB and SQL Server sources paged through tables with `LIMIT … OFFSET` and no `ORDER BY`, and the database is free to return rows in a different order for each page. Reading a 1M-row PostgreSQL table returned 1,000,000 rows but only 689,360 distinct ones (310,640 missing, 249,200 duplicated). Each source now runs one `SELECT` and streams the result, which also makes reads faster on large tables (1M rows: MySQL 10.4 s → 3.5 s, SQL Server 10.5 s → 2.8 s, PostgreSQL 3.4 s → 2.1 s) with flat memory
 - **A failed load into a database left a partial table, and a failed `--truncate` load left it empty.** PostgreSQL, MySQL, SQLite, DuckDB and SQL Server targets now load in one transaction, with `--truncate`'s delete inside it, committed only when the transfer succeeds; on failure the table keeps its previous rows. (CrateDB has no transactions, so this doesn't apply there.) MySQL now empties the table with `DELETE` instead of `TRUNCATE`, which would commit implicitly
@@ -282,7 +284,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment variable support for secrets
 - Data transformation capabilities
 
-[Unreleased]: https://github.com/alrpal/TinyETL/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/alrpal/TinyETL/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/alrpal/TinyETL/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/alrpal/TinyETL/compare/v0.10.0...v0.11.0
 [0.5.0]: https://github.com/alrpal/TinyETL/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/alrpal/TinyETL/compare/v0.3.1...v0.4.0
