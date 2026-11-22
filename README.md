@@ -163,6 +163,8 @@ tinyetl data.csv output.avro
 tinyetl data.json output.csv
 tinyetl data.avro output.json
 tinyetl events.jsonl events.parquet
+tinyetl events.json.gz "postgresql://user:@localhost/mydb#events"
+tinyetl orders.parquet orders.csv.gz
 tinyetl "budget.xlsx#Q4" q4.csv
 tinyetl "postgresql://user:@localhost/mydb#orders" orders.xlsx
 
@@ -209,6 +211,7 @@ TinyETL supports two main categories of data sources and targets:
 - **CSV** - Comma-separated values; tab, semicolon and pipe delimiters are detected, and `.tsv` files are tab-separated (see "CSV Delimiters" below)
 - **JSON** - JavaScript Object Notation (array of objects)
 - **JSON Lines** - One JSON object per line (`.jsonl`, `.ndjson`)
+- **Compressed files** - Add `.gz` (gzip) or `.zst` (Zstandard) to any file format: `data.csv.gz`, `events.jsonl.gz`, `trips.parquet.zst`. Sources are decompressed to a temporary file as they're read, targets are compressed when the transfer finishes. Works locally and over HTTP, SSH and S3
 - **Parquet** - Columnar storage format (written with Snappy compression)
 - **Avro** - Binary serialization format with schema evolution
 - **Excel** - Reads `.xlsx`, `.xlsm`, `.xlsb`, `.xls` and OpenDocument `.ods`; writes `.xlsx`. Pick a sheet with `file.xlsx#Sheet` (see "Excel" below)
@@ -1042,7 +1045,7 @@ See [Example 18: HTTP with Authentication](examples/18_http_with_auth/) for comp
 
 #### S3 Options
 
-`s3://bucket/path/file.ext` works as both a source and a target for CSV, TSV, JSON, JSON Lines, Parquet, Avro and Excel (`.xlsx`) files:
+`s3://bucket/path/file.ext` works as both a source and a target for CSV, TSV, JSON, JSON Lines, Parquet, Avro and Excel (`.xlsx`) files, and their `.gz` / `.zst` compressed forms:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -1218,7 +1221,7 @@ Every source and file target streams: rows are read and written a batch at a tim
 ### Roadmap
 
 **Done:**
-- Files: CSV/TSV, JSON, JSON Lines, Parquet, Avro, Excel, streamed with flat memory ✅
+- Files: CSV/TSV, JSON, JSON Lines, Parquet, Avro, Excel, streamed with flat memory, gzip and zstd compressed ✅
 - Databases: SQLite, DuckDB, PostgreSQL, MySQL, SQL Server, CrateDB, any ODBC driver ✅
 - Snowflake (staged bulk loads) ✅
 - Remote files over HTTP(S), SSH and S3 ✅

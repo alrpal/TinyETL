@@ -1,5 +1,6 @@
 mod arrow_values;
 pub mod avro;
+pub mod compressed;
 pub mod csv;
 #[cfg(test)]
 mod db_contract;
@@ -84,6 +85,16 @@ pub fn create_source_with_options(
     connection_string: &str,
     options: &std::collections::HashMap<String, String>,
 ) -> Result<Box<dyn Source>> {
+    if !connection_string.contains("://") {
+        if let Some((codec, inner)) = compressed::Codec::from_path(connection_string) {
+            return Ok(Box::new(compressed::CompressedSource::new(
+                connection_string,
+                codec,
+                inner,
+                options,
+            )?));
+        }
+    }
     if csv::is_csv(connection_string) {
         Ok(Box::new(csv::CsvSource::with_options(
             connection_string,
@@ -172,6 +183,14 @@ pub fn create_target_with_options(
     }
 
     // Handle legacy file-based and non-protocol database connections
+    if let Some((codec, inner)) = compressed::Codec::from_path(connection_string) {
+        return Ok(Box::new(compressed::CompressedTarget::new(
+            connection_string,
+            codec,
+            inner,
+            options,
+        )?));
+    }
     if csv::is_csv(connection_string) {
         Ok(Box::new(csv::CsvTarget::with_options(
             connection_string,

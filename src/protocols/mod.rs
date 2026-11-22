@@ -52,12 +52,20 @@ pub trait Protocol: Send + Sync {
 /// Used by remote protocols to pick the right file connector for a downloaded file.
 pub(crate) fn extension_from_path(path: &str) -> Option<String> {
     let filename = path.split('/').next_back()?;
-    let extension = filename.split('.').next_back()?;
-    if !extension.is_empty() && extension.len() <= 10 && extension != filename {
-        Some(extension.to_lowercase())
-    } else {
-        None
+    let (stem, extension) = filename.rsplit_once('.')?;
+    if extension.is_empty() || extension.len() > 10 {
+        return None;
     }
+    let extension = extension.to_lowercase();
+    // Keep the format of a compressed file: `data.csv.gz` → `csv.gz`
+    if extension == "gz" || extension == "zst" {
+        if let Some((_, inner)) = stem.rsplit_once('.') {
+            if !inner.is_empty() && inner.len() <= 10 {
+                return Some(format!("{}.{}", inner.to_lowercase(), extension));
+            }
+        }
+    }
+    Some(extension)
 }
 
 /// Factory function to create a protocol handler based on URL scheme
@@ -183,6 +191,15 @@ mod tests {
         );
         assert_eq!(extension_from_path("/a.b/data"), None);
         assert_eq!(extension_from_path("/a/b/"), None);
+        assert_eq!(
+            extension_from_path("/d/worldcities.csv.gz"),
+            Some("csv.gz".to_string())
+        );
+        assert_eq!(
+            extension_from_path("/d/t.Parquet.ZST"),
+            Some("parquet.zst".to_string())
+        );
+        assert_eq!(extension_from_path("/d/archive.gz"), Some("gz".to_string()));
     }
 
     #[test]

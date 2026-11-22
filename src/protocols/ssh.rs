@@ -376,7 +376,7 @@ mod tests {
         );
         assert_eq!(
             protocol.extract_extension_from_path("/archive.tar.gz"),
-            Some("gz".to_string())
+            Some("tar.gz".to_string()) // compressed files keep their inner format
         );
 
         // Test nested paths

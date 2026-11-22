@@ -5111,6 +5111,7 @@ dependencies = [
  "csv",
  "duckdb",
  "firn",
+ "flate2",
  "futures-util",
  "hex",
  "indicatif",

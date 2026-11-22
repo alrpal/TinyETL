@@ -79,8 +79,14 @@ impl S3Protocol {
             .map(|t| t.to_lowercase())
             .or_else(|| extension_from_path(url.path()));
 
+        // Compressed objects (`csv.gz`, `parquet.zst`) are supported when the inner format is
+        let inner_format = |f: &str| -> String {
+            crate::connectors::compressed::Codec::from_path(f)
+                .map_or(f, |(_, inner)| inner)
+                .to_string()
+        };
         match format {
-            Some(f) if SUPPORTED_FORMATS.contains(&f.as_str()) => Ok(f),
+            Some(f) if SUPPORTED_FORMATS.contains(&inner_format(&f).as_str()) => Ok(f),
             Some(f) => Err(TinyEtlError::Configuration(format!(
                 "Unsupported file format '{}' for {}. Supported formats: {}",
                 f,
