@@ -4,6 +4,7 @@ use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde_json;
 use sqlx::{Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
+use std::sync::Mutex;
 use url::Url;
 
 use crate::{
@@ -335,6 +336,11 @@ pub struct MysqlTarget {
     table_name: String,
     pool: Option<MySqlPool>,
     max_batch_size: usize,
+    /// The load's transaction, begun at the first write and committed in finalize. Dropped
+    /// without a commit (the transfer failed), it rolls back. Mutex only for Sync.
+    tx: Option<Mutex<sqlx::Transaction<'static, sqlx::MySql>>>,
+    /// truncate() was called: empty the table inside the load's transaction
+    truncate_table: Option<String>,
 }
 
 impl MysqlTarget {
@@ -346,6 +352,8 @@ impl MysqlTarget {
             table_name,
             pool: None,
             max_batch_size: 1000, // Default to 1000 rows per batch
+            tx: None,
+            truncate_table: None,
         })
     }
 
@@ -435,7 +443,34 @@ impl MysqlTarget {
         }
     }
 
-    async fn write_chunk(&self, pool: &MySqlPool, rows: &[Row]) -> Result<usize> {
+    /// Open the load's transaction (once), emptying the table first if --truncate was given.
+    async fn begin(&mut self) -> Result<()> {
+        if self.tx.is_some() {
+            return Ok(());
+        }
+        let pool = self.get_pool().await?;
+        let mut tx = pool.begin().await.map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to start a transaction: {}", e))
+        })?;
+        if let Some(table) = self.truncate_table.take() {
+            // DELETE, not TRUNCATE: TRUNCATE commits implicitly in MySQL, so a failed load
+            // couldn't be rolled back
+            sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM `{}`", table)))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e))
+                })?;
+        }
+        self.tx = Some(Mutex::new(tx));
+        Ok(())
+    }
+
+    async fn write_chunk(
+        table_name: &str,
+        conn: &mut sqlx::MySqlConnection,
+        rows: &[Row],
+    ) -> Result<usize> {
         if rows.is_empty() {
             return Ok(0);
         }
@@ -463,7 +498,7 @@ impl MysqlTarget {
 
         let insert_sql = format!(
             "INSERT INTO `{}` ({}) VALUES {}",
-            self.table_name, column_names, values_placeholders
+            table_name, column_names, values_placeholders
         );
 
         // Build the query with all parameter bindings
@@ -492,7 +527,7 @@ impl MysqlTarget {
         }
 
         // Execute the batch insert
-        let result = query.execute(pool).await.map_err(|e| {
+        let result = query.execute(&mut *conn).await.map_err(|e| {
             TinyEtlError::Connection(format!(
                 "Failed to batch insert {} rows into MySQL: {}",
                 rows.len(),
@@ -563,18 +598,36 @@ impl Target for MysqlTarget {
             return Ok(0);
         }
 
-        let pool = self.get_pool().await?;
+        self.begin().await?;
+        // Taken out while the batch is written; a failure drops it, which rolls back
+        let mut tx = self
+            .tx
+            .take()
+            .expect("begun above")
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
         let mut total_affected = 0;
 
         // Process rows in chunks to avoid hitting MySQL limits
         for chunk in rows.chunks(self.max_batch_size) {
-            total_affected += self.write_chunk(pool, chunk).await?;
+            total_affected += Self::write_chunk(&self.table_name, &mut tx, chunk).await?;
         }
+        self.tx = Some(Mutex::new(tx));
 
         Ok(total_affected)
     }
 
     async fn finalize(&mut self) -> Result<()> {
+        // A --truncate with no rows to load still has to empty the table
+        if self.truncate_table.is_some() {
+            self.begin().await?;
+        }
+        if let Some(tx) = self.tx.take() {
+            let tx = tx.into_inner().unwrap_or_else(|e| e.into_inner());
+            tx.commit().await.map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to commit the load: {}", e))
+            })?;
+        }
         Ok(())
     }
 
@@ -601,24 +654,13 @@ impl Target for MysqlTarget {
     }
 
     async fn truncate(&mut self, table_name: &str) -> Result<()> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            TinyEtlError::Connection("MySQL connection not established".to_string())
-        })?;
-
-        let actual_table_name = if table_name.is_empty() {
+        // Deferred into the load's transaction, so a failed load keeps the old rows
+        let table = if table_name.is_empty() {
             &self.table_name
         } else {
             table_name
         };
-
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "TRUNCATE TABLE `{}`",
-            actual_table_name
-        )))
-        .execute(pool)
-        .await
-        .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
-
+        self.truncate_table = Some(table.to_string());
         Ok(())
     }
 

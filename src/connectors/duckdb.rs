@@ -356,6 +356,50 @@ pub struct DuckdbTarget {
     connection: Option<Arc<Mutex<Connection>>>,
     table_name: String,
     schema: Option<Schema>, // Cache the schema to avoid re-inference
+    /// The load runs in one transaction, begun at the first write and committed in
+    /// finalize; dropping the target without finalize rolls it back
+    in_transaction: bool,
+    /// truncate() was called: empty the table inside the load's transaction
+    truncate_table: Option<String>,
+}
+
+impl DuckdbTarget {
+    /// Open the load's transaction (once), emptying the table first if --truncate was given.
+    fn begin(&mut self) -> Result<()> {
+        if self.in_transaction {
+            return Ok(());
+        }
+        let conn = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| TinyEtlError::Connection("Connection not established".to_string()))?
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to start a transaction: {}", e))
+        })?;
+        if let Some(table) = self.truncate_table.take() {
+            conn.execute(&format!("DELETE FROM \"{}\"", table), [])
+                .map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e))
+                })?;
+        }
+        drop(conn);
+        self.in_transaction = true;
+        Ok(())
+    }
+}
+
+impl Drop for DuckdbTarget {
+    fn drop(&mut self) {
+        // The transfer failed before finalize: undo the partial load
+        if self.in_transaction {
+            if let Some(conn) = &self.connection {
+                let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+        }
+    }
 }
 
 impl DuckdbTarget {
@@ -383,6 +427,8 @@ impl DuckdbTarget {
             connection: None,
             table_name: table.to_string(),
             schema: None,
+            in_transaction: false,
+            truncate_table: None,
         })
     }
 
@@ -481,6 +527,7 @@ impl Target for DuckdbTarget {
         if rows.is_empty() {
             return Ok(0);
         }
+        self.begin()?;
 
         let conn = self.connection.as_ref().unwrap();
         let conn = conn.lock().unwrap();
@@ -501,7 +548,19 @@ impl Target for DuckdbTarget {
     }
 
     async fn finalize(&mut self) -> Result<()> {
-        // DuckDB doesn't require explicit finalization
+        // A --truncate with no rows to load still has to empty the table
+        if self.truncate_table.is_some() {
+            self.begin()?;
+        }
+        if self.in_transaction {
+            let conn = self.connection.as_ref().unwrap();
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.execute_batch("COMMIT").map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to commit the load: {}", e))
+            })?;
+            drop(conn);
+            self.in_transaction = false;
+        }
         Ok(())
     }
 
@@ -524,19 +583,13 @@ impl Target for DuckdbTarget {
     }
 
     async fn truncate(&mut self, table_name: &str) -> Result<()> {
-        if let Some(conn) = &self.connection {
-            let conn = conn.lock().unwrap();
-            let actual_table_name = if table_name.is_empty() {
-                &self.table_name
-            } else {
-                table_name
-            };
-
-            conn.execute(&format!("DELETE FROM \"{}\"", actual_table_name), [])
-                .map_err(|e| {
-                    TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e))
-                })?;
-        }
+        // Deferred into the load's transaction, so a failed load keeps the old rows
+        let table = if table_name.is_empty() {
+            &self.table_name
+        } else {
+            table_name
+        };
+        self.truncate_table = Some(table.to_string());
         Ok(())
     }
 

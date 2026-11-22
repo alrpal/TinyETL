@@ -352,9 +352,55 @@ pub struct MssqlTarget {
     client: Option<MssqlClient>,
     max_batch_size: usize,
     schema: Option<Schema>,
+    /// The load runs in one transaction, begun at the first write and committed in
+    /// finalize. If the transfer fails, the connection closes uncommitted and SQL Server
+    /// rolls the transaction back.
+    in_transaction: bool,
+    /// truncate() was called: empty the table inside the load's transaction
+    truncate_table: Option<String>,
 }
 
 impl MssqlTarget {
+    /// Open the load's transaction (once), emptying the table first if --truncate was given.
+    async fn begin(&mut self) -> Result<()> {
+        if self.in_transaction {
+            return Ok(());
+        }
+        if self.client.is_none() {
+            self.connect().await?;
+        }
+        let table = self.truncate_table.take();
+        let client = self.client.as_mut().unwrap();
+        let done = {
+            let stream = client
+                .simple_query("BEGIN TRANSACTION")
+                .await
+                .map_err(|e| e.to_string());
+            match stream {
+                Ok(stream) => stream
+                    .into_results()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                Err(message) => Err(message),
+            }
+        };
+        done.map_err(|message| {
+            TinyEtlError::DataTransfer(format!("Failed to start a transaction: {}", message))
+        })?;
+        self.in_transaction = true;
+        if let Some(table) = table {
+            // DELETE rather than TRUNCATE: it needs only DELETE permission, not ALTER
+            client
+                .execute(format!("DELETE FROM [{}]", table.replace(']', "]]")), &[])
+                .await
+                .map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e))
+                })?;
+        }
+        Ok(())
+    }
+
     pub fn new(connection_string: &str) -> Result<Self> {
         let (_, table_name) = Self::parse_connection_string(connection_string)?;
 
@@ -364,6 +410,8 @@ impl MssqlTarget {
             client: None,
             max_batch_size: 1000,
             schema: None,
+            in_transaction: false,
+            truncate_table: None,
         })
     }
 
@@ -603,6 +651,7 @@ impl Target for MssqlTarget {
         if rows.is_empty() {
             return Ok(0);
         }
+        self.begin().await?;
 
         let client = self.client.as_mut().unwrap();
         let schema = self
@@ -680,7 +729,31 @@ impl Target for MssqlTarget {
     }
 
     async fn finalize(&mut self) -> Result<()> {
-        // MSSQL doesn't require explicit finalization for basic operations
+        // A --truncate with no rows to load still has to empty the table
+        if self.truncate_table.is_some() {
+            self.begin().await?;
+        }
+        if self.in_transaction {
+            let client = self.client.as_mut().unwrap();
+            let done = {
+                let stream = client
+                    .simple_query("COMMIT TRANSACTION")
+                    .await
+                    .map_err(|e| e.to_string());
+                match stream {
+                    Ok(stream) => stream
+                        .into_results()
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
+                    Err(message) => Err(message),
+                }
+            };
+            done.map_err(|message| {
+                TinyEtlError::DataTransfer(format!("Failed to commit the load: {}", message))
+            })?;
+            self.in_transaction = false;
+        }
         Ok(())
     }
 
@@ -712,18 +785,8 @@ impl Target for MssqlTarget {
     }
 
     async fn truncate(&mut self, table_name: &str) -> Result<()> {
-        if self.client.is_none() {
-            self.connect().await?;
-        }
-
-        let client = self.client.as_mut().unwrap();
-        let truncate_sql = format!("TRUNCATE TABLE [{}]", table_name);
-
-        client
-            .execute(&truncate_sql, &[])
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
-
+        // Deferred into the load's transaction, so a failed load keeps the old rows
+        self.truncate_table = Some(table_name.to_string());
         Ok(())
     }
 

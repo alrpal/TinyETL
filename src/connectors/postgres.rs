@@ -4,6 +4,7 @@ use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use sqlx::{postgres::PgConnectOptions, Column, PgPool, Row as SqlxRow};
 use std::str::FromStr;
+use std::sync::Mutex;
 
 use crate::{
     connectors::{row_stream::RowStream, Source, Target},
@@ -342,9 +343,44 @@ pub struct PostgresTarget {
     schema: Option<Schema>,
     /// The server is CrateDB, which speaks the Postgres protocol
     cratedb: bool,
+    /// The load's transaction, begun at the first write and committed in finalize. Dropped
+    /// without a commit (the transfer failed), it rolls back. Mutex only for Sync.
+    tx: Option<Mutex<sqlx::Transaction<'static, sqlx::Postgres>>>,
+    /// truncate() was called: empty the table inside the load's transaction
+    truncate_table: Option<String>,
 }
 
 impl PostgresTarget {
+    /// Open the load's transaction (once), emptying the table first if --truncate was given.
+    async fn begin(&mut self) -> Result<()> {
+        if self.tx.is_some() {
+            return Ok(());
+        }
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
+        let mut tx = pool.begin().await.map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to start a transaction: {}", e))
+        })?;
+        if let Some(table) = self.truncate_table.take() {
+            // TRUNCATE is transactional in PostgreSQL; CrateDB has no TRUNCATE
+            let sql = if self.cratedb {
+                format!("DELETE FROM \"{}\"", table)
+            } else {
+                format!("TRUNCATE TABLE \"{}\"", table)
+            };
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e))
+                })?;
+        }
+        self.tx = Some(Mutex::new(tx));
+        Ok(())
+    }
+
     /// The column type for `data_type` in CREATE TABLE.
     fn column_type(data_type: &DataType, cratedb: bool) -> &'static str {
         match data_type {
@@ -381,6 +417,8 @@ impl PostgresTarget {
             table_name,
             schema: None,
             cratedb: false,
+            tx: None,
+            truncate_table: None,
         })
     }
 }
@@ -450,10 +488,17 @@ impl Target for PostgresTarget {
     }
 
     async fn write_batch(&mut self, rows: &[Row]) -> Result<usize> {
-        let pool = self
-            .pool
-            .as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        self.begin().await?;
+        // Taken out while the batch is written; a failure drops it, which rolls back
+        let mut tx = self
+            .tx
+            .take()
+            .expect("begun above")
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
 
         let table_name = self
             .table_name
@@ -464,10 +509,6 @@ impl Target for PostgresTarget {
             .schema
             .as_ref()
             .ok_or_else(|| TinyEtlError::Configuration("Schema not set".to_string()))?;
-
-        if rows.is_empty() {
-            return Ok(0);
-        }
 
         // Build INSERT statement with quoted column names
         let column_names: Vec<String> = schema
@@ -549,18 +590,28 @@ impl Target for PostgresTarget {
                 }
             }
 
-            query.execute(pool).await.map_err(|e| {
+            query.execute(&mut *tx).await.map_err(|e| {
                 TinyEtlError::DataTransfer(format!("Failed to insert batch: {}", e))
             })?;
 
             total_written += chunk.len();
         }
+        self.tx = Some(Mutex::new(tx));
 
         Ok(total_written)
     }
 
     async fn finalize(&mut self) -> Result<()> {
-        // PostgreSQL doesn't require explicit finalization for basic operations
+        // A --truncate with no rows to load still has to empty the table
+        if self.truncate_table.is_some() {
+            self.begin().await?;
+        }
+        if let Some(tx) = self.tx.take() {
+            let tx = tx.into_inner().unwrap_or_else(|e| e.into_inner());
+            tx.commit().await.map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to commit the load: {}", e))
+            })?;
+        }
         Ok(())
     }
 
@@ -585,18 +636,8 @@ impl Target for PostgresTarget {
     }
 
     async fn truncate(&mut self, table_name: &str) -> Result<()> {
-        let pool = self
-            .pool
-            .as_ref()
-            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
-
-        let truncate_query = format!("TRUNCATE TABLE \"{}\"", table_name);
-
-        sqlx::query(sqlx::AssertSqlSafe(truncate_query.as_str()))
-            .execute(pool)
-            .await
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e)))?;
-
+        // Deferred into the load's transaction, so a failed load keeps the old rows
+        self.truncate_table = Some(table_name.to_string());
         Ok(())
     }
 

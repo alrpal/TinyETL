@@ -3,6 +3,7 @@ use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use sqlx::{sqlite::SqliteConnectOptions, Column, Row as SqlxRow, SqlitePool};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::{
     connectors::{row_stream::RowStream, Source, Target},
@@ -234,9 +235,38 @@ pub struct SqliteTarget {
     connection_string: String,
     pool: Option<SqlitePool>,
     table_name: String,
+    /// The load's transaction, begun at the first write and committed in finalize. Dropped
+    /// without a commit (the transfer failed), it rolls back. Mutex only for Sync.
+    tx: Option<Mutex<sqlx::Transaction<'static, sqlx::Sqlite>>>,
+    /// truncate() was called: empty the table inside the load's transaction
+    truncate_table: Option<String>,
 }
 
 impl SqliteTarget {
+    /// Open the load's transaction (once), emptying the table first if --truncate was given.
+    async fn begin(&mut self) -> Result<()> {
+        if self.tx.is_some() {
+            return Ok(());
+        }
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| TinyEtlError::Connection("Pool not connected".to_string()))?;
+        let mut tx = pool.begin().await.map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to start a transaction: {}", e))
+        })?;
+        if let Some(table) = self.truncate_table.take() {
+            sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM \"{}\"", table)))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to truncate table: {}", e))
+                })?;
+        }
+        self.tx = Some(Mutex::new(tx));
+        Ok(())
+    }
+
     pub fn new(connection_string: &str) -> Result<Self> {
         // Parse connection string - support multiple formats:
         // - "file.db" or "file.db#table" (legacy)
@@ -264,6 +294,8 @@ impl SqliteTarget {
             connection_string: format!("sqlite:{}", db_path),
             pool: None,
             table_name: table.to_string(),
+            tx: None,
+            truncate_table: None,
         })
     }
 
@@ -364,7 +396,14 @@ impl Target for SqliteTarget {
             return Ok(0);
         }
 
-        let pool = self.pool.as_ref().unwrap();
+        self.begin().await?;
+        // Taken out while the batch is written; a failure drops it, which rolls back
+        let mut tx = self
+            .tx
+            .take()
+            .expect("begun above")
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner());
 
         // Get column names from first row
         let columns: Vec<String> = rows[0].keys().cloned().collect();
@@ -418,15 +457,25 @@ impl Target for SqliteTarget {
                 }
             }
 
-            let result = query.execute(pool).await?;
+            let result = query.execute(&mut *tx).await?;
             total_written += result.rows_affected() as usize;
         }
+        self.tx = Some(Mutex::new(tx));
 
         Ok(total_written)
     }
 
     async fn finalize(&mut self) -> Result<()> {
-        // SQLite doesn't require explicit finalization
+        // A --truncate with no rows to load still has to empty the table
+        if self.truncate_table.is_some() {
+            self.begin().await?;
+        }
+        if let Some(tx) = self.tx.take() {
+            let tx = tx.into_inner().unwrap_or_else(|e| e.into_inner());
+            tx.commit().await.map_err(|e| {
+                TinyEtlError::DataTransfer(format!("Failed to commit the load: {}", e))
+            })?;
+        }
         Ok(())
     }
 
@@ -451,20 +500,13 @@ impl Target for SqliteTarget {
     }
 
     async fn truncate(&mut self, table_name: &str) -> Result<()> {
-        if let Some(pool) = &self.pool {
-            let actual_table_name = if table_name.is_empty() {
-                &self.table_name
-            } else {
-                table_name
-            };
-
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM \"{}\"",
-                actual_table_name
-            )))
-            .execute(pool)
-            .await?;
-        }
+        // Deferred into the load's transaction, so a failed load keeps the old rows
+        let table = if table_name.is_empty() {
+            &self.table_name
+        } else {
+            table_name
+        };
+        self.truncate_table = Some(table.to_string());
         Ok(())
     }
 

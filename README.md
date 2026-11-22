@@ -488,6 +488,7 @@ See [`examples/22_snowflake`](examples/22_snowflake/) for a complete setup, from
 **Important Notes:**
 - Tables are created if they don't exist; the database (and schema) must already exist
 - Existing tables are appended to; `--truncate` replaces their rows
+- Each load runs in one transaction (PostgreSQL, MySQL, SQLite, DuckDB, SQL Server, ODBC, Snowflake): if the transfer fails, the table keeps its previous rows, including with `--truncate`. CrateDB has no transactions, so a failed load there can leave a partial table
 - Reading runs one `SELECT * FROM <table>` and streams the rows, so memory stays flat for any table size
 - DuckDB is optimized for analytical (OLAP) workloads and offers better performance than SQLite for aggregations
 - Connection strings should be quoted to prevent shell interpretation
