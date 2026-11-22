@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Nested JSON objects and arrays stay JSON** (#3) instead of becoming strings: they load into `jsonb` in PostgreSQL (`JSON` in DuckDB, `VARIANT` in Snowflake) and stay nested when written to JSON. CSV, Parquet and other text targets get the same compact JSON text as before
 - Errors print as plain text (`Error: Can't read config file job.yaml: No such file or directory`) instead of Rust's debug form (`Error: Configuration("…")`, `Error: Os { code: 2, … }`), and the config-file and schema-file errors name the file. Failed transfers end with the same `Error:` line instead of a timestamped log entry
 
+### Removed
+- Example `16_csv_to_mssql_odbc`, which needed Microsoft's ODBC driver installed locally. `test_env/odbc/run.sh` covers SQL Server through ODBC (Driver 18) in Docker, along with PostgreSQL, MySQL and SQLite
+
 ### Fixed
 - **SQLite and MySQL targets dropped values when rows had different keys.** They took the columns to insert from the first row of each batch, so with JSON sources whose objects have optional fields, a field missing from that first row was lost for the whole batch: loading a GH Archive hour into SQLite kept 0 of 3,245 `org` values. MySQL also wrote a missing value as an empty string instead of NULL, and SQL Server rejected such rows ("Row has 7 values but schema expects 8"). Every row is now written with the table's columns, and a missing key is NULL
 
