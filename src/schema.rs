@@ -565,8 +565,17 @@ impl SchemaInferer {
     /// are skipped.
     pub fn infer_from_rows_ordered(rows: &[Row], column_order: &[String]) -> Result<Schema> {
         if rows.is_empty() {
+            // No data to infer types from (e.g. a CSV with only a header): keep the known
+            // columns as nullable text, so targets still get a usable table
             return Ok(Schema {
-                columns: Vec::new(),
+                columns: column_order
+                    .iter()
+                    .map(|name| Column {
+                        name: name.clone(),
+                        data_type: DataType::String,
+                        nullable: true,
+                    })
+                    .collect(),
                 estimated_rows: Some(0),
                 primary_key_candidate: None,
             });
@@ -908,6 +917,18 @@ mod tests {
 
         // NULL fits everywhere
         assert_eq!(Value::Null.coerce_to(&DataType::Integer), Value::Null);
+    }
+
+    #[test]
+    fn test_header_only_keeps_columns() {
+        let order = vec!["id".to_string(), "note".to_string()];
+        let schema = SchemaInferer::infer_from_rows_ordered(&[], &order).unwrap();
+        let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "note"]);
+        assert!(schema
+            .columns
+            .iter()
+            .all(|c| c.data_type == DataType::String && c.nullable));
     }
 
     #[test]
