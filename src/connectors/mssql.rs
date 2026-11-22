@@ -769,19 +769,17 @@ impl Target for MssqlTarget {
         let mut client = Self::create_client(&db_part).await?;
 
         let query = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @P1";
-        let mut stream = client.query(query, &[&table_name]).await.map_err(|e| {
+        let stream = client.query(query, &[&table_name]).await.map_err(|e| {
             TinyEtlError::Connection(format!("Failed to check table existence: {}", e))
         })?;
-
-        if let Some(tiberius::QueryItem::Row(row)) = stream.try_next().await.map_err(|e| {
+        // into_row skips the column metadata that comes before the first row; looking only at
+        // the stream's first item always missed the row, so existing tables were never found
+        // (and --truncate never ran)
+        let row = stream.into_row().await.map_err(|e| {
             TinyEtlError::Connection(format!("Failed to fetch existence result: {}", e))
-        })? {
-            if let Ok(Some(count)) = row.try_get::<i32, usize>(0) {
-                return Ok(count > 0);
-            }
-        }
-
-        Ok(false)
+        })?;
+        let count = row.and_then(|r| r.try_get::<i32, usize>(0).ok().flatten());
+        Ok(matches!(count, Some(count) if count > 0))
     }
 
     async fn truncate(&mut self, table_name: &str) -> Result<()> {
