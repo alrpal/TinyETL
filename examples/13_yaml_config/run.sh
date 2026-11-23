@@ -1,93 +1,49 @@
 #!/bin/bash
-
-# TinyETL YAML Configuration Examples
-# This script demonstrates the new config file functionality
-
+# Example 13: YAML job files
 set -e
-
-echo "=== TinyETL YAML Configuration Examples ==="
-echo ""
-
-# Build the binary if it doesn't exist
-if [ ! -f "../../target/release/tinyetl" ]; then
-    echo "Building TinyETL..."
-    cd ../..
-    cargo build --release
-    cd examples/13_yaml_config
-fi
+cd "$(dirname "$0")"
 
 TINYETL="../../target/release/tinyetl"
+if [ ! -f "$TINYETL" ]; then
+    echo "Build TinyETL first: cargo build --release"
+    exit 1
+fi
 
-echo "Example 1: Basic Config File (CSV to JSON with transforms)"
-echo "Command: tinyetl run basic_config.yaml"
-echo ""
+echo "=== 1. Run a job file: CSV to JSON with a Lua transform ==="
+cat basic_config.yaml
 $TINYETL run basic_config.yaml
+echo "First record:"
+head -n 12 employees_output.json
+grep -q '"years_service"' employees_output.json
 
 echo ""
-echo "Output file created: employees_output.json"
-echo "Preview of output:"
-head -n 5 employees_output.json
+echo "=== 2. Environment variables, with a default ==="
+cat > /tmp/tinyetl_example13_env.yaml <<'EOF'
+source: employees.csv
+target: ${EXAMPLE13_OUTPUT:-employees_output.csv}
+truncate: true
+EOF
+cat /tmp/tinyetl_example13_env.yaml
+$TINYETL run /tmp/tinyetl_example13_env.yaml
+test "$(wc -l < employees_output.csv)" -eq "$(wc -l < employees.csv)"
+
 echo ""
+echo "=== 3. Turn a command line into a job file ==="
+$TINYETL generate-config employees.csv employees.db --batch-size 500 \
+    --transform "full_name = row.first_name .. ' ' .. row.last_name"
 
-echo "=== Preview Mode Example ==="
-echo "Command: tinyetl run basic_config.yaml (shows preview from config)"
 echo ""
+echo "=== 4. A typo is an error, not ignored ==="
+cat > /tmp/tinyetl_example13_typo.yaml <<'EOF'
+source: employees.csv
+target: employees_output.json
+batchsize: 500
+EOF
+if $TINYETL run /tmp/tinyetl_example13_typo.yaml; then
+    echo "FAIL: the misspelled key was accepted"
+    exit 1
+fi
 
-echo "=== Environment Variables Example ==="
-echo "Setting up environment variables for advanced example..."
-
-# Set environment variables for the advanced example
-export DB_USER="demo_user"
-export DB_PASSWORD="demo_pass" 
-export DB_HOST="localhost"
-export DB_PORT="5432"
-export DB_NAME="demo_db"
-export OUTPUT_DIR="/tmp/tinyetl"
-export SCHEMA_DIR="../../schemas"
-export TRANSFORM_DIR="../../transforms"
-
-# Create output directory
-mkdir -p "$OUTPUT_DIR"
-
-echo "Environment variables set:"
-echo "  DB_USER=$DB_USER"
-echo "  DB_HOST=$DB_HOST"
-echo "  OUTPUT_DIR=$OUTPUT_DIR"
+rm -f /tmp/tinyetl_example13_env.yaml /tmp/tinyetl_example13_typo.yaml
 echo ""
-
-echo "Note: To test the advanced_config.yaml and s3_config.yaml examples,"
-echo "you would need to set up actual database credentials and AWS credentials."
-echo ""
-
-echo "Example commands for environment variable configs:"
-echo "  tinyetl run advanced_config.yaml"
-echo "  tinyetl run s3_config.yaml"
-echo ""
-
-echo "=== Comparison: CLI vs Config File ==="
-echo ""
-echo "Traditional CLI command:"
-echo "  tinyetl employees.csv employees_cli.json --batch-size 1000 --preview 5 \\"
-echo "    --transform 'full_name = row.first_name .. \" \" .. row.last_name'"
-echo ""
-
-echo "Equivalent config file approach:"
-echo "  tinyetl run basic_config.yaml"
-echo ""
-
-echo "Benefits of config files:"
-echo "  ✓ Reusable and version-controllable"
-echo "  ✓ Support for complex multi-line transforms"
-echo "  ✓ Environment variable substitution with \${VAR} syntax"
-echo "  ✓ Better organization for complex ETL jobs"
-echo "  ✓ Easier to share and document"
-echo ""
-
-echo "Config file features demonstrated:"
-echo "  ✓ Basic source/target configuration"
-echo "  ✓ Inline Lua transforms with multi-line support"
-echo "  ✓ Environment variable substitution"
-echo "  ✓ All CLI options available in YAML format"
-echo ""
-
-echo "Done! Check the output files to see the results."
+echo "✅ Example 13 completed successfully"

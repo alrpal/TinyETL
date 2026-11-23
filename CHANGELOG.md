@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Simpler YAML job files.** `source:` and `target:` can be plain strings, `version:` is optional, and every setting is a top-level key with the name of its command-line flag (`batch_size`, `truncate`, `transform`, `transform_file`, ...). `transform: |` takes Lua assignments directly. `${VAR:-default}` gives an environment variable a default. Job files in the older layout (`uri:`, settings under `options:`, `transform: { type, value }`) still load. `generate-config` prints only the settings that differ from the defaults, in the new layout
 - **Tab, semicolon and pipe delimited files** (#21). CSV sources detect the delimiter from the first lines (comma, tab, semicolon or pipe), `.tsv` files are read and written tab-separated, and the `delimiter` option sets it explicitly for sources and targets, including over HTTP, SSH and S3
 - **Gzip and Zstandard compressed files** (#12). Add `.gz` or `.zst` to any file format (`data.csv.gz`, `events.jsonl.gz`, `trips.parquet.zst`): sources are decompressed to a temporary file with flat memory, targets are compressed when the transfer finishes. Works locally and over HTTP, SSH and S3. Multi-member gzip files (`cat a.gz b.gz`) are read whole
 - **`.json` files that hold JSON Lines** (#16), such as GH Archive and the CrateDB example datasets. A `.json` file that starts with `{` is read as objects one after another, which also covers pretty-printed objects back to back and a single object
@@ -16,14 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests for the transfer engine's contract with targets (when tables are created, truncated, appended to and finalized; value conversion; transforms; schema-file rejection; preview and dry run), and a shared database test that SQLite and DuckDB run against temp files (typed round trip, streaming reads, rollback of unfinished loads, deferred truncate)
 
 ### Changed
+- **Unknown keys in YAML job files are an error** (with the line and the valid keys) instead of being ignored. A misspelled `batchsize:` or `transform_file:` placed where it isn't read used to run the job without it
 - **Unknown endpoint options are an error** instead of being ignored, with a suggestion for a misspelled key: `--source-option auth.baerer=…` used to send the request without authentication. Each source and target accepts its protocol's and its file format's options (README, Endpoint Options); databases other than Snowflake take none
 - **Nested JSON objects and arrays stay JSON** (#3) instead of becoming strings: they load into `jsonb` in PostgreSQL (`JSON` in DuckDB, `VARIANT` in Snowflake) and stay nested when written to JSON. CSV, Parquet and other text targets get the same compact JSON text as before
 - Errors print as plain text (`Error: Can't read config file job.yaml: No such file or directory`) instead of Rust's debug form (`Error: Configuration("…")`, `Error: Os { code: 2, … }`), and the config-file and schema-file errors name the file. Failed transfers end with the same `Error:` line instead of a timestamped log entry
 
 ### Removed
+- `examples/my_job.yaml` and `examples/postgres_config.yaml`, which didn't work (S3 credentials in URL parameters, and a `transform_file:` key that was ignored)
 - Example `16_csv_to_mssql_odbc`, which needed Microsoft's ODBC driver installed locally. `test_env/odbc/run.sh` covers SQL Server through ODBC (Driver 18) in Docker, along with PostgreSQL, MySQL and SQLite
 
 ### Fixed
+- **Inline transforms can use earlier assignments**: `--transform "total=row.qty * row.price; profit=total * 0.3"` (the README's own example) failed with "attempt to perform arithmetic on a nil value (global 'total')". Inline and YAML transforms now work the same way, and `;` inside a quoted string no longer splits an assignment
+- **Lua transforms ran twice when loaded**, so top-level code in a `--transform-file` ran twice
 - **SQL Server connections are encrypted.** The native connector switched encryption off (TLS now uses rustls, since macOS's TLS stack hung in the handshake), so the login, password included, crossed the network unencrypted, and servers that require encryption (Azure SQL) refused it. Connections are now encrypted by default, like ODBC Driver 18. `?encrypt=false` encrypts only the login, and `?trust_server_certificate=false` verifies the server's certificate (it's trusted by default, since most servers have a self-signed one)
 - **SQL Server passwords with special characters.** The user name and password weren't URL-decoded, so a password containing `@`, `:` or `/` (which must be percent-encoded in the URL) failed to log in
 - **PostgreSQL `schema.table` targets** created a table literally named `"schema.table"` in the default schema; they now write to `table` in `schema`. Checking whether the target table exists now looks only in that schema (or the default one), not in every schema

@@ -1,7 +1,6 @@
 # Example: HTTP Source with Basic Authentication
 # This example uses the TinyETL test HTTP server
 # Start the server with: docker-compose up -d http-server (from test_env/)
-version: 1
 
 source:
   uri: "http://localhost:8680/basic-auth/users.csv"
@@ -9,14 +8,10 @@ source:
     # Custom headers - prefix with "header."
     header.User-Agent: "TinyETL/0.9.0"
     header.Accept: "text/csv"
-    
+
     # Basic authentication
     auth.basic.username: "testuser"
     auth.basic.password: "testpass"
 
-target:
-  uri: "output_basic_auth.json"
-
-options:
-  batch_size: 100
-  log_level: info
+target: output_basic_auth.json
+batch_size: 100

@@ -632,38 +632,25 @@ end
 tinyetl data.csv output.db --transform-file transform.lua
 ```
 
-#### YAML Configuration (New Format)
-
-Starting with version 0.9.0, TinyETL supports an enhanced YAML format for transformations with better type safety and clarity. The new format uses a tagged union structure:
+#### In YAML Job Files
 
 ```yaml
-# Multi-line script (best for complex logic)
-transform:
-  type: script
-  value: |
-    full_name = row.first_name .. ' ' .. row.last_name
-    total_amount = row.quantity * row.unit_price
-    profit = total_amount * 0.3
+# Assignments, one per line (or separated by ";"), like --transform
+transform: |
+  full_name = row.first_name .. ' ' .. row.last_name
+  total_amount = row.quantity * row.unit_price
+  profit = total_amount * 0.3
 
-# Inline expressions (simple one-liners)
-transform:
-  type: inline
-  value: "total=row.qty * row.price; profit=total - row.cost"
-
-# External Lua file (reusable transformations)
-transform:
-  type: file
-  value: "transform.lua"
-
-
+# Or a Lua file, like --transform-file
+transform_file: transform.lua
 ```
 
-**Backwards Compatibility**: Old YAML configs without the `type` field are no longer supported.
+Job files from earlier versions, with `transform: { type: script|inline|file, value: ... }` under `options:`, still work.
 
 #### Transformation Rules
 
 1. **Schema Inference**: The output schema is determined by the first transformed row
-2. **Column Preservation**: For inline expressions, all original columns are preserved by default
+2. **Column Preservation**: For assignments (`--transform`, YAML `transform`), all original columns are preserved, and each assignment can use the ones before it by name (`total=row.qty * row.price; profit=total * 0.3`)
 3. **Column Override**: Transformations can override existing columns with new values
 4. **New Columns**: New columns returned by transform are added to the target schema  
 5. **Column Filtering**: For Lua files, only columns returned by the transform function are kept
@@ -923,93 +910,54 @@ For complex ETL jobs, TinyETL supports YAML configuration files that make your d
 tinyetl run config.yaml
 ```
 
-### Benefits of Configuration Files
-
-✅ **Clean, readable YAML format** - Better organization than long command lines  
-✅ **Environment variable substitution** - Perfect for secrets and dynamic values  
-✅ **Multi-line transformations** - Complex Lua transforms with proper formatting  
-✅ **Version control friendly** - Store and share ETL job definitions  
-✅ **Reusable configurations** - Same job across environments  
-
-### Configuration File Format
+A job file needs only a source and a target:
 
 ```yaml
-# This is a configuration file for TinyETL.
-# It is in YAML format.
-# Comments start with the '#' character and are ignored.
-# Blank lines are ignored.
-#
-# To use this configuration:
-# 1. Customize this configuration as needed.
-# 2. Save it as 'config.yaml' or with a similar name of your choosing.
-# 3. Use the configuration by running: `tinyetl run config.yaml`.
-#
-# You may generate a configuration file from CLI arguments using:
-# `tinyetl generate-config [OPTIONS] <SOURCE> <TARGET> > config.yaml`
-#
-# Use `${VAR_NAME}` syntax to insert dynamic values from environment variables.
-# For example, to use a database password from an environment variable:
-#   uri: "postgres://user:${DB_PASSWORD}@localhost:5432/dbname"
-
-version: 1
-
-source:
-  uri: "employees.csv"            # or database connection string
-  # Optional source-specific options (e.g., for HTTP sources)
-  # options:
-  #   header.User-Agent: "TinyETL/0.11.1"
-  #   header.Accept: "text/csv"
-  #   auth.basic.username: "user"
-  #   auth.basic.password: "${PASSWORD}"
-  #   auth.bearer: "${BEARER_TOKEN}"
-
-target:
-  uri: "employees_output.json"    # or database connection string
-  # Optional target-specific options
-  # options:
-  #   region: "us-east-1"         # e.g. S3 target (s3://bucket/path/file.parquet)
-  #   access_key_id: "${AWS_ACCESS_KEY_ID}"
-  #   secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
-
-# The "options" key and all other keys beneath "options" can be omitted.
-# Sensible default values will be used for omitted keys.
-
-options:
-  batch_size: 10000               # Number of rows per batch
-  infer_schema: true              # Auto-detect column types
-  schema_file: "schema path.yaml" # Override with external schema
-  preview: 10                     # Show N rows without transfer
-  dry_run: false                  # Validate without transferring
-  log_level: info                 # info, warn, error (lowercase in YAML)
-  skip_existing: false            # Not implemented yet; has no effect
-  source_type: "csv"              # Force source file type
-  truncate: false                 # Truncate target before writing
-  
-  # Transform configuration supports multiple formats:
-  
-  # 1. Multi-line script (recommended for complex transformations)
-  transform:
-    type: script
-    value: |
-      -- Calculate derived fields
-      full_name = row.first_name .. " " .. row.last_name
-      annual_salary = row.monthly_salary * 12
-      hire_year = tonumber(string.sub(row.hire_date, 1, 4))
-
-  # 2. Inline single-line expressions (for simple transformations)
-  # transform:
-  #   type: inline
-  #   value: "total=row.quantity * row.price; profit=total - row.cost"
-
-  # 3. External Lua file (for reusable transformation logic)
-  # transform:
-  #   type: file
-  #   value: "transform.lua"
-
-  # 4. No transformation (default)
-  # transform:
-  #   type: none
+source: sales.csv
+target: postgres://etl:${DB_PASSWORD}@localhost/analytics#sales
 ```
+
+Every other key is optional and has the name of a command-line flag: `batch_size` is `--batch-size`, `transform_file` is `--transform-file`. A key TinyETL doesn't know is an error, so a typo fails instead of being ignored. `tinyetl generate-config <SOURCE> <TARGET> [OPTIONS]` turns a command line into a job file, and `tinyetl generate-default-config` prints this annotated example:
+
+```yaml
+# TinyETL job file. Run it with: tinyetl run job.yaml
+#
+# Only source and target are required. Every other key is optional and has the
+# name of a command-line flag (batch_size is --batch-size). Unknown keys are an
+# error. ${VAR} inserts an environment variable, ${VAR:-default} a default when
+# it isn't set. Generate a job from a command line with:
+#   tinyetl generate-config <SOURCE> <TARGET> [OPTIONS] > job.yaml
+
+source: employees.csv                  # a file, URL or database connection string
+target: postgres://etl:${DB_PASSWORD:-etl}@localhost/hr#employees
+
+# A source or target with options (see "Endpoint Options" in the README):
+# source:
+#   uri: https://example.com/export.csv
+#   options:
+#     auth.bearer: ${API_TOKEN}
+#     delimiter: ";"
+
+# truncate: true                       # replace the target's rows instead of appending
+# batch_size: 10000                    # rows per batch
+# schema_file: employees_schema.yaml   # column types and validation, instead of inference
+# source_type: csv                     # when the source has no file extension
+# preview: 10                          # show 10 rows and stop
+# dry_run: true                        # check the source and schema, write nothing
+# log_level: warn                      # info, warn or error
+
+# Lua transform: one assignment per line (or separated by ";"). Every column
+# is kept; each line adds or replaces one, and can use the ones before it.
+transform: |
+  full_name = row.first_name .. " " .. row.last_name
+  annual_salary = row.monthly_salary * 12
+  hire_year = tonumber(string.sub(row.hire_date, 1, 4))
+
+# Or a Lua file with a transform(row) function, which can also drop rows:
+# transform_file: transform.lua
+```
+
+Job files from earlier versions, with `version: 1`, `uri:` under `source:` and `target:`, and the settings under `options:`, still work.
 
 ### Source and Target Options
 
@@ -1020,8 +968,6 @@ TinyETL supports connector-specific options that can be passed to sources and ta
 When reading from HTTP/HTTPS URLs, you can specify authentication and custom headers:
 
 ```yaml
-version: 1
-
 source:
   uri: "http://api.example.com/data.csv"
   options:
@@ -1037,11 +983,7 @@ source:
     # OR Bearer token authentication
     # auth.bearer: "${API_TOKEN}"
 
-target:
-  uri: "output.json"
-
-options:
-  batch_size: 1000
+target: output.json
 ```
 
 **Available HTTP Options:**
@@ -1076,8 +1018,6 @@ tinyetl orders.csv s3://my-bucket/exports/orders.parquet
 Settings are read from the standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT`, `AWS_ALLOW_HTTP`). On AWS infrastructure, IAM roles (EC2 instance profiles, ECS task roles, web identity) are picked up automatically. In a YAML config, each endpoint can override them:
 
 ```yaml
-version: 1
-
 source:
   uri: "s3://my-bucket/raw/orders.csv"
   options:
@@ -1113,70 +1053,44 @@ See [Example 19: S3](examples/19_s3/) for a complete working example.
 
 ### Environment Variables
 
-Use `${VAR_NAME}` syntax for dynamic values:
+`${VAR}` inserts an environment variable into any text value (connection strings, endpoint options, file paths, transforms); `${VAR:-default}` uses the default when the variable isn't set or is empty. A variable without a default that isn't set is an error.
 
 ```yaml
-version: 1
-
-source:
-  uri: "postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:5432/mydb#users"
-
-target:
-  uri: "${OUTPUT_PATH}/processed_users.parquet"
-
-options:
-  batch_size: ${BATCH_SIZE:-5000}  # Default to 5000 if not set
-  log_level: "${LOG_LEVEL:-info}"
+source: postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST:-localhost}:5432/mydb#users
+target: ${OUTPUT_DIR:-.}/processed_users.parquet
 ```
 
 ```bash
-# Set environment variables
-export DB_USER="myuser"
-export DB_PASSWORD="mypassword"
-export DB_HOST="localhost"
-export OUTPUT_PATH="/data/exports"
-
-# Run with environment substitution
-tinyetl run my_job.yaml
+DB_USER=me DB_PASSWORD=secret tinyetl run job.yaml
 ```
 
 ### Examples
 
-**Simple file conversion:**
+**File conversion:**
 ```yaml
-# basic_job.yaml
-version: 1
-source:
-  uri: "sales_data.csv"
-target:
-  uri: "sales_data.parquet"
-options:
-  batch_size: 50000
-  infer_schema: true
+source: sales_data.csv
+target: sales_data.parquet
 ```
 
-**Database with transformations:**
+**Database load with a transform:**
 ```yaml
-# etl_job.yaml  
-version: 1
-source:
-  uri: "postgresql://user:${DB_PASSWORD}@host/db#raw_orders"
-target:
-  uri: "analytics.db#processed_orders"
-options:
-  truncate: true
-  transform:
-    type: script
-    value: |
-      -- Calculate order totals and profit margins
-      total_amount = row.quantity * row.unit_price
-      profit_margin = (total_amount - row.cost) / total_amount
-      order_year = tonumber(string.sub(row.order_date, 1, 4))
+source: postgresql://user:${DB_PASSWORD}@host/db#raw_orders
+target: analytics.db#processed_orders
+truncate: true
+transform: |
+  -- Order totals and profit margins
+  total_amount = row.quantity * row.unit_price
+  profit_margin = (total_amount - row.cost) / total_amount
+  order_year = tonumber(string.sub(row.order_date, 1, 4))
 ```
 
-Run any configuration file with:
-```bash
-tinyetl run my_job.yaml
+**Authenticated download to S3:**
+```yaml
+source:
+  uri: https://api.example.com/export.csv
+  options:
+    auth.bearer: ${API_TOKEN}
+target: s3://my-bucket/exports/export.parquet
 ```
 
 #### Command Examples

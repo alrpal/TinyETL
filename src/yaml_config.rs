@@ -1,29 +1,110 @@
-use regex::Regex;
-use serde::{Deserialize, Serialize};
+//! `tinyetl run job.yaml`: YAML job files.
+//!
+//! A job names a `source` and a `target`, each a plain string or `{ uri, options }`. Every
+//! other key has the name of a command-line flag (`batch_size` for `--batch-size`,
+//! `transform`, `transform_file`, ...). Older files that put those keys under `options:` and
+//! write `transform: { type, value }` still load. Unknown keys are an error, so a typo fails
+//! instead of being ignored. `${VAR}` and `${VAR:-default}` read environment variables.
+
+use regex::{Captures, Regex};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::config::{Config, LogLevel};
 use crate::transformer::TransformConfig;
 
-// YAML config file structures
-#[derive(Debug, Clone, Serialize, Deserialize)]
+const DEFAULT_BATCH_SIZE: usize = 10_000;
+
+/// The annotated example printed by `tinyetl generate-default-config`; README.md shows the same
+/// text (a test checks)
+pub const EXAMPLE: &str = r#"# TinyETL job file. Run it with: tinyetl run job.yaml
+#
+# Only source and target are required. Every other key is optional and has the
+# name of a command-line flag (batch_size is --batch-size). Unknown keys are an
+# error. ${VAR} inserts an environment variable, ${VAR:-default} a default when
+# it isn't set. Generate a job from a command line with:
+#   tinyetl generate-config <SOURCE> <TARGET> [OPTIONS] > job.yaml
+
+source: employees.csv                  # a file, URL or database connection string
+target: postgres://etl:${DB_PASSWORD:-etl}@localhost/hr#employees
+
+# A source or target with options (see "Endpoint Options" in the README):
+# source:
+#   uri: https://example.com/export.csv
+#   options:
+#     auth.bearer: ${API_TOKEN}
+#     delimiter: ";"
+
+# truncate: true                       # replace the target's rows instead of appending
+# batch_size: 10000                    # rows per batch
+# schema_file: employees_schema.yaml   # column types and validation, instead of inference
+# source_type: csv                     # when the source has no file extension
+# preview: 10                          # show 10 rows and stop
+# dry_run: true                        # check the source and schema, write nothing
+# log_level: warn                      # info, warn or error
+
+# Lua transform: one assignment per line (or separated by ";"). Every column
+# is kept; each line adds or replaces one, and can use the ones before it.
+transform: |
+  full_name = row.first_name .. " " .. row.last_name
+  annual_salary = row.monthly_salary * 12
+  hire_year = tonumber(string.sub(row.hire_date, 1, 4))
+
+# Or a Lua file with a transform(row) function, which can also drop rows:
+# transform_file: transform.lua
+"#;
+
+/// A YAML job file
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct YamlConfig {
-    pub version: u32,
+    /// Only version 1 exists; it can be left out
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     pub source: SourceOrTargetConfig,
     pub target: SourceOrTargetConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infer_schema: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<LogLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncate: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /// Lua assignments (a string), or the older `{ type, value }` form
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<Transform>,
+    /// A Lua file with a `transform(row)` function
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform_file: Option<String>,
+    /// Accepted for older files; has no effect
+    #[serde(default, skip_serializing)]
+    pub skip_existing: Option<bool>,
+    /// The older place for the settings above
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<OptionsConfig>,
 }
 
-// YAML config for source or target
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+/// A source or target: `data.csv`, or `{ uri: data.csv, options: { delimiter: ";" } }`
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceOrTargetConfig {
     pub uri: String,
-    #[serde(default)]
     pub options: HashMap<String, String>,
 }
 
-/// YAML config for options
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// The `options:` block of older job files
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OptionsConfig {
     pub batch_size: Option<usize>,
     pub infer_schema: Option<bool>,
@@ -33,23 +114,44 @@ pub struct OptionsConfig {
     pub log_level: Option<LogLevel>,
     pub skip_existing: Option<bool>,
     pub truncate: Option<bool>,
-    pub transform: Option<TransformConfig>,
+    pub transform: Option<Transform>,
+    pub transform_file: Option<String>,
     pub source_type: Option<String>,
 }
+
+/// The `transform` key: Lua assignments as a string, or `{ type: script|inline|file|none, value }`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transform(pub TransformConfig);
 
 impl YamlConfig {
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Can't read config file {}: {}", path, e))?;
-        let config: YamlConfig = serde_yaml::from_str(&content)
-            .map_err(|e| format!("Invalid config file {}: {}", path, e))?;
+        Self::from_yaml(&content).map_err(|e| format!("Invalid config file {}: {}", path, e).into())
+    }
+
+    pub fn from_yaml(content: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let config: YamlConfig = serde_yaml::from_str(content)?;
+        if let Some(version) = config.version.filter(|v| *v != 1) {
+            return Err(format!(
+                "unsupported version {}; this TinyETL reads version 1",
+                version
+            )
+            .into());
+        }
         Ok(config)
     }
 
-    /// Convert a Config struct to a YamlConfig struct
+    /// The job file for a command line (`tinyetl generate-config`): only the settings that
+    /// differ from the defaults
     pub fn from_config(config: Config) -> Self {
+        let (transform, transform_file) = match config.transform {
+            TransformConfig::None => (None, None),
+            TransformConfig::File(path) => (None, Some(path)),
+            other => (Some(Transform(other)), None),
+        };
         YamlConfig {
-            version: 1,
+            version: None,
             source: SourceOrTargetConfig {
                 uri: config.source,
                 options: config.source_options,
@@ -58,118 +160,85 @@ impl YamlConfig {
                 uri: config.target,
                 options: config.target_options,
             },
-            options: Some(OptionsConfig {
-                batch_size: Some(config.batch_size),
-                infer_schema: Some(config.infer_schema),
-                schema_file: config.schema_file,
-                preview: config.preview,
-                dry_run: Some(config.dry_run),
-                log_level: Some(config.log_level),
-                skip_existing: Some(config.skip_existing),
-                truncate: Some(config.truncate),
-                transform: match config.transform {
-                    TransformConfig::None => None,
-                    other => Some(other),
-                },
-                source_type: config.source_type,
-            }),
+            batch_size: Some(config.batch_size).filter(|b| *b != DEFAULT_BATCH_SIZE),
+            infer_schema: Some(config.infer_schema).filter(|i| !i),
+            schema_file: config.schema_file,
+            preview: config.preview,
+            dry_run: Some(config.dry_run).filter(|d| *d),
+            log_level: Some(config.log_level).filter(|l| *l != LogLevel::Info),
+            truncate: Some(config.truncate).filter(|t| *t),
+            source_type: config.source_type,
+            transform,
+            transform_file,
+            skip_existing: None,
+            options: None,
         }
     }
 
-    /// Serialize this YamlConfig to a YAML string
     pub fn to_yaml_string(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let yaml = serde_yaml::to_string(self)?;
-        Ok(yaml)
+        Ok(serde_yaml::to_string(self)?)
     }
 
     pub fn into_config(self) -> Result<Config, Box<dyn std::error::Error>> {
-        // Process environment variable substitution in URIs and other fields
-        let source_uri = Self::substitute_env_vars(&self.source.uri)?;
-        let target_uri = Self::substitute_env_vars(&self.target.uri)?;
+        let old = self.options.unwrap_or_default();
 
-        // Process environment variable substitution in source and target options
-        let source_options = Self::substitute_env_vars_in_map(&self.source.options)?;
-        let target_options = Self::substitute_env_vars_in_map(&self.target.options)?;
+        // A setting may be at the top level or under `options:`, not both
+        fn pick<T>(name: &str, top: Option<T>, old: Option<T>) -> Result<Option<T>, String> {
+            match (top, old) {
+                (Some(_), Some(_)) => Err(format!(
+                    "'{}' is set both at the top level and under 'options:'; keep one",
+                    name
+                )),
+                (top, old) => Ok(top.or(old)),
+            }
+        }
+        let batch_size = pick("batch_size", self.batch_size, old.batch_size)?;
+        let infer_schema = pick("infer_schema", self.infer_schema, old.infer_schema)?;
+        let schema_file = pick("schema_file", self.schema_file, old.schema_file)?;
+        let preview = pick("preview", self.preview, old.preview)?;
+        let dry_run = pick("dry_run", self.dry_run, old.dry_run)?;
+        let log_level = pick("log_level", self.log_level, old.log_level)?;
+        let skip_existing = pick("skip_existing", self.skip_existing, old.skip_existing)?;
+        let truncate = pick("truncate", self.truncate, old.truncate)?;
+        let source_type = pick("source_type", self.source_type, old.source_type)?;
+        let transform = pick("transform", self.transform, old.transform)?;
+        let transform_file = pick("transform_file", self.transform_file, old.transform_file)?;
 
-        // Use default options if none provided
-        let options = self.options.unwrap_or_default();
-
-        // Execute env var substitution on transform config if present
-        let transform_config = match options.transform {
-            Some(TransformConfig::File(path)) => {
-                TransformConfig::File(Self::substitute_env_vars(&path)?)
+        let transform = match (transform, transform_file) {
+            (Some(_), Some(_)) => {
+                return Err("set either 'transform' or 'transform_file', not both".into())
             }
-            Some(TransformConfig::Script(script)) => {
-                TransformConfig::Script(Self::substitute_env_vars(&script)?)
-            }
-            Some(TransformConfig::Inline(expr)) => {
-                TransformConfig::Inline(Self::substitute_env_vars(&expr)?)
-            }
-            Some(TransformConfig::None) | None => TransformConfig::None,
+            (Some(Transform(t)), None) => t,
+            (None, Some(path)) => TransformConfig::File(path),
+            (None, None) => TransformConfig::None,
         };
-
-        // Execute env var substitution on schema_file if present
-        let schema_file = if let Some(ref file) = options.schema_file {
-            Some(Self::substitute_env_vars(file)?)
-        } else {
-            None
-        };
-
-        // Execute env var substitution on source_type if present
-        let source_type = if let Some(ref stype) = options.source_type {
-            Some(Self::substitute_env_vars(stype)?)
-        } else {
-            None
+        let transform = match transform {
+            TransformConfig::File(path) => TransformConfig::File(substitute_env_vars(&path)?),
+            TransformConfig::Script(script) => {
+                TransformConfig::Script(substitute_env_vars(&script)?)
+            }
+            TransformConfig::Inline(expr) => TransformConfig::Inline(substitute_env_vars(&expr)?),
+            TransformConfig::None => TransformConfig::None,
         };
 
         Ok(Config {
-            source: source_uri,
-            target: target_uri,
-            infer_schema: options.infer_schema.unwrap_or(true),
-            schema_file,
-            batch_size: options.batch_size.unwrap_or(10_000),
-            preview: options.preview,
-            dry_run: options.dry_run.unwrap_or(false),
-            log_level: options.log_level.unwrap_or(LogLevel::Info),
-            skip_existing: options.skip_existing.unwrap_or(false),
-            truncate: options.truncate.unwrap_or(false),
-            transform: transform_config,
-            source_type,
+            source: substitute_env_vars(&self.source.uri)?,
+            target: substitute_env_vars(&self.target.uri)?,
+            infer_schema: infer_schema.unwrap_or(true),
+            schema_file: schema_file.map(|f| substitute_env_vars(&f)).transpose()?,
+            batch_size: batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
+            preview,
+            dry_run: dry_run.unwrap_or(false),
+            log_level: log_level.unwrap_or(LogLevel::Info),
+            skip_existing: skip_existing.unwrap_or(false),
+            truncate: truncate.unwrap_or(false),
+            transform,
+            source_type: source_type.map(|t| substitute_env_vars(&t)).transpose()?,
             source_secret_id: None, // Not used with config files - env vars are substituted directly
-            dest_secret_id: None, // Not used with config files - env vars are substituted directly
-            source_options,
-            target_options,
+            dest_secret_id: None,
+            source_options: substitute_env_vars_in_map(&self.source.options)?,
+            target_options: substitute_env_vars_in_map(&self.target.options)?,
         })
-    }
-
-    /// Substitute environment variable patterns like ${VAR_NAME} in strings
-    fn substitute_env_vars(input: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let env_var_pattern = Regex::new(r"\$\{([^}]+)\}")?;
-        let mut result = input.to_string();
-
-        for caps in env_var_pattern.captures_iter(input) {
-            if let Some(var_name) = caps.get(1) {
-                let var_name_str = var_name.as_str();
-                let env_value = std::env::var(var_name_str)
-                    .map_err(|_| format!("Environment variable '{}' not found", var_name_str))?;
-
-                let pattern = format!("${{{}}}", var_name_str);
-                result = result.replace(&pattern, &env_value);
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Substitute environment variables in all values of a HashMap
-    fn substitute_env_vars_in_map(
-        input: &HashMap<String, String>,
-    ) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
-        let mut result = HashMap::new();
-        for (key, value) in input {
-            result.insert(key.clone(), Self::substitute_env_vars(value)?);
-        }
-        Ok(result)
     }
 }
 
@@ -179,508 +248,348 @@ impl From<Config> for YamlConfig {
     }
 }
 
+/// Replace `${VAR}` with the environment variable's value, and `${VAR:-default}` with the
+/// value or, when the variable is unset or empty, the default
+fn substitute_env_vars(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let pattern = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")?;
+    let mut missing = None;
+    let result = pattern.replace_all(input, |caps: &Captures| {
+        let name = &caps[1];
+        match (
+            std::env::var(name).ok().filter(|v| !v.is_empty()),
+            caps.get(2),
+        ) {
+            (Some(value), _) => value,
+            (None, Some(default)) => default.as_str().to_string(),
+            (None, None) => {
+                // An empty variable without a default is still a value
+                std::env::var(name).unwrap_or_else(|_| {
+                    missing.get_or_insert_with(|| name.to_string());
+                    String::new()
+                })
+            }
+        }
+    });
+    if let Some(name) = missing {
+        return Err(format!(
+            "Environment variable '{}' not found (use ${{{}:-default}} for a default)",
+            name, name
+        )
+        .into());
+    }
+    Ok(result.into_owned())
+}
+
+fn substitute_env_vars_in_map(
+    input: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    input
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), substitute_env_vars(value)?)))
+        .collect()
+}
+
+impl Serialize for SourceOrTargetConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Full<'a> {
+            uri: &'a str,
+            options: std::collections::BTreeMap<&'a String, &'a String>,
+        }
+        if self.options.is_empty() {
+            serializer.serialize_str(&self.uri)
+        } else {
+            Full {
+                uri: &self.uri,
+                options: self.options.iter().collect(),
+            }
+            .serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SourceOrTargetConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Full {
+            uri: String,
+            #[serde(default)]
+            options: HashMap<String, String>,
+        }
+
+        struct EndpointVisitor;
+        impl<'de> Visitor<'de> for EndpointVisitor {
+            type Value = SourceOrTargetConfig;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a location such as data.csv, or a map with uri and options")
+            }
+
+            fn visit_str<E: de::Error>(self, uri: &str) -> Result<Self::Value, E> {
+                Ok(SourceOrTargetConfig {
+                    uri: uri.to_string(),
+                    options: HashMap::new(),
+                })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                let full = Full::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(SourceOrTargetConfig {
+                    uri: full.uri,
+                    options: full.options,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(EndpointVisitor)
+    }
+}
+
+impl Serialize for Transform {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.0 {
+            TransformConfig::Script(lua) | TransformConfig::Inline(lua) => {
+                serializer.serialize_str(lua)
+            }
+            other => other.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Transform {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TransformVisitor;
+        impl<'de> Visitor<'de> for TransformVisitor {
+            type Value = Transform;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("Lua assignments such as \"total = row.qty * row.price\"")
+            }
+
+            fn visit_str<E: de::Error>(self, lua: &str) -> Result<Self::Value, E> {
+                Ok(Transform(TransformConfig::Script(lua.to_string())))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                TransformConfig::deserialize(de::value::MapAccessDeserializer::new(map))
+                    .map(Transform)
+            }
+        }
+
+        deserializer.deserialize_any(TransformVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_default_source_or_target_config() {
-        let config = SourceOrTargetConfig::default();
-        assert_eq!(config.uri, String::new());
-        assert!(config.options.is_empty());
+    fn load(yaml: &str) -> Result<Config, String> {
+        YamlConfig::from_yaml(yaml)
+            .and_then(|c| c.into_config())
+            .map_err(|e| e.to_string())
     }
 
     #[test]
-    fn test_serialize_source_or_target_config() {
-        let config = SourceOrTargetConfig {
-            uri: "file://tmp/file.txt".to_string(),
-            options: HashMap::new(),
-        };
-
-        let serialized = serde_yaml::to_string(&config).unwrap();
-        assert!(serialized.contains("uri: file://tmp/file.txt"));
-
-        let deserialized: SourceOrTargetConfig = serde_yaml::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.uri, "file://tmp/file.txt");
-    }
-
-    #[test]
-    fn test_yaml_config_serialization() {
-        let yaml_config = YamlConfig {
-            version: 1,
-            source: SourceOrTargetConfig {
-                uri: "file://source_uri".to_string(),
-                options: HashMap::new(),
-            },
-            target: SourceOrTargetConfig {
-                uri: "file://target_uri".to_string(),
-                options: HashMap::new(),
-            },
-            options: Some(OptionsConfig {
-                batch_size: Some(5000),
-                infer_schema: Some(true),
-                schema_file: Some("schema.yaml".to_string()),
-                preview: Some(10),
-                dry_run: Some(false),
-                log_level: Some(LogLevel::Warn),
-                skip_existing: Some(true),
-                truncate: Some(false),
-                transform: Some(TransformConfig::Script("transform_script".to_string())),
-                source_type: Some("csv".to_string()),
-            }),
-        };
-        let expected_yaml = r#"version: 1
-source:
-  uri: file://source_uri
-  options: {}
-target:
-  uri: file://target_uri
-  options: {}
-options:
-  batch_size: 5000
-  infer_schema: true
-  schema_file: schema.yaml
-  preview: 10
-  dry_run: false
-  log_level: warn
-  skip_existing: true
-  truncate: false
-  transform:
-    type: script
-    value: transform_script
-  source_type: csv
-"#;
-        let serialized = serde_yaml::to_string(&yaml_config).unwrap();
-
-        assert_eq!(serialized, expected_yaml);
-    }
-
-    #[test]
-    fn test_yaml_deserialization() {
-        let yaml_str = r##"version: 1
-
-source:
-  uri: "employees.csv"          # or database connection string
-
-target:
-  uri: "employees_output.json"  # or database connection string
-
-options:
-  batch_size: 10000               # Number of rows per batch
-  infer_schema: true              # Auto-detect column types
-  schema_file: "schema path.yaml" # Override with external schema
-  preview: 10                     # Show N rows without transfer
-  dry_run: false                  # Validate without transferring
-  log_level: info                 # info, warn, error (lowercase in YAML)
-  skip_existing: false            # Skip if target exists
-  source_type: "csv"              # Force source file type
-  truncate: false                 # Truncate target before writing
-  transform:                      # Inline Lua script transformation
-    type: script
-    value: |
-      -- Calculate derived fields
-      full_name = row.first_name .. " " .. row.last_name
-      annual_salary = row.monthly_salary * 12
-      hire_year = tonumber(string.sub(row.hire_date, 1, 4))
-"##;
-
-        let yaml_config: YamlConfig = serde_yaml::from_str(yaml_str).unwrap();
-        let options = yaml_config.options.unwrap();
-
-        // test all the fields
-        assert_eq!(yaml_config.version, 1);
-        assert_eq!(yaml_config.source.uri, "employees.csv");
-        assert_eq!(yaml_config.target.uri, "employees_output.json");
-        assert_eq!(options.batch_size.unwrap(), 10000);
-        assert!(options.infer_schema.unwrap());
-        assert_eq!(options.schema_file.unwrap(), "schema path.yaml");
-        assert_eq!(options.preview.unwrap(), 10);
-        assert!(!options.dry_run.unwrap());
-        assert_eq!(options.log_level.unwrap(), LogLevel::Info);
-        assert!(!options.skip_existing.unwrap());
-        assert_eq!(options.source_type.unwrap(), "csv");
-        assert!(!options.truncate.unwrap());
-        assert!(options.transform.is_some());
-
-        let expected_transform_config = TransformConfig::Script(
-            r##"-- Calculate derived fields
-full_name = row.first_name .. " " .. row.last_name
-annual_salary = row.monthly_salary * 12
-hire_year = tonumber(string.sub(row.hire_date, 1, 4))
-"##
-            .to_string(),
+    fn test_example_loads_and_matches_readme() {
+        std::env::remove_var("DB_PASSWORD");
+        let config = load(EXAMPLE).unwrap();
+        assert_eq!(config.source, "employees.csv");
+        assert_eq!(config.target, "postgres://etl:etl@localhost/hr#employees");
+        assert!(matches!(config.transform, TransformConfig::Script(_)));
+        assert!(
+            include_str!("../README.md").contains(EXAMPLE),
+            "README.md must show yaml_config::EXAMPLE unchanged"
         );
-        assert_eq!(options.transform.unwrap(), expected_transform_config);
+    }
+
+    #[test]
+    fn test_minimal_job() {
+        let config = load("source: data.csv\ntarget: out.db\n").unwrap();
+        assert_eq!(config.source, "data.csv");
+        assert_eq!(config.target, "out.db");
+        assert_eq!(config.batch_size, DEFAULT_BATCH_SIZE);
+        assert!(config.infer_schema);
+        assert_eq!(config.transform, TransformConfig::None);
+    }
+
+    #[test]
+    fn test_flat_job() {
+        let config = load(
+            r#"
+source:
+  uri: https://example.com/a.csv
+  options:
+    auth.bearer: token
+target: out.parquet
+batch_size: 500
+truncate: true
+log_level: warn
+transform: |
+  total = row.qty * row.price
+  profit = total * 0.3
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.source_options["auth.bearer"], "token");
+        assert_eq!(config.batch_size, 500);
+        assert!(config.truncate);
+        assert_eq!(config.log_level, LogLevel::Warn);
+        assert_eq!(
+            config.transform,
+            TransformConfig::Script(
+                "total = row.qty * row.price\nprofit = total * 0.3\n".to_string()
+            )
+        );
+
+        let config = load("source: a.csv\ntarget: b.csv\ntransform_file: t.lua\n").unwrap();
+        assert_eq!(config.transform, TransformConfig::File("t.lua".to_string()));
+    }
+
+    #[test]
+    fn test_older_job_files_still_load() {
+        let config = load(
+            r#"
+version: 1
+source:
+  uri: employees.csv
+target:
+  uri: out.json
+  options: {}
+options:
+  batch_size: 100
+  infer_schema: true
+  schema_file: null
+  preview: null
+  skip_existing: false
+  transform:
+    type: inline
+    value: "a=1; b=2"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.batch_size, 100);
+        assert_eq!(
+            config.transform,
+            TransformConfig::Inline("a=1; b=2".to_string())
+        );
+
+        let config = load(
+            "source: a.csv\ntarget: b.csv\noptions:\n  transform:\n    type: file\n    value: t.lua\n",
+        )
+        .unwrap();
+        assert_eq!(config.transform, TransformConfig::File("t.lua".to_string()));
+    }
+
+    #[test]
+    fn test_mistakes_are_errors() {
+        // The typo in the old examples/postgres_config.yaml
+        let e =
+            load("source: a.csv\ntarget: b.csv\noptions:\n  transform_fil: t.lua\n").unwrap_err();
+        assert!(e.contains("unknown field `transform_fil`"), "{}", e);
+
+        let e = load("source: a.csv\ntarget: b.csv\nbatchsize: 5\n").unwrap_err();
+        assert!(e.contains("unknown field `batchsize`"), "{}", e);
+
+        let e = load("source:\n  url: a.csv\ntarget: b.csv\n").unwrap_err();
+        assert!(e.contains("unknown field `url`"), "{}", e);
+
+        let e = load("source: a.csv\ntarget: b.csv\ntruncate: true\noptions:\n  truncate: false\n")
+            .unwrap_err();
+        assert!(e.contains("'truncate' is set both"), "{}", e);
+
+        let e = load("source: a.csv\ntarget: b.csv\ntransform: a=1\ntransform_file: t.lua\n")
+            .unwrap_err();
+        assert!(
+            e.contains("either 'transform' or 'transform_file'"),
+            "{}",
+            e
+        );
+
+        let e = load("version: 2\nsource: a.csv\ntarget: b.csv\n").unwrap_err();
+        assert!(e.contains("unsupported version 2"), "{}", e);
+
+        assert!(load("target: b.csv\n")
+            .unwrap_err()
+            .contains("missing field `source`"));
     }
 
     #[test]
     fn test_env_var_substitution() {
-        // Set test environment variable
-        std::env::set_var("TEST_VAR", "test_value");
-        std::env::set_var("DB_PASSWORD", "secret123");
+        std::env::set_var("TINYETL_YAML_TEST_PASS", "secret123");
+        std::env::remove_var("TINYETL_YAML_TEST_UNSET");
+        std::env::set_var("TINYETL_YAML_TEST_EMPTY", "");
 
-        // Test simple substitution
-        let result = YamlConfig::substitute_env_vars("${TEST_VAR}").unwrap();
-        assert_eq!(result, "test_value");
+        let sub = |s: &str| substitute_env_vars(s).map_err(|e| e.to_string());
+        assert_eq!(
+            sub("mysql://user:${TINYETL_YAML_TEST_PASS}@localhost/db").unwrap(),
+            "mysql://user:secret123@localhost/db"
+        );
+        assert_eq!(
+            sub("${TINYETL_YAML_TEST_UNSET:-out.csv}").unwrap(),
+            "out.csv"
+        );
+        assert_eq!(sub("${TINYETL_YAML_TEST_PASS:-x}").unwrap(), "secret123");
+        assert_eq!(sub("${TINYETL_YAML_TEST_EMPTY:-dflt}").unwrap(), "dflt");
+        assert_eq!(sub("a${TINYETL_YAML_TEST_EMPTY}b").unwrap(), "ab");
+        assert_eq!(
+            sub("no vars, $5 and ${ not one").unwrap(),
+            "no vars, $5 and ${ not one"
+        );
 
-        // Test substitution within a string
-        let result =
-            YamlConfig::substitute_env_vars("mysql://user:${DB_PASSWORD}@localhost/db").unwrap();
-        assert_eq!(result, "mysql://user:secret123@localhost/db");
+        let e = sub("${TINYETL_YAML_TEST_UNSET}").unwrap_err();
+        assert!(e.contains("'TINYETL_YAML_TEST_UNSET' not found"), "{}", e);
 
-        // Test multiple substitutions
-        let result = YamlConfig::substitute_env_vars("${TEST_VAR}_${DB_PASSWORD}").unwrap();
-        assert_eq!(result, "test_value_secret123");
-
-        // Test no substitution needed
-        let result = YamlConfig::substitute_env_vars("no_env_vars_here").unwrap();
-        assert_eq!(result, "no_env_vars_here");
-
-        // Clean up
-        std::env::remove_var("TEST_VAR");
-        std::env::remove_var("DB_PASSWORD");
+        // In endpoint options, too
+        let config = load(
+            "source: a.csv\ntarget:\n  uri: s3://b/x.csv\n  options:\n    region: ${TINYETL_YAML_TEST_UNSET:-eu-west-1}\n",
+        )
+        .unwrap();
+        assert_eq!(config.target_options["region"], "eu-west-1");
     }
 
     #[test]
-    fn test_env_var_substitution_missing_var() {
-        let result = YamlConfig::substitute_env_vars("${MISSING_VAR}");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Environment variable 'MISSING_VAR' not found"));
-    }
-
-    // Round-trip tests: CLI args → generate-config → YAML → run config → verify results match direct CLI
-
-    #[test]
-    fn test_round_trip_basic_config() {
-        // Step 1: Create a Config as if it came from CLI args
-        let original_config = Config {
+    fn test_generated_config_is_minimal_and_round_trips() {
+        let config = Config {
             source: "input.csv".to_string(),
             target: "output.json".to_string(),
-            infer_schema: true,
-            schema_file: None,
-            batch_size: 5000,
-            preview: None,
-            dry_run: false,
-            log_level: LogLevel::Info,
-            skip_existing: false,
-            truncate: false,
-            transform: TransformConfig::None,
-            source_type: None,
-            source_secret_id: None,
-            dest_secret_id: None,
-            source_options: HashMap::new(),
-            target_options: HashMap::new(),
-        };
-
-        // Step 2: Convert to YamlConfig (simulate generate-config)
-        let yaml_config = YamlConfig::from_config(original_config.clone());
-
-        // Step 3: Serialize to YAML string
-        let yaml_string = yaml_config.to_yaml_string().unwrap();
-
-        // Verify YAML contains expected content
-        assert!(yaml_string.contains("version: 1"));
-        assert!(yaml_string.contains("uri: input.csv"));
-        assert!(yaml_string.contains("uri: output.json"));
-        assert!(yaml_string.contains("batch_size: 5000"));
-
-        // Step 4: Deserialize from YAML string (simulate run config)
-        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
-
-        // Step 5: Convert back to Config
-        let restored_config = deserialized_yaml.into_config().unwrap();
-
-        // Step 6: Verify all fields match the original
-        assert_eq!(restored_config.source, original_config.source);
-        assert_eq!(restored_config.target, original_config.target);
-        assert_eq!(restored_config.infer_schema, original_config.infer_schema);
-        assert_eq!(restored_config.schema_file, original_config.schema_file);
-        assert_eq!(restored_config.batch_size, original_config.batch_size);
-        assert_eq!(restored_config.preview, original_config.preview);
-        assert_eq!(restored_config.dry_run, original_config.dry_run);
-        assert_eq!(restored_config.log_level, original_config.log_level);
-        assert_eq!(restored_config.skip_existing, original_config.skip_existing);
-        assert_eq!(restored_config.truncate, original_config.truncate);
-        assert_eq!(restored_config.transform, original_config.transform);
-        assert_eq!(restored_config.source_type, original_config.source_type);
-        // Note: source_secret_id and dest_secret_id are not preserved through YAML (by design)
-    }
-
-    #[test]
-    fn test_round_trip_config_with_all_options() {
-        // Step 1: Create a Config with all options set
-        let original_config = Config {
-            source: "https://example.com/data.csv".to_string(),
-            target: "sqlite://output.db#my_table".to_string(),
-            infer_schema: false,
-            schema_file: Some("schema.yaml".to_string()),
-            batch_size: 2000,
-            preview: Some(10),
-            dry_run: true,
-            log_level: LogLevel::Warn,
-            skip_existing: true,
-            truncate: true,
-            transform: TransformConfig::Inline("result = row.value * 2".to_string()),
-            source_type: Some("csv".to_string()),
-            source_secret_id: None, // Not preserved through YAML
-            dest_secret_id: None,   // Not preserved through YAML
-            source_options: HashMap::new(),
-            target_options: HashMap::new(),
-        };
-
-        // Step 2: Convert to YamlConfig
-        let yaml_config = YamlConfig::from_config(original_config.clone());
-
-        // Step 3: Serialize to YAML string
-        let yaml_string = yaml_config.to_yaml_string().unwrap();
-
-        // Verify specific options in YAML
-        assert!(yaml_string.contains("infer_schema: false"));
-        assert!(yaml_string.contains("schema_file: schema.yaml"));
-        assert!(yaml_string.contains("preview: 10"));
-        assert!(yaml_string.contains("dry_run: true"));
-        assert!(yaml_string.contains("log_level: warn"));
-        assert!(yaml_string.contains("skip_existing: true"));
-        assert!(yaml_string.contains("truncate: true"));
-        assert!(yaml_string.contains("source_type: csv"));
-        assert!(yaml_string.contains("type: inline"));
-
-        // Step 4: Deserialize from YAML string
-        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
-
-        // Step 5: Convert back to Config
-        let restored_config = deserialized_yaml.into_config().unwrap();
-
-        // Step 6: Verify all fields match
-        assert_eq!(restored_config.source, original_config.source);
-        assert_eq!(restored_config.target, original_config.target);
-        assert_eq!(restored_config.infer_schema, original_config.infer_schema);
-        assert_eq!(restored_config.schema_file, original_config.schema_file);
-        assert_eq!(restored_config.batch_size, original_config.batch_size);
-        assert_eq!(restored_config.preview, original_config.preview);
-        assert_eq!(restored_config.dry_run, original_config.dry_run);
-        assert_eq!(restored_config.log_level, original_config.log_level);
-        assert_eq!(restored_config.skip_existing, original_config.skip_existing);
-        assert_eq!(restored_config.truncate, original_config.truncate);
-        assert_eq!(restored_config.transform, original_config.transform);
-        assert_eq!(restored_config.source_type, original_config.source_type);
-    }
-
-    #[test]
-    fn test_round_trip_with_transform_file() {
-        // Test with File transform
-        let original_config = Config {
-            source: "data.csv".to_string(),
-            target: "output.db#table".to_string(),
-            infer_schema: true,
-            schema_file: None,
-            batch_size: 10000,
-            preview: None,
-            dry_run: false,
-            log_level: LogLevel::Info,
-            skip_existing: false,
-            truncate: false,
-            transform: TransformConfig::File("transform.lua".to_string()),
-            source_type: None,
-            source_secret_id: None,
-            dest_secret_id: None,
-            source_options: HashMap::new(),
-            target_options: HashMap::new(),
-        };
-
-        let yaml_config = YamlConfig::from_config(original_config.clone());
-        let yaml_string = yaml_config.to_yaml_string().unwrap();
-
-        assert!(yaml_string.contains("type: file"));
-        assert!(yaml_string.contains("value: transform.lua"));
-
-        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
-        let restored_config = deserialized_yaml.into_config().unwrap();
-
-        assert_eq!(restored_config.transform, original_config.transform);
-    }
-
-    #[test]
-    fn test_round_trip_with_transform_script() {
-        // Test with Script transform (multi-line Lua)
-        let script = r#"-- Calculate values
-total = row.price * row.quantity
-discount = total * 0.1"#;
-
-        let original_config = Config {
-            source: "sales.csv".to_string(),
-            target: "processed.json".to_string(),
-            infer_schema: true,
-            schema_file: None,
-            batch_size: 10000,
-            preview: None,
-            dry_run: false,
-            log_level: LogLevel::Info,
-            skip_existing: false,
-            truncate: false,
-            transform: TransformConfig::Script(script.to_string()),
-            source_type: None,
-            source_secret_id: None,
-            dest_secret_id: None,
-            source_options: HashMap::new(),
-            target_options: HashMap::new(),
-        };
-
-        let yaml_config = YamlConfig::from_config(original_config.clone());
-        let yaml_string = yaml_config.to_yaml_string().unwrap();
-
-        assert!(yaml_string.contains("type: script"));
-        assert!(yaml_string.contains("Calculate values"));
-
-        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
-        let restored_config = deserialized_yaml.into_config().unwrap();
-
-        assert_eq!(restored_config.transform, original_config.transform);
-    }
-
-    #[test]
-    fn test_round_trip_with_default_values() {
-        // Test that default values are properly restored
-        let original_config = Config {
-            source: "in.csv".to_string(),
-            target: "out.json".to_string(),
+            batch_size: DEFAULT_BATCH_SIZE,
             ..Config::default()
         };
+        let yaml = YamlConfig::from_config(config).to_yaml_string().unwrap();
+        assert_eq!(yaml, "source: input.csv\ntarget: output.json\n");
 
-        let yaml_config = YamlConfig::from_config(original_config.clone());
-        let yaml_string = yaml_config.to_yaml_string().unwrap();
-        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
-        let restored_config = deserialized_yaml.into_config().unwrap();
-
-        // Verify defaults are preserved
-        assert!(restored_config.infer_schema);
-        assert_eq!(restored_config.batch_size, Config::default().batch_size);
-        assert!(!restored_config.dry_run);
-        assert_eq!(restored_config.log_level, LogLevel::Info);
-        assert!(!restored_config.skip_existing);
-        assert!(!restored_config.truncate);
-        assert_eq!(restored_config.transform, TransformConfig::None);
-    }
-
-    #[test]
-    fn test_round_trip_multiple_cycles() {
-        // Test that multiple round-trips don't degrade the data
-        let mut config = Config {
-            source: "input.csv".to_string(),
-            target: "output.db#data".to_string(),
-            infer_schema: false,
-            schema_file: Some("my_schema.yaml".to_string()),
-            batch_size: 7500,
-            preview: Some(25),
-            dry_run: false,
-            log_level: LogLevel::Error,
-            skip_existing: true,
-            truncate: false,
-            transform: TransformConfig::Inline("x = row.a + row.b".to_string()),
-            source_type: Some("json".to_string()),
-            source_secret_id: None,
-            dest_secret_id: None,
-            source_options: HashMap::new(),
-            target_options: HashMap::new(),
+        let config = Config {
+            source: "https://x/a.csv".to_string(),
+            target: "out.db".to_string(),
+            batch_size: 500,
+            truncate: true,
+            log_level: LogLevel::Warn,
+            transform: TransformConfig::Inline("a=1; b=a+1".to_string()),
+            source_options: HashMap::from([("auth.bearer".to_string(), "t".to_string())]),
+            ..Config::default()
         };
-
-        // Perform 3 round-trips
-        for _ in 0..3 {
-            let yaml_config = YamlConfig::from_config(config.clone());
-            let yaml_string = yaml_config.to_yaml_string().unwrap();
-            let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
-            config = deserialized_yaml.into_config().unwrap();
-        }
-
-        // Verify data is still intact after multiple cycles
-        assert_eq!(config.source, "input.csv");
-        assert_eq!(config.target, "output.db#data");
-        assert!(!config.infer_schema);
-        assert_eq!(config.schema_file, Some("my_schema.yaml".to_string()));
-        assert_eq!(config.batch_size, 7500);
-        assert_eq!(config.preview, Some(25));
-        assert_eq!(config.log_level, LogLevel::Error);
-        assert!(config.skip_existing);
+        let yaml = YamlConfig::from_config(config.clone())
+            .to_yaml_string()
+            .unwrap();
         assert_eq!(
-            config.transform,
-            TransformConfig::Inline("x = row.a + row.b".to_string())
+            yaml,
+            "source:\n  uri: https://x/a.csv\n  options:\n    auth.bearer: t\ntarget: out.db\nbatch_size: 500\nlog_level: warn\ntruncate: true\ntransform: a=1; b=a+1\n"
         );
-        assert_eq!(config.source_type, Some("json".to_string()));
-    }
+        let restored = load(&yaml).unwrap();
+        assert_eq!(restored.source_options, config.source_options);
+        assert_eq!(restored.batch_size, 500);
+        assert!(restored.truncate);
 
-    #[test]
-    fn test_round_trip_preserves_special_characters() {
-        // Test that special characters in URIs and other fields are preserved
-        let original_config = Config {
-            source: "postgresql://user:p@ss!w0rd@localhost:5432/db?sslmode=require".to_string(),
-            target: "mysql://admin:s3cr3t#123@remote:3306/database".to_string(),
-            infer_schema: true,
-            schema_file: Some("path/to/my schema file.yaml".to_string()),
-            batch_size: 1000,
-            preview: None,
-            dry_run: false,
-            log_level: LogLevel::Info,
-            skip_existing: false,
-            truncate: false,
-            transform: TransformConfig::Script(
-                "name = row['first-name'] .. ' ' .. row['last-name']".to_string(),
-            ),
-            source_type: None,
-            source_secret_id: None,
-            dest_secret_id: None,
-            source_options: HashMap::new(),
-            target_options: HashMap::new(),
+        let config = Config {
+            source: "a.csv".to_string(),
+            target: "b.csv".to_string(),
+            batch_size: DEFAULT_BATCH_SIZE,
+            transform: TransformConfig::File("t.lua".to_string()),
+            ..Config::default()
         };
-
-        let yaml_config = YamlConfig::from_config(original_config.clone());
-        let yaml_string = yaml_config.to_yaml_string().unwrap();
-        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
-        let restored_config = deserialized_yaml.into_config().unwrap();
-
-        assert_eq!(restored_config.source, original_config.source);
-        assert_eq!(restored_config.target, original_config.target);
-        assert_eq!(restored_config.schema_file, original_config.schema_file);
-        assert_eq!(restored_config.transform, original_config.transform);
-    }
-
-    #[test]
-    fn test_round_trip_none_transform_handling() {
-        // Verify that TransformConfig::None properly round-trips
-        let original_config = Config {
-            source: "in.csv".to_string(),
-            target: "out.json".to_string(),
-            infer_schema: true,
-            schema_file: None,
-            batch_size: 10000,
-            preview: None,
-            dry_run: false,
-            log_level: LogLevel::Info,
-            skip_existing: false,
-            truncate: false,
-            transform: TransformConfig::None,
-            source_type: None,
-            source_secret_id: None,
-            dest_secret_id: None,
-            source_options: HashMap::new(),
-            target_options: HashMap::new(),
-        };
-
-        let yaml_config = YamlConfig::from_config(original_config.clone());
-        let yaml_string = yaml_config.to_yaml_string().unwrap();
-
-        // Deserialize and convert back
-        let deserialized_yaml: YamlConfig = serde_yaml::from_str(&yaml_string).unwrap();
-        let restored_config = deserialized_yaml.into_config().unwrap();
-
-        // Should restore as TransformConfig::None
-        assert_eq!(restored_config.transform, TransformConfig::None);
-
-        // Verify all other fields match as well
-        assert_eq!(restored_config.source, original_config.source);
-        assert_eq!(restored_config.target, original_config.target);
-        assert_eq!(restored_config.batch_size, original_config.batch_size);
+        let yaml = YamlConfig::from_config(config).to_yaml_string().unwrap();
+        assert!(yaml.ends_with("transform_file: t.lua\n"), "{}", yaml);
     }
 }

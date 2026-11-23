@@ -19,7 +19,7 @@ cd ../../test_env
 docker-compose up -d http-server
 
 # Verify it's running
-curl http://localhost:8080/health
+curl http://localhost:8680/health
 ```
 
 ## Protocol Options
@@ -41,13 +41,11 @@ TinyETL supports the following options for HTTP/HTTPS sources:
 Downloads from a public endpoint that requires no authentication.
 
 ```yaml
-version: 1
 source:
-  uri: "http://localhost:8080/public/data.csv"
+  uri: "http://localhost:8680/public/data.csv"
   options:
     header.User-Agent: "TinyETL/0.9.0"
-target:
-  uri: "output_public.json"
+target: output_public.json
 ```
 
 ### 2. Basic Authentication
@@ -56,14 +54,12 @@ target:
 Downloads using HTTP Basic Authentication.
 
 ```yaml
-version: 1
 source:
-  uri: "http://localhost:8080/basic-auth/users.csv"
+  uri: "http://localhost:8680/basic-auth/users.csv"
   options:
     auth.basic.username: "testuser"
     auth.basic.password: "testpass"
-target:
-  uri: "output_basic_auth.json"
+target: output_basic_auth.json
 ```
 
 ### 3. Bearer Token Authentication
@@ -72,13 +68,11 @@ target:
 Downloads using Bearer Token authentication.
 
 ```yaml
-version: 1
 source:
-  uri: "http://localhost:8080/bearer-auth/products.csv"
+  uri: "http://localhost:8680/bearer-auth/products.csv"
   options:
     auth.bearer: "test-bearer-token-12345"
-target:
-  uri: "output_bearer_auth.json"
+target: output_bearer_auth.json
 ```
 
 ### 4. Custom Headers Validation
@@ -87,14 +81,12 @@ target:
 Downloads from an endpoint that validates specific headers.
 
 ```yaml
-version: 1
 source:
-  uri: "http://localhost:8080/custom-headers/data.csv"
+  uri: "http://localhost:8680/custom-headers/data.csv"
   options:
     header.X-API-Version: "v2"
     header.User-Agent: "TinyETL/0.9.0"
-target:
-  uri: "output_custom_headers.json"
+target: output_custom_headers.json
 ```
 
 ## Running the Example
@@ -202,10 +194,10 @@ docker-compose logs http-server
 ### Authentication Failures
 ```bash
 # Test endpoints manually
-curl http://localhost:8080/health
-curl -u testuser:testpass http://localhost:8080/basic-auth/users.csv
+curl http://localhost:8680/health
+curl -u testuser:testpass http://localhost:8680/basic-auth/users.csv
 curl -H "Authorization: Bearer test-bearer-token-12345" \
-     http://localhost:8080/bearer-auth/products.csv
+     http://localhost:8680/bearer-auth/products.csv
 ```
 
 ### Clean Up
@@ -217,5 +209,5 @@ rm output_*.json
 
 - HTTP targets (uploading) are not currently supported
 - File downloads are cached temporarily during processing
-- The test server runs on `localhost:8080`
+- The test server runs on `localhost:8680`
 - All test credentials are in plain text (for testing only)

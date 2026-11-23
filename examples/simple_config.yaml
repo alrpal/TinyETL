@@ -1,13 +1,6 @@
-# Simple CSV to JSON transformation example
-version: 1
+# Simple CSV to JSON example; run from the repository root:
+#   tinyetl run examples/simple_config.yaml
 
-source:
-  uri: "examples/01_basic_csv_to_json/input.csv"
-
-target:
-  uri: "examples/01_basic_csv_to_json/output_from_config.json"
-
-options:
-  batch_size: 1000
-  infer_schema: true
-  preview: 5
+source: examples/01_basic_csv_to_json/input.csv
+target: examples/01_basic_csv_to_json/output_from_config.json
+preview: 5

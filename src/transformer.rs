@@ -27,6 +27,82 @@ pub enum TransformConfig {
     None,
 }
 
+/// Split assignments on newlines and on `;` outside string literals, dropping blank lines
+/// and `--` comment lines
+fn split_assignments(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    for line in text.lines() {
+        let mut start = 0;
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for (i, c) in line.char_indices() {
+            match quote {
+                Some(_) if escaped => escaped = false,
+                Some(_) if c == '\\' => escaped = true,
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == '\'' || c == '"' => quote = Some(c),
+                None if c == ';' => {
+                    parts.push(&line[start..i]);
+                    start = i + 1;
+                }
+                None => {}
+            }
+        }
+        parts.push(&line[start..]);
+    }
+    parts
+        .into_iter()
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && !p.starts_with("--"))
+        .collect()
+}
+
+/// A Lua `transform(row)` function from `name = expression` assignments. Every input column
+/// is kept; each assignment adds or replaces a column, and later assignments can use earlier
+/// ones by name.
+fn build_assignments_function(text: &str) -> Result<String> {
+    let assignments = split_assignments(text);
+    if assignments.is_empty() {
+        return Err(TinyEtlError::Configuration(
+            "No valid expressions provided".to_string(),
+        ));
+    }
+
+    let mut lua_code = String::from(
+        "function transform(row)\n  local result = {}\n  for k, v in pairs(row) do\n    result[k] = v\n  end\n",
+    );
+    for assignment in assignments {
+        let Some((name, expression)) = assignment.split_once('=') else {
+            return Err(TinyEtlError::Configuration(format!(
+                "Invalid expression format (missing '='): {}",
+                assignment
+            )));
+        };
+        let name = name.trim();
+        let expression = expression.trim();
+        if name.is_empty()
+            || name.starts_with(|c: char| c.is_ascii_digit())
+            || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            return Err(TinyEtlError::Configuration(format!(
+                "Invalid column name: {}",
+                name
+            )));
+        }
+        if name == "row" || name == "result" {
+            // Names the generated function uses itself: set the column without a local
+            lua_code.push_str(&format!("  result['{name}'] = {expression}\n"));
+        } else {
+            lua_code.push_str(&format!(
+                "  local {name} = {expression}\n  result['{name}'] = {name}\n"
+            ));
+        }
+    }
+    lua_code.push_str("  return result\nend\n");
+    Ok(lua_code)
+}
+
 /// Row transformer using Lua scripting
 #[derive(Debug)]
 pub struct Transformer {
@@ -71,209 +147,44 @@ impl Transformer {
                 path
             )));
         }
-
-        let _lua_code = std::fs::read_to_string(path).map_err(|e| {
-            TinyEtlError::Configuration(format!("Failed to read transform file {}: {}", path, e))
-        })?;
         let lua_code = std::fs::read_to_string(path).map_err(|e| {
             TinyEtlError::Configuration(format!("Failed to read transform file {}: {}", path, e))
         })?;
-
-        self.lua.load(&lua_code).exec().map_err(|e| {
-            TinyEtlError::Configuration(format!("Failed to execute Lua file {}: {}", path, e))
-        })?;
-        self.lua.load(&lua_code).exec().map_err(|e| {
-            TinyEtlError::Configuration(format!("Failed to execute Lua file {}: {}", path, e))
-        })?;
-
-        let globals = self.lua.globals();
-        let _transform_fn: Function = globals.get("transform").map_err(|_| {
+        self.lua
+            .load(&lua_code)
+            .set_name(format!("@{}", path))
+            .exec()
+            .map_err(|e| {
+                TinyEtlError::Configuration(format!("Failed to execute Lua file {}: {}", path, e))
+            })?;
+        let _transform_fn: Function = self.lua.globals().get("transform").map_err(|_| {
             TinyEtlError::Configuration("Lua file must contain a 'transform' function".to_string())
         })?;
-        let _transform_fn: Function = globals.get("transform").map_err(|_| {
-            TinyEtlError::Configuration("Lua file must contain a 'transform' function".to_string())
-        })?;
-
         self.has_transform = true;
-
         debug!("Loaded transform function from file: {}", path);
         Ok(())
     }
 
-    /// Load transformation from inline expressions
+    /// Load transformation from inline expressions (`--transform "a=...; b=..."`)
     fn load_from_expressions(&mut self, expressions: &str) -> Result<()> {
-        let lua_code = self.build_transform_function(expressions)?;
-
-        self.lua.load(&lua_code).exec().map_err(|e| {
-            TinyEtlError::Configuration(format!("Failed to execute inline expressions: {}", e))
-        })?;
-
-        self.lua.load(&lua_code).exec().map_err(|e| {
-            TinyEtlError::Configuration(format!("Failed to execute inline expressions: {}", e))
-        })?;
-
-        let globals = self.lua.globals();
-        let _transform_fn: Function = globals.get("transform").map_err(|_| {
-            TinyEtlError::Configuration(
-                "Failed to create transform function from expressions".to_string(),
-            )
-        })?;
-        let _transform_fn: Function = globals.get("transform").map_err(|_| {
-            TinyEtlError::Configuration(
-                "Failed to create transform function from expressions".to_string(),
-            )
-        })?;
-
-        self.has_transform = true;
-
-        debug!(
-            "Created transform function from expressions: {}",
-            expressions
-        );
-
-        debug!(
-            "Created transform function from expressions: {}",
-            expressions
-        );
-        Ok(())
+        self.load_assignments(expressions)
     }
 
-    /// Load transformation from a multi-line script (for YAML configs)
+    /// Load transformation from a multi-line script (YAML `transform: |`)
     fn load_from_script(&mut self, script: &str) -> Result<()> {
-        let lua_code = self.build_script_function(script)?;
+        self.load_assignments(script)
+    }
 
+    fn load_assignments(&mut self, assignments: &str) -> Result<()> {
+        let lua_code = build_assignments_function(assignments)?;
         self.lua
             .load(&lua_code)
+            .set_name("=transform")
             .exec()
-            .map_err(|e| TinyEtlError::Configuration(format!("Failed to execute script: {}", e)))?;
-
-        let globals = self.lua.globals();
-        let _transform_fn: Function = globals.get("transform").map_err(|_| {
-            TinyEtlError::Configuration(
-                "Failed to create transform function from script".to_string(),
-            )
-        })?;
-        let _transform_fn: Function = globals.get("transform").map_err(|_| {
-            TinyEtlError::Configuration(
-                "Failed to create transform function from script".to_string(),
-            )
-        })?;
-
+            .map_err(|e| TinyEtlError::Configuration(format!("Invalid transform: {}", e)))?;
         self.has_transform = true;
-
-        debug!("Created transform function from script: {}", script);
+        debug!("Generated Lua transform:\n{}", lua_code);
         Ok(())
-    }
-
-    /// Build a Lua transform function from semicolon-separated expressions
-    fn build_transform_function(&self, expressions: &str) -> Result<String> {
-        let assignments: Vec<&str> = expressions
-            .split(';')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if assignments.is_empty() {
-            return Err(TinyEtlError::Configuration(
-                "No valid expressions provided".to_string(),
-            ));
-        }
-
-        let mut lua_code = String::new();
-        lua_code.push_str("function transform(row)\n");
-        lua_code.push_str("  local result = {}\n");
-        lua_code.push_str("  -- Copy all existing columns first\n");
-        lua_code.push_str("  for k, v in pairs(row) do\n");
-        lua_code.push_str("    result[k] = v\n");
-        lua_code.push_str("  end\n");
-        lua_code.push_str("  -- Apply transformations (can override existing columns)\n");
-
-        for assignment in assignments {
-            if let Some(equals_pos) = assignment.find('=') {
-                let col_name = assignment[..equals_pos].trim();
-                let expression = assignment[equals_pos + 1..].trim();
-
-                // Validate column name
-                if col_name.is_empty() || !col_name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                {
-                    return Err(TinyEtlError::Configuration(format!(
-                        "Invalid column name: {}",
-                        col_name
-                    )));
-                }
-
-                lua_code.push_str(&format!("  result['{}'] = {}\n", col_name, expression));
-            } else {
-                return Err(TinyEtlError::Configuration(format!(
-                    "Invalid expression format (missing '='): {}",
-                    assignment
-                )));
-            }
-        }
-
-        lua_code.push_str("  return result\n");
-        lua_code.push_str("end\n");
-
-        debug!("Generated Lua code:\n{}", lua_code);
-        Ok(lua_code)
-    }
-
-    /// Build a Lua transform function from multi-line script assignments
-    fn build_script_function(&self, script: &str) -> Result<String> {
-        let lines: Vec<&str> = script
-            .lines()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && !s.starts_with("--")) // Skip empty lines and comments
-            .collect();
-
-        if lines.is_empty() {
-            return Err(TinyEtlError::Configuration(
-                "No valid assignments provided in script".to_string(),
-            ));
-        }
-
-        let mut lua_code = String::new();
-        lua_code.push_str("function transform(row)\n");
-        lua_code.push_str("  local result = {}\n");
-        lua_code.push_str("  -- Copy all existing columns first\n");
-        lua_code.push_str("  for k, v in pairs(row) do\n");
-        lua_code.push_str("    result[k] = v\n");
-        lua_code.push_str("  end\n");
-        lua_code.push_str("  -- Apply transformations from script\n");
-
-        // Process each line as either a local variable or result assignment
-        for line in lines {
-            if let Some(equals_pos) = line.find('=') {
-                let col_name = line[..equals_pos].trim();
-                let expression = line[equals_pos + 1..].trim();
-
-                // Validate variable/column name
-                if col_name.is_empty() || !col_name.chars().all(|c| c.is_alphanumeric() || c == '_')
-                {
-                    return Err(TinyEtlError::Configuration(format!(
-                        "Invalid variable/column name: {}",
-                        col_name
-                    )));
-                }
-
-                // Check if this should be a local variable or result column
-                // Local variables are those used in subsequent expressions but not meant as output
-                // For now, we'll treat everything as a local variable first, then add to result
-                lua_code.push_str(&format!("  local {} = {}\n", col_name, expression));
-                lua_code.push_str(&format!("  result['{}'] = {}\n", col_name, col_name));
-            } else {
-                return Err(TinyEtlError::Configuration(format!(
-                    "Invalid line format (missing '='): {}",
-                    line
-                )));
-            }
-        }
-
-        lua_code.push_str("  return result\n");
-        lua_code.push_str("end\n");
-
-        debug!("Generated Lua code from script:\n{}", lua_code);
-        Ok(lua_code)
     }
 
     /// Check if this transformer has any transformation logic
@@ -507,6 +418,47 @@ impl Transformer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_split_assignments() {
+        assert_eq!(
+            split_assignments("a = 1; b = 'x;y'\n-- comment\n\n  c = \"q\\\";\" .. b ;"),
+            vec!["a = 1", "b = 'x;y'", "c = \"q\\\";\" .. b"]
+        );
+    }
+
+    #[test]
+    fn test_assignments_can_use_earlier_ones() {
+        // The README example: profit uses total
+        for text in [
+            "total=row.quantity * row.price; profit=total * 0.3",
+            "total = row.quantity * row.price\nprofit = total * 0.3",
+        ] {
+            let transformer = Transformer::new(&TransformConfig::Inline(text.to_string())).unwrap();
+            let mut row = Row::new();
+            row.insert("quantity".to_string(), Value::Integer(2));
+            row.insert("price".to_string(), Value::Integer(5));
+            let out = transformer.transform_row(&row).unwrap().unwrap();
+            assert_eq!(out.get("total"), Some(&Value::Integer(10)));
+            assert_eq!(
+                out.get("profit"),
+                Some(&Value::Decimal(rust_decimal::Decimal::new(3, 0)))
+            );
+            assert_eq!(out.get("quantity"), Some(&Value::Integer(2)));
+        }
+    }
+
+    #[test]
+    fn test_column_named_row() {
+        let transformer = Transformer::new(&TransformConfig::Inline(
+            "row = row.x + 1; y = 2".to_string(),
+        ))
+        .unwrap();
+        let mut row = Row::new();
+        row.insert("x".to_string(), Value::Integer(1));
+        let out = transformer.transform_row(&row).unwrap().unwrap();
+        assert_eq!(out.get("row"), Some(&Value::Integer(2)));
+    }
     use crate::schema::{DataType, Value};
     use std::collections::HashMap;
 

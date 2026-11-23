@@ -1,7 +1,6 @@
 # Example: HTTP Source with Bearer Token Authentication
 # This example uses the TinyETL test HTTP server
 # Start the server with: docker-compose up -d http-server (from test_env/)
-version: 1
 
 source:
   uri: "http://localhost:8680/bearer-auth/products.csv"
@@ -9,13 +8,9 @@ source:
     # Custom headers
     header.User-Agent: "TinyETL/0.9.0"
     header.Accept: "text/csv"
-    
+
     # Bearer token authentication using environment variable
     auth.bearer: "${BEARER_TOKEN}"
 
-target:
-  uri: "output_bearer_auth.json"
-
-options:
-  batch_size: 100
-  log_level: info
+target: output_bearer_auth.json
+batch_size: 100

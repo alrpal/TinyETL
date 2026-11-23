@@ -1,7 +1,6 @@
 # Example: Public HTTP Source (No Authentication)
 # This example demonstrates downloading from a public endpoint
 # Start the server with: docker-compose up -d http-server (from test_env/)
-version: 1
 
 source:
   uri: "http://localhost:8680/public/data.csv"
@@ -9,9 +8,5 @@ source:
     # Optional custom headers even for public endpoints
     header.User-Agent: "TinyETL/0.9.0"
 
-target:
-  uri: "output_public.json"
-
-options:
-  batch_size: 100
-  log_level: info
+target: output_public.json
+batch_size: 100
