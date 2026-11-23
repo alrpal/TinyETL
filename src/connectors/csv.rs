@@ -22,6 +22,9 @@ fn is_tsv(path: &str) -> bool {
     path.ends_with(".tsv")
 }
 
+/// Endpoint options read by CSV sources and targets (see `crate::options`)
+pub const OPTIONS: &[&str] = &["delimiter"];
+
 /// The `delimiter` endpoint option: one ASCII character, or `tab` / `\t`
 fn delimiter_option(options: &HashMap<String, String>) -> Result<Option<u8>> {
     let Some(value) = options.get("delimiter") else {

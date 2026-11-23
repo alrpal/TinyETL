@@ -83,7 +83,8 @@ impl std::fmt::Debug for SnowflakeConfig {
     }
 }
 
-const OPTIONS: [&str; 6] = [
+/// Endpoint options read by Snowflake sources and targets (see `crate::options`)
+pub const OPTIONS: &[&str] = &[
     "private_key_path",
     "private_key_passphrase",
     "warehouse",

@@ -10,6 +10,14 @@ use tempfile::NamedTempFile;
 use tracing::info;
 use url::Url;
 
+/// Endpoint options read by HTTP sources (see `crate::options`)
+pub const OPTIONS: &[&str] = &[
+    "header.*",
+    "auth.basic.username",
+    "auth.basic.password",
+    "auth.bearer",
+];
+
 /// HTTP/HTTPS protocol for downloading files from web servers.
 /// Downloads files to temporary locations and then uses existing connectors.
 pub struct HttpProtocol;

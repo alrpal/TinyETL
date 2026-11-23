@@ -70,9 +70,6 @@ pub trait Target: Send + Sync {
     fn supports_append(&self) -> bool;
 }
 
-/// Endpoint options read by file connectors rather than by the protocol that fetches the file
-pub const FILE_FORMAT_OPTIONS: &[&str] = &["delimiter"];
-
 /// Factory function to create a source connector from a connection string
 /// For new protocol-based connections (snowflake://, etc.), use create_source_from_url instead
 pub fn create_source(connection_string: &str) -> Result<Box<dyn Source>> {
@@ -257,6 +254,12 @@ pub async fn create_source_from_url_with_type_and_options(
     source_type: Option<&str>,
     options: &std::collections::HashMap<String, String>,
 ) -> Result<Box<dyn Source>> {
+    crate::options::check(
+        crate::options::Role::Source,
+        connection_string,
+        source_type,
+        options,
+    )?;
     // Snowflake is a database, but unlike the others it takes endpoint options (key path, ...)
     if connection_string.starts_with("snowflake://") {
         return Ok(Box::new(snowflake::SnowflakeSource::new(
@@ -303,6 +306,12 @@ pub async fn create_target_from_url_with_options(
     connection_string: &str,
     options: &std::collections::HashMap<String, String>,
 ) -> Result<Box<dyn Target>> {
+    crate::options::check(
+        crate::options::Role::Target,
+        connection_string,
+        None,
+        options,
+    )?;
     if connection_string.starts_with("snowflake://") {
         return Ok(Box::new(snowflake::SnowflakeTarget::new(
             connection_string,

@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests for the transfer engine's contract with targets (when tables are created, truncated, appended to and finalized; value conversion; transforms; schema-file rejection; preview and dry run), and a shared database test that SQLite and DuckDB run against temp files (typed round trip, streaming reads, rollback of unfinished loads, deferred truncate)
 
 ### Changed
+- **Unknown endpoint options are an error** instead of being ignored, with a suggestion for a misspelled key: `--source-option auth.baerer=…` used to send the request without authentication. Each source and target accepts its protocol's and its file format's options (README, Endpoint Options); databases other than Snowflake take none
 - **Nested JSON objects and arrays stay JSON** (#3) instead of becoming strings: they load into `jsonb` in PostgreSQL (`JSON` in DuckDB, `VARIANT` in Snowflake) and stay nested when written to JSON. CSV, Parquet and other text targets get the same compact JSON text as before
 - Errors print as plain text (`Error: Can't read config file job.yaml: No such file or directory`) instead of Rust's debug form (`Error: Configuration("…")`, `Error: Os { code: 2, … }`), and the config-file and schema-file errors name the file. Failed transfers end with the same `Error:` line instead of a timestamped log entry
 

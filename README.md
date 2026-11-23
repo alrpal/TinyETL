@@ -324,6 +324,15 @@ tinyetl data.csv output.json  # No --source-type needed
 
 Some sources and targets take options: HTTP headers and authentication, S3 credentials, Snowflake keys, the CSV delimiter. Set them with `--source-option KEY=VALUE` / `--target-option KEY=VALUE` (repeat the flag for more), or under `options:` for the source or target in a YAML config. The keys are the same either way.
 
+| Endpoint | Options |
+|---|---|
+| CSV / TSV files (local, HTTP, SSH, S3, compressed) | `delimiter` |
+| HTTP / HTTPS sources | `header.<Name>`, `auth.basic.username`, `auth.basic.password`, `auth.bearer` |
+| S3 | `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`, `allow_http`, `path_style` |
+| Snowflake | `private_key_path`, `private_key_passphrase`, `warehouse`, `role`, `load_method`, `stage_file_rows` |
+
+An option the endpoint doesn't take is an error, so a misspelled key fails instead of being ignored. Other databases take no options; their settings go in the connection URL (for example PostgreSQL `?sslmode=require`).
+
 #### CSV Delimiters
 
 When reading a CSV file, TinyETL looks at its first lines and picks comma, tab, semicolon or pipe: the one that appears the same number of times on every line, outside quotes. Comma is the default when nothing fits. Files ending in `.tsv` are read and written tab-separated. Set the delimiter with the `delimiter` option, either a single character or `tab`. This works for local files, HTTP, SSH and S3:

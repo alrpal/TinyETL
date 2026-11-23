@@ -23,6 +23,18 @@ const SUPPORTED_FORMATS: [&str; 8] = [
     "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "avro", "xlsx",
 ];
 
+/// Endpoint options read by S3 sources and targets (see `crate::options`); the file format's
+/// options (CSV `delimiter`) are accepted too
+pub const OPTIONS: &[&str] = &[
+    "region",
+    "endpoint",
+    "access_key_id",
+    "secret_access_key",
+    "session_token",
+    "allow_http",
+    "path_style",
+];
+
 /// S3 protocol for reading and writing single objects (`s3://bucket/path/to/file.ext`).
 ///
 /// Objects are staged through a local temporary file: sources are downloaded and then read
@@ -121,10 +133,8 @@ impl S3Protocol {
         let mut allow_http: Option<bool> = None;
         let mut http_endpoint = false;
 
+        // Unknown keys were rejected by `crate::options::check`; the rest belong to the file format
         for (key, value) in options {
-            if connectors::FILE_FORMAT_OPTIONS.contains(&key.as_str()) {
-                continue; // for the file connector
-            }
             builder = match key.as_str() {
                 "region" => builder.with_region(value),
                 "endpoint" => {
@@ -141,13 +151,7 @@ impl S3Protocol {
                 "path_style" => {
                     builder.with_virtual_hosted_style_request(!Self::parse_bool(key, value)?)
                 }
-                other => {
-                    return Err(TinyEtlError::Configuration(format!(
-                        "Unknown S3 option '{}'. Supported options: region, endpoint, access_key_id, secret_access_key, session_token, allow_http, path_style, plus the file options {}",
-                        other,
-                        connectors::FILE_FORMAT_OPTIONS.join(", ")
-                    )))
-                }
+                _ => builder,
             };
         }
 
@@ -572,14 +576,6 @@ mod tests {
         options.insert("secret_access_key".to_string(), "secret".to_string());
         options.insert("path_style".to_string(), "true".to_string());
         assert!(S3Protocol::build_store("bucket", &options).is_ok());
-
-        let mut options = HashMap::new();
-        options.insert("regoin".to_string(), "eu-west-1".to_string());
-        let err = S3Protocol::build_store("bucket", &options)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(err.contains("Unknown S3 option 'regoin'"));
 
         let mut options = HashMap::new();
         options.insert("allow_http".to_string(), "maybe".to_string());
