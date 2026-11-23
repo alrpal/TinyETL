@@ -55,6 +55,9 @@ transform: |
 
 # Or a Lua file with a transform(row) function, which can also drop rows:
 # transform_file: transform.lua
+
+# Or SQL over all the source rows (a table named source), run in DuckDB:
+# sql: SELECT department, COUNT(*) AS people FROM source GROUP BY department
 "#;
 
 /// A YAML job file
@@ -91,6 +94,9 @@ pub struct YamlConfig {
     /// A Lua file with a `transform(row)` function
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform_file: Option<String>,
+    /// SQL over all source rows, run in DuckDB (a table named `source`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
     /// Accepted for older files; has no effect
     #[serde(default, skip_serializing)]
     pub skip_existing: Option<bool>,
@@ -175,6 +181,7 @@ impl YamlConfig {
             source_query: config.source_query,
             transform,
             transform_file,
+            sql: config.sql,
             skip_existing: None,
             options: None,
         }
@@ -217,6 +224,11 @@ impl YamlConfig {
             (None, Some(path)) => TransformConfig::File(path),
             (None, None) => TransformConfig::None,
         };
+        if self.sql.is_some() && transform != TransformConfig::None {
+            return Err(
+                "set either 'sql' or a Lua 'transform' / 'transform_file', not both".into(),
+            );
+        }
         let transform = match transform {
             TransformConfig::File(path) => TransformConfig::File(substitute_env_vars(&path)?),
             TransformConfig::Script(script) => {
@@ -238,6 +250,7 @@ impl YamlConfig {
             skip_existing: skip_existing.unwrap_or(false),
             truncate: truncate.unwrap_or(false),
             transform,
+            sql: self.sql.map(|q| substitute_env_vars(&q)).transpose()?,
             source_type: source_type.map(|t| substitute_env_vars(&t)).transpose()?,
             source_query: self
                 .source_query

@@ -8,8 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **SQL transforms** (#2): `--sql "SELECT … FROM source"` (YAML `sql:`) runs DuckDB SQL over all the source rows, as a table named `source`: filters, aggregates, joins, window functions, `QUALIFY`, JSON functions. The rows are loaded into a temporary DuckDB database first, so the query sees the whole dataset and memory stays bounded (DuckDB spills to disk); the temp directory needs room for a copy of the data. A job uses SQL or Lua, not both
 - **Source queries**: `--source-query "SELECT …"` (YAML `source_query`) reads the result of a SQL query instead of a whole table, from PostgreSQL, MySQL, SQL Server, SQLite, DuckDB, ODBC and Snowflake. The query runs on the source database as written, including `WITH` and `ORDER BY`; SQL Server, DuckDB, ODBC and Snowflake take the column types from the database's description of the result
-- **Examples 25, 26 and 27**, which check source queries on every database (27), delimited and compressed files (#21, #12) and JSON documents (#16, #3, #13), including the CrateDB and GH Archive files from those issues when the network is available
+- **Examples 25 to 28**, which check SQL transforms (28), source queries on every database (27), delimited and compressed files (#21, #12) and JSON documents (#16, #3, #13), including the CrateDB and GH Archive files from those issues when the network is available
 - **Simpler YAML job files.** `source:` and `target:` can be plain strings, `version:` is optional, and every setting is a top-level key with the name of its command-line flag (`batch_size`, `truncate`, `transform`, `transform_file`, ...). `transform: |` takes Lua assignments directly. `${VAR:-default}` gives an environment variable a default. Job files in the older layout (`uri:`, settings under `options:`, `transform: { type, value }`) still load. `generate-config` prints only the settings that differ from the defaults, in the new layout
 - **Tab, semicolon and pipe delimited files** (#21). CSV sources detect the delimiter from the first lines (comma, tab, semicolon or pipe), `.tsv` files are read and written tab-separated, and the `delimiter` option sets it explicitly for sources and targets, including over HTTP, SSH and S3
 - **Gzip and Zstandard compressed files** (#12). Add `.gz` or `.zst` to any file format (`data.csv.gz`, `events.jsonl.gz`, `trips.parquet.zst`): sources are decompressed to a temporary file with flat memory, targets are compressed when the transfer finishes. Works locally and over HTTP, SSH and S3. Multi-member gzip files (`cat a.gz b.gz`) are read whole
@@ -19,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests for the transfer engine's contract with targets (when tables are created, truncated, appended to and finalized; value conversion; transforms; schema-file rejection; preview and dry run), and a shared database test that SQLite and DuckDB run against temp files (typed round trip, streaming reads, rollback of unfinished loads, deferred truncate)
 
 ### Changed
+- **DuckDB targets create decimal columns as `DECIMAL(38,10)`** instead of `DOUBLE`, so decimals are stored exactly (sums of money no longer pick up float noise). Values read back from such columns drop the trailing zeros. Existing `DOUBLE` columns keep working
 - **`--skip-existing` is hidden from `--help`** and the README, since it has never done anything. It's still accepted, so existing commands keep working
 - **Unknown keys in YAML job files are an error** (with the line and the valid keys) instead of being ignored. A misspelled `batchsize:` or `transform_file:` placed where it isn't read used to run the job without it
 - **Unknown endpoint options are an error** instead of being ignored, with a suggestion for a misspelled key: `--source-option auth.baerer=…` used to send the request without authentication. Each source and target accepts its protocol's and its file format's options (README, Endpoint Options); databases other than Snowflake take none
@@ -30,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Example `16_csv_to_mssql_odbc`, which needed Microsoft's ODBC driver installed locally. `test_env/odbc/run.sh` covers SQL Server through ODBC (Driver 18) in Docker, along with PostgreSQL, MySQL and SQLite
 
 ### Fixed
+- **DuckDB sources read lists, structs, maps and unions as NULL**; they're now JSON values. `INTERVAL` columns were typed as integers and `TIME` and `INTERVAL` values read as NULL; they're now text
 - **ODBC logins failing with "Access denied" now and then** with MariaDB Connector/ODBC when the password came last in the connection string: the driver read past the end of the string. TinyETL now ends the connection string with `;`
 - **Inline transforms can use earlier assignments**: `--transform "total=row.qty * row.price; profit=total * 0.3"` (the README's own example) failed with "attempt to perform arithmetic on a nil value (global 'total')". Inline and YAML transforms now work the same way, and `;` inside a quoted string no longer splits an assignment
 - **Lua transforms ran twice when loaded**, so top-level code in a `--transform-file` ran twice

@@ -7,6 +7,7 @@ pub mod options;
 pub mod protocols;
 pub mod schema;
 pub mod secrets;
+pub mod sql_transform;
 pub mod transfer;
 pub mod transformer;
 pub mod yaml_config;

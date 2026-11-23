@@ -58,6 +58,10 @@ pub struct Cli {
     #[arg(long, value_name = "EXPRESSIONS")]
     pub transform: Option<String>,
 
+    /// SQL transform over all source rows, run in DuckDB (the rows are a table named `source`), e.g. "SELECT region, SUM(amount) AS total FROM source GROUP BY region"
+    #[arg(long, value_name = "SQL", conflicts_with_all = ["transform", "transform_file"])]
+    pub sql: Option<String>,
+
     /// Force source file type (csv, json, parquet, avro, xlsx, ...) - useful for URLs without clear extensions
     #[arg(long, value_name = "TYPE")]
     pub source_type: Option<String>,
@@ -140,6 +144,10 @@ pub enum Commands {
         /// Inline transformation expressions (semicolon-separated)
         #[arg(long, value_name = "EXPRESSIONS")]
         transform: Option<String>,
+
+        /// SQL transform over all source rows, run in DuckDB (the rows are a table named `source`)
+        #[arg(long, value_name = "SQL", conflicts_with_all = ["transform", "transform_file"])]
+        sql: Option<String>,
 
         /// Force source file type (csv, json, parquet, avro, xlsx, ...)
         #[arg(long, value_name = "TYPE")]
@@ -236,6 +244,7 @@ impl From<Cli> for Config {
             skip_existing: cli.skip_existing,
             truncate: cli.truncate,
             transform: transform_config,
+            sql: cli.sql,
             source_type: cli.source_type,
             source_query: cli.source_query,
             source_secret_id: cli.source_secret_id,

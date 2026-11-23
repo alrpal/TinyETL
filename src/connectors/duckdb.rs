@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
-use duckdb::{types::ValueRef, Connection};
+use duckdb::{
+    types::{Value as OwnedValue, ValueRef},
+    Connection,
+};
 use rust_decimal::Decimal;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -34,11 +37,9 @@ fn insert_with_appender(
             let duckdb_value = match value {
                 Value::String(s) => duckdb::types::Value::Text(s.clone()),
                 Value::Integer(i) => duckdb::types::Value::BigInt(*i),
-                Value::Decimal(d) => {
-                    // Convert decimal to f64 for DuckDB
-                    let f: f64 = (*d).try_into().unwrap_or(0.0);
-                    duckdb::types::Value::Double(f)
-                }
+                // As text, which DuckDB converts exactly to the column's type (DECIMAL in
+                // tables TinyETL creates, DOUBLE in older ones)
+                Value::Decimal(d) => duckdb::types::Value::Text(d.to_string()),
                 Value::Boolean(b) => duckdb::types::Value::Boolean(*b),
                 Value::Date(dt) => {
                     // Convert datetime to string for DuckDB
@@ -222,6 +223,8 @@ fn value_at(row: &duckdb::Row, i: usize) -> Value {
             Ok(d) => Value::Decimal(d),
             Err(_) => Value::String(f.to_string()),
         },
+        // DECIMAL(38,10), the type TinyETL creates, would print ten decimal places
+        ValueRef::Decimal(d) if d.scale() == 10 => Value::Decimal(d.normalize()),
         ValueRef::Decimal(d) => Value::Decimal(d),
         ValueRef::Timestamp(unit, value) => {
             let micros = unit.to_micros(value);
@@ -237,7 +240,144 @@ fn value_at(row: &duckdb::Row, i: usize) -> Value {
             Err(_) => Value::Null,
         },
         ValueRef::Blob(bytes) => Value::String(general_purpose::STANDARD.encode(bytes)),
-        _ => row.get::<_, String>(i).map_or(Value::Null, Value::String),
+        // Lists, structs, maps and unions become JSON; enums, times and intervals text
+        other => match other.to_owned() {
+            v @ (OwnedValue::List(_)
+            | OwnedValue::Array(_)
+            | OwnedValue::Struct(_)
+            | OwnedValue::Map(_)
+            | OwnedValue::Union(_)) => Value::Json(to_json(v)),
+            OwnedValue::Enum(text) => Value::String(text),
+            OwnedValue::Time64(unit, value) => {
+                let micros = unit.to_micros(value);
+                chrono::NaiveTime::from_num_seconds_from_midnight_opt(
+                    (micros / 1_000_000) as u32,
+                    (micros % 1_000_000) as u32 * 1_000,
+                )
+                .map_or(Value::Null, |t| Value::String(t.to_string()))
+            }
+            OwnedValue::Interval {
+                months,
+                days,
+                nanos,
+            } => Value::String(interval_text(months, days, nanos)),
+            _ => row.get::<_, String>(i).map_or(Value::Null, Value::String),
+        },
+    }
+}
+
+/// An interval as DuckDB prints it: `1 year 2 months 3 days 04:05:06`
+fn interval_text(months: i32, days: i32, nanos: i64) -> String {
+    let mut parts = Vec::new();
+    let plural =
+        |n: i64, unit: &str| format!("{} {}{}", n, unit, if n.abs() == 1 { "" } else { "s" });
+    let (years, months) = (months / 12, months % 12);
+    if years != 0 {
+        parts.push(plural(years as i64, "year"));
+    }
+    if months != 0 {
+        parts.push(plural(months as i64, "month"));
+    }
+    if days != 0 {
+        parts.push(plural(days as i64, "day"));
+    }
+    if nanos != 0 || parts.is_empty() {
+        let sign = if nanos < 0 { "-" } else { "" };
+        let micros = (nanos / 1_000).abs();
+        let (secs, frac) = (micros / 1_000_000, micros % 1_000_000);
+        let mut time = format!(
+            "{}{:02}:{:02}:{:02}",
+            sign,
+            secs / 3600,
+            secs / 60 % 60,
+            secs % 60
+        );
+        if frac != 0 {
+            time.push_str(&format!(".{:06}", frac));
+        }
+        parts.push(time);
+    }
+    parts.join(" ")
+}
+
+/// A nested DuckDB value as JSON
+fn to_json(value: OwnedValue) -> serde_json::Value {
+    use serde_json::Value as Json;
+    match value {
+        OwnedValue::Null => Json::Null,
+        OwnedValue::Boolean(b) => Json::Bool(b),
+        OwnedValue::TinyInt(n) => n.into(),
+        OwnedValue::SmallInt(n) => n.into(),
+        OwnedValue::Int(n) => n.into(),
+        OwnedValue::BigInt(n) => n.into(),
+        OwnedValue::UTinyInt(n) => n.into(),
+        OwnedValue::USmallInt(n) => n.into(),
+        OwnedValue::UInt(n) => n.into(),
+        OwnedValue::UBigInt(n) => n.into(),
+        OwnedValue::HugeInt(n) => {
+            i64::try_from(n).map_or_else(|_| Json::String(n.to_string()), Json::from)
+        }
+        OwnedValue::Float(f) => {
+            serde_json::Number::from_f64(f as f64).map_or(Json::Null, Json::Number)
+        }
+        OwnedValue::Double(f) => serde_json::Number::from_f64(f).map_or(Json::Null, Json::Number),
+        OwnedValue::Decimal(d) => serde_json::from_str(&d.to_string()).unwrap_or(Json::Null),
+        OwnedValue::Text(s) | OwnedValue::Enum(s) => Json::String(s),
+        OwnedValue::Blob(bytes) => Json::String(general_purpose::STANDARD.encode(bytes)),
+        OwnedValue::Timestamp(unit, value) => {
+            DateTime::<Utc>::from_timestamp_micros(unit.to_micros(value))
+                .map_or(Json::Null, |dt| Json::String(dt.to_rfc3339()))
+        }
+        OwnedValue::Date32(days) => DateTime::<Utc>::from_timestamp(days as i64 * 86_400, 0)
+            .map_or(Json::Null, |dt| {
+                Json::String(dt.format("%Y-%m-%d").to_string())
+            }),
+        OwnedValue::List(items) | OwnedValue::Array(items) => {
+            Json::Array(items.into_iter().map(to_json).collect())
+        }
+        OwnedValue::Struct(fields) => Json::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), to_json(v.clone())))
+                .collect(),
+        ),
+        OwnedValue::Map(entries) => Json::Object(
+            entries
+                .iter()
+                .map(|(k, v)| {
+                    let key = match to_json(k.clone()) {
+                        Json::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    (key, to_json(v.clone()))
+                })
+                .collect(),
+        ),
+        OwnedValue::Union(inner) => to_json(*inner),
+        other => Json::String(format!("{:?}", other)),
+    }
+}
+
+/// TinyETL type for a DuckDB column type name, as `DESCRIBE` reports it
+fn column_type(duckdb_type: &str) -> DataType {
+    let t = duckdb_type.trim().to_uppercase();
+    // Nested types: INTEGER[], VARCHAR[3], STRUCT(...), MAP(...), UNION(...)
+    if t.contains('[')
+        || t.starts_with("STRUCT")
+        || t.starts_with("MAP")
+        || t.starts_with("UNION")
+        || t == "JSON"
+    {
+        return DataType::Json;
+    }
+    match t.split('(').next().unwrap_or("").trim() {
+        "TINYINT" | "SMALLINT" | "INTEGER" | "INT" | "BIGINT" | "HUGEINT" | "UTINYINT"
+        | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT" => DataType::Integer,
+        "FLOAT" | "REAL" | "DOUBLE" | "DECIMAL" | "NUMERIC" => DataType::Decimal,
+        "BOOLEAN" | "BOOL" => DataType::Boolean,
+        "DATE" => DataType::Date,
+        base if base.starts_with("TIMESTAMP") || base == "DATETIME" => DataType::DateTime,
+        _ => DataType::String,
     }
 }
 
@@ -295,25 +435,7 @@ impl Source for DuckdbSource {
                 TinyEtlError::DataTransfer(format!("Failed to read schema row: {}", e))
             })?;
 
-            let data_type = match duckdb_type.to_uppercase().as_str() {
-                t if t.contains("INT") || t.contains("INTEGER") => DataType::Integer,
-                t if t.contains("DOUBLE")
-                    || t.contains("FLOAT")
-                    || t.contains("REAL")
-                    || t.contains("DECIMAL")
-                    || t.contains("NUMERIC") =>
-                {
-                    DataType::Decimal
-                }
-                t if t.contains("JSON") => DataType::Json,
-                t if t.contains("VARCHAR") || t.contains("TEXT") || t.contains("STRING") => {
-                    DataType::String
-                }
-                t if t.contains("BOOL") => DataType::Boolean,
-                t if t.contains("DATE") && !t.contains("TIME") => DataType::Date,
-                t if t.contains("TIMESTAMP") || t.contains("DATETIME") => DataType::DateTime,
-                _ => DataType::String,
-            };
+            let data_type = column_type(&duckdb_type);
 
             let nullable = null_str.to_uppercase() == "YES";
 
@@ -478,7 +600,8 @@ impl DuckdbTarget {
     fn map_data_type_to_duckdb(&self, data_type: &DataType) -> &'static str {
         match data_type {
             DataType::Integer => "BIGINT",
-            DataType::Decimal => "DOUBLE",
+            // Exact, so sums of money in a SQL transform don't pick up float noise
+            DataType::Decimal => "DECIMAL(38,10)",
             DataType::String => "VARCHAR",
             DataType::Boolean => "BOOLEAN",
             DataType::Date => "DATE",
@@ -641,6 +764,31 @@ impl Target for DuckdbTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_column_type() {
+        assert_eq!(column_type("INTEGER"), DataType::Integer);
+        assert_eq!(column_type("INTEGER[]"), DataType::Json);
+        assert_eq!(column_type("STRUCT(n BIGINT)"), DataType::Json);
+        assert_eq!(column_type("MAP(VARCHAR, INTEGER)"), DataType::Json);
+        assert_eq!(column_type("INTERVAL"), DataType::String);
+        assert_eq!(column_type("DECIMAL(18,3)"), DataType::Decimal);
+        assert_eq!(column_type("TIMESTAMP WITH TIME ZONE"), DataType::DateTime);
+        assert_eq!(column_type("DATE"), DataType::Date);
+        assert_eq!(column_type("JSON"), DataType::Json);
+        assert_eq!(column_type("VARCHAR"), DataType::String);
+    }
+
+    #[test]
+    fn test_interval_text() {
+        assert_eq!(interval_text(0, 3, 0), "3 days");
+        assert_eq!(
+            interval_text(14, 1, 3_723_000_000_000),
+            "1 year 2 months 1 day 01:02:03"
+        );
+        assert_eq!(interval_text(0, 0, 1_500_000), "00:00:00.001500");
+        assert_eq!(interval_text(0, 0, 0), "00:00:00");
+    }
 
     #[tokio::test]
     async fn test_database_contract() {

@@ -35,9 +35,15 @@ impl TransferEngine {
         target.connect().await?;
 
         // Step 2: Infer or load schema
-        let schema = if let Some(schema_file_path) = &config.schema_file {
-            info!("→ Loading schema from file: {}", schema_file_path);
-            let schema_file = SchemaFile::from_file(schema_file_path)?;
+        let schema_file = match &config.schema_file {
+            Some(path) => Some(SchemaFile::from_file(path)?),
+            None => None,
+        };
+        let schema = if let Some(schema_file) = &schema_file {
+            info!(
+                "→ Loading schema from file: {}",
+                config.schema_file.as_deref().unwrap_or_default()
+            );
             // Even when using a schema file, we need to initialize the source
             // (e.g., for pagination state in SQLite)
             let _ = source.infer_schema(1).await?;
@@ -47,6 +53,29 @@ impl TransferEngine {
             source.infer_schema(1000).await?
         };
         info!("→ {} columns detected", schema.columns.len());
+
+        // Step 2b: SQL transform. The source rows (checked against the schema file) go into a
+        // DuckDB table; from here on the source is the query's result.
+        let (mut source, schema, schema_file) = match &config.sql {
+            Some(sql) => {
+                if config.transform != crate::transformer::TransformConfig::None {
+                    return Err(crate::TinyEtlError::Configuration(
+                        "Use either a SQL transform or a Lua transform, not both".to_string(),
+                    ));
+                }
+                let (staged, result_schema) = crate::sql_transform::stage(
+                    source,
+                    &schema,
+                    schema_file.as_ref(),
+                    sql,
+                    config.batch_size,
+                )
+                .await?;
+                info!("→ SQL transform: {} columns", result_schema.columns.len());
+                (staged, result_schema, None)
+            }
+            None => (source, schema, schema_file),
+        };
 
         // Step 3: Handle preview mode
         if let Some(preview_rows) = config.preview {
@@ -129,13 +158,6 @@ impl TransferEngine {
                 .progress_chars("█▇▆▅▄▃▂▁  ");
             pb.set_style(style);
             Some(pb)
-        } else {
-            None
-        };
-
-        // Load schema file for validation if provided
-        let schema_file = if let Some(schema_file_path) = &config.schema_file {
-            Some(SchemaFile::from_file(schema_file_path)?)
         } else {
             None
         };

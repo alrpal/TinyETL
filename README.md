@@ -31,7 +31,7 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 - ✅ **Fast and streaming** — 140k–345k rows/sec on a laptop, with memory that stays flat as files grow (see [Performance](#performance))
 - ✅ **Zero configuration** — column types are detected and tables created for you; a schema file or YAML job file takes over when you need control
 - ✅ **Universal connectivity** — CSV, JSON, Excel, Parquet, Avro, MySQL, PostgreSQL, SQLite, CrateDB, DuckDB, SQL Server, ODBC and Snowflake, over local files, HTTP, SSH and S3
-- ✅ **Lua transformations** — add, change and filter columns and rows on the way
+- ✅ **SQL and Lua transforms** — reshape data on the way with SQL (filters, joins, aggregates, window functions, run in the built-in DuckDB) or row by row with Lua
 - ✅ **Pipeline-ready** — each database load runs in one transaction, so a failed run leaves the table as it was; errors are plain text with a non-zero exit code; jobs can live in YAML files with environment variables for secrets
 - ✅ **Cross-platform** — Linux, macOS and Windows, on x86_64 and ARM64
 
@@ -43,7 +43,7 @@ Most data movement doesn't need a platform. TinyETL keeps it to one command.
 - [Sources and targets](#supported-data-sources-and-targets): [Files and protocols](#file-based-sources-multiple-protocols) · [Endpoint options](#endpoint-options) · [CSV delimiters](#csv-delimiters) · [Excel](#excel)
 - [Databases](#database-connection-strings): [PostgreSQL](#postgresql) · [MySQL](#mysql) · [SQLite](#sqlite) · [SQL Server](#sql-server-native) · [CrateDB](#cratedb) · [DuckDB](#duckdb) · [ODBC](#odbc) · [Snowflake](#snowflake)
 - [Source queries](#source-queries) · [Passwords and secrets](#secure-password-management)
-- [Transforms](#data-transformations) · [Schema files](#schema-files) · [YAML job files](#yaml-job-files) ([HTTP options](#http-source-options), [S3 options](#s3-options), [environment variables](#environment-variables))
+- [Transforms](#data-transformations) ([SQL](#sql-transforms), [Lua](#lua-inline-transformations)) · [Schema files](#schema-files) · [YAML job files](#yaml-job-files) ([HTTP options](#http-source-options), [S3 options](#s3-options), [environment variables](#environment-variables))
 - [Performance](#performance) · [Roadmap](#roadmap) · [License](#license)
 
 ## Quick Install
@@ -111,7 +111,8 @@ tinyetl "postgresql://user:@host/db#users" "mysql://user:@host/db#users"
 # Only the rows you need, selected on the source database
 tinyetl "postgresql://user:@host/db" active_users.csv --source-query "SELECT * FROM users WHERE active"
 
-# Transform while transferring
+# Transform while transferring, with SQL or Lua
+tinyetl sales.csv totals.parquet --sql "SELECT region, SUM(revenue) AS revenue FROM source GROUP BY region"
 tinyetl sales.csv results.db --transform "profit=row.revenue - row.costs; margin=profit / row.revenue"
 
 # Large files stream with flat memory
@@ -153,6 +154,7 @@ Options:
       --truncate                   Truncate target before writing (overrides append-first behavior)
       --transform-file <FILE>      Path to Lua file containing a 'transform' function
       --transform <EXPRESSIONS>    Inline transformation expressions (semicolon-separated, e.g., "new_col=row.old_col * 2; name=row.first .. ' ' .. row.last")
+      --sql <SQL>                  SQL transform over all source rows, run in DuckDB (the rows are a table named `source`), e.g. "SELECT region, SUM(amount) AS total FROM source GROUP BY region"
       --source-type <TYPE>         Force source file type (csv, json, parquet, avro, xlsx, ...) - useful for URLs without clear extensions
       --source-query <SQL>         SQL query to read from a database source instead of a whole table (the URL then has no #table)
       --source-secret-id <ID>      Secret ID for source password (resolves to TINYETL_SECRET_{id})
@@ -613,9 +615,52 @@ WARN Warning: Using passwords in CLI parameters for target is insecure. Consider
 
 ## Data Transformations
 
-TinyETL supports powerful data transformations using Lua scripting during the ETL process. Transform, combine, filter, and modify data as it flows from source to target.
+Reshape data on the way from source to target, with SQL or Lua:
 
-### Using Inline Transformations
+- **SQL** (`--sql`) sees the whole dataset: filters, aggregates, joins, window functions, `DISTINCT`, `ORDER BY`. It runs in DuckDB, which is built into TinyETL
+- **Lua** (`--transform`, `--transform-file`) works one row at a time, streaming: add or change columns, drop rows
+
+A job uses one or the other. To filter a database table before it leaves the database, use a [source query](#source-queries) instead (or as well).
+
+### SQL Transforms
+
+The source's rows are a table named `source`:
+
+```bash
+# Totals per region
+tinyetl sales.csv totals.parquet \
+  --sql "SELECT region, COUNT(*) AS orders, SUM(amount) AS total FROM source GROUP BY region"
+
+# Running totals with a window function, into PostgreSQL
+tinyetl sales.csv "postgresql://user@host/db#sales_running" \
+  --sql "SELECT *, SUM(amount) OVER (PARTITION BY region ORDER BY day) AS running_total FROM source"
+
+# Deduplicate, keeping the latest row per id
+tinyetl events.jsonl latest.csv \
+  --sql "SELECT * FROM source QUALIFY row_number() OVER (PARTITION BY id ORDER BY updated_at DESC) = 1"
+
+# Reach into nested JSON (GH Archive events)
+tinyetl 2015-01-01-15.json.gz pushes.csv \
+  --sql "SELECT actor->>'login' AS login, SUM(CAST(payload->>'size' AS INT)) AS commits FROM source WHERE type = 'PushEvent' GROUP BY 1 ORDER BY 2 DESC"
+```
+
+```yaml
+source: sales.csv
+target: totals.parquet
+sql: |
+  SELECT region, COUNT(*) AS orders, SUM(amount) AS total
+  FROM source
+  GROUP BY region
+```
+
+- The query is [DuckDB SQL](https://duckdb.org/docs/sql/introduction), with its functions for text, dates, JSON (`->>`, `json_extract`) and lists. Column types come from the query's result
+- **How it runs:** every source row is first loaded into a temporary DuckDB database (in the system temp directory, `TMPDIR`), then the query runs once and its result is written to the target. DuckDB spills to disk, so memory stays bounded, but the temp directory needs free space for a copy of the data. 1M rows grouped into 50 totals take about 1.6 s and 120 MB of memory on a laptop
+- Decimals stay exact (`SUM` of money doesn't pick up float noise). Lists, structs and maps in the result become JSON
+- A schema file (`--schema-file`) checks the source rows before they're loaded; the query's result isn't checked against it
+- `--preview` and `--dry-run` load the source and run the query, so a mistake in the SQL shows up before anything is written
+
+### Lua: Inline Transformations
+
 
 Use the `--transform` option with semicolon-separated expressions. **All original columns are automatically preserved**, and you can add new columns or override existing ones:
 
@@ -630,7 +675,7 @@ tinyetl sales.csv output.db --transform "total=row.quantity * row.price; profit=
 tinyetl data.csv output.db --transform "email=string.lower(row.email); age_group=row.age < 30 and 'young' or 'mature'"
 ```
 
-### Using Lua Files
+### Lua Files
 
 For complex transformations, create a Lua file with a `transform` function. **Note**: With Lua files, you have full control over which columns to include. Only columns explicitly returned are kept:
 
@@ -671,7 +716,7 @@ end
 tinyetl data.csv output.db --transform-file transform.lua
 ```
 
-### In YAML Job Files
+### Lua in YAML Job Files
 
 ```yaml
 # Assignments, one per line (or separated by ";"), like --transform
@@ -686,7 +731,7 @@ transform_file: transform.lua
 
 Job files from earlier versions, with `transform: { type: script|inline|file, value: ... }` under `options:`, still work.
 
-### Transformation Rules
+### Lua Transformation Rules
 
 1. **Schema Inference**: The output schema is determined by the first transformed row
 2. **Column Preservation**: For assignments (`--transform`, YAML `transform`), all original columns are preserved, and each assignment can use the ones before it by name (`total=row.qty * row.price; profit=total * 0.3`)
@@ -1019,6 +1064,9 @@ transform: |
 
 # Or a Lua file with a transform(row) function, which can also drop rows:
 # transform_file: transform.lua
+
+# Or SQL over all the source rows (a table named source), run in DuckDB:
+# sql: SELECT department, COUNT(*) AS people FROM source GROUP BY department
 ```
 
 Job files from earlier versions, with `version: 1`, `uri:` under `source:` and `target:`, and the settings under `options:`, still work.
@@ -1202,9 +1250,9 @@ Every source and file target streams: rows are read and written a batch at a tim
 - Remote files over HTTP(S), SSH and S3 ✅
 - Schema inference, schema files, Lua transforms, YAML jobs ✅
 - Source queries: read a SQL query's result instead of a whole table ✅
+- SQL transforms in the built-in DuckDB ✅
 
 **Next:**
-- SQL transforms with the built-in DuckDB engine, alongside Lua
 - Many files at once: globs and partitioned datasets
 - Reading from stdin and writing to stdout
 - Incremental loads and upserts

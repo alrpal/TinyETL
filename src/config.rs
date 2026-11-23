@@ -15,6 +15,8 @@ pub struct Config {
     pub skip_existing: bool,
     pub truncate: bool,
     pub transform: TransformConfig,
+    /// SQL over the whole source (a DuckDB table named `source`), instead of a Lua transform
+    pub sql: Option<String>,
     pub source_type: Option<String>,
     /// SQL to run on a database source instead of reading a whole table
     pub source_query: Option<String>,
@@ -38,6 +40,7 @@ impl Default for Config {
             skip_existing: false,
             truncate: false,
             transform: TransformConfig::None,
+            sql: None,
             source_type: None,
             source_query: None,
             source_secret_id: None,
