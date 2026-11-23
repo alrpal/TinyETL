@@ -1,5 +1,5 @@
 # TinyETL
-**Fast, zero-config ETL in a single binary**
+**Move data from anywhere to anywhere with one command**
 
 [![CI](https://github.com/alrpal/TinyETL/actions/workflows/pr.yaml/badge.svg?branch=master)](https://github.com/alrpal/TinyETL/actions/workflows/pr.yaml)
 [![Version](https://img.shields.io/badge/version-0.11.1-blue)](https://github.com/alrpal/tinyetl/releases)
@@ -8,7 +8,7 @@
 
 ![TinyETL Demo](examples/tinyetl_preview2-normal-framerate.gif)
 
-Transform and move data between any format or database **instantly**. No dependencies, no config files, just one command.
+One binary, no setup: give TinyETL a source and a target, and it works out the formats, column types and tables. Quick enough for a one-off job, and robust enough to be the data transfer step in your pipeline.
 
 ```bash
 # MySQL → Parquet with inline transformation 
@@ -27,15 +27,22 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 
 ## Why TinyETL?
 
-✅ **Single binary** — about a 20 MB download (50 MB unpacked), with no runtime dependencies: no Python, no JVM, no shared libraries to install  
-✅ **Fast and streaming** — 140k–345k rows/sec on a laptop, with memory that stays flat as files grow (see [Performance](#performance))  
-✅ **Zero configuration** — automatic schema detection and table creation (override with schema and config files in yaml)  
-   *Note: Auto-inferred schemas default all columns to nullable for safety*
+- ✅ **Single binary** — about a 20 MB download (50 MB unpacked), with no runtime dependencies: no Python, no JVM, no shared libraries to install
+- ✅ **Fast and streaming** — 140k–345k rows/sec on a laptop, with memory that stays flat as files grow (see [Performance](#performance))
+- ✅ **Zero configuration** — column types are detected and tables created for you; a schema file or YAML job file takes over when you need control
+- ✅ **Universal connectivity** — CSV, JSON, Excel, Parquet, Avro, MySQL, PostgreSQL, SQLite, CrateDB, DuckDB, SQL Server, ODBC and Snowflake, over local files, HTTP, SSH and S3
+- ✅ **Lua transformations** — add, change and filter columns and rows on the way
+- ✅ **Pipeline-ready** — each database load runs in one transaction, so a failed run leaves the table as it was; errors are plain text with a non-zero exit code; jobs can live in YAML files with environment variables for secrets
+- ✅ **Cross-platform** — Linux, macOS and Windows, on x86_64 and ARM64
 
-✅ **Lua transformations** — powerful data transformations  
-✅ **Universal connectivity** — CSV, JSON, Excel, Parquet, Avro, MySQL, PostgreSQL, SQLite, CrateDB, DuckDB, MSSQL, ODBC, Snowflake. Coming soon: Databricks, OneLake
+## Contents
 
-✅ **Cross-platform** — Linux, macOS, Windows ready
+- [Quick Install](#quick-install) · [Get Started in 30 Seconds](#get-started-in-30-seconds) · [Usage](#usage)
+- [Sources and targets](#supported-data-sources-and-targets): [Files and protocols](#file-based-sources-multiple-protocols) · [Endpoint options](#endpoint-options) · [CSV delimiters](#csv-delimiters) · [Excel](#excel)
+- [Databases](#database-connection-strings): [PostgreSQL](#postgresql) · [MySQL](#mysql) · [SQLite](#sqlite) · [SQL Server](#sql-server-native) · [CrateDB](#cratedb) · [DuckDB](#duckdb) · [ODBC](#odbc) · [Snowflake](#snowflake)
+- [Passwords and secrets](#secure-password-management)
+- [Transforms](#data-transformations) · [Schema files](#schema-files) · [YAML job files](#yaml-job-files) ([HTTP options](#http-source-options), [S3 options](#s3-options), [environment variables](#environment-variables))
+- [Performance](#performance) · [Roadmap](#roadmap) · [License](#license)
 
 ## Quick Install
 
@@ -138,7 +145,6 @@ Options:
       --preview <N>                Show first N rows and inferred schema without copying
       --dry-run                    Validate source/target without transferring data
       --log-level <LOG_LEVEL>      Log level: info, warn, error [default: info]
-      --skip-existing              Not implemented yet; has no effect
       --truncate                   Truncate target before writing (overrides append-first behavior)
       --transform-file <FILE>      Path to Lua file containing a 'transform' function
       --transform <EXPRESSIONS>    Inline transformation expressions (semicolon-separated, e.g., "new_col=row.old_col * 2; name=row.first .. ' ' .. row.last")
@@ -359,7 +365,7 @@ tinyetl "postgresql://user:@host/db#orders" "orders.xlsx#Orders"   # write; the 
 
 TinyETL uses standard database connection URLs with an optional table specification using the `#` separator.
 
-**PostgreSQL:**
+#### PostgreSQL
 ```bash
 # Basic format
 postgresql://username:password@hostname:port/database#table_name
@@ -373,7 +379,7 @@ tinyetl data.csv "postgresql://admin:@db.example.com/analytics?sslmode=require#s
 ```
 URL parameters such as `sslmode` go to the driver unchanged.
 
-**MySQL:**
+#### MySQL
 ```bash
 # Basic format  
 mysql://username:password@hostname:port/database#table_name
@@ -386,7 +392,7 @@ tinyetl data.csv "mysql://admin:@db.example.com:3306/analytics#sales_data"
 tinyetl data.csv "mysql://user:@localhost:3306/mydb"  # Creates table named 'data'
 ```
 
-**SQLite:**
+#### SQLite
 ```bash
 # File path (table name inferred from filename without extension)
 tinyetl data.csv output.db              # Creates table named 'output'
@@ -397,7 +403,7 @@ tinyetl data.csv "sqlite:///path/to/database.db#custom_table"
 ```
 When reading, column types come from the declared types (`INTEGER`, `VARCHAR(255)`, `DECIMAL(10,2)`, `DATETIME`, …). Columns declared `JSON` are read as JSON, including JSON stored as `BLOB`, unless sampled values aren't valid JSON, in which case they're read as text. Other `BLOB` values are read as text if they're valid UTF-8, and as hex otherwise.
 
-**SQL Server (native):**
+#### SQL Server (native)
 ```bash
 # Basic format (username and password are required)
 mssql://username:password@hostname:port/database#table_name
@@ -412,7 +418,7 @@ tinyetl data.csv "mssql://user:pass@myserver.database.windows.net/mydb?trust_ser
 Connections are encrypted, like ODBC Driver 18. Parameters: `encrypt=false` encrypts only the login; `trust_server_certificate=false` checks the server's certificate, which is trusted by default since most servers use a self-signed one. Percent-encode special characters in the password (`@` → `%40`, `:` → `%3A`, `/` → `%2F`).
 Tables are in the login's default schema (usually `dbo`); `schema.table` names aren't supported by the native connector yet. For other schemas, Windows authentication or other driver features, use `odbc://` with Microsoft's ODBC driver (below).
 
-**CrateDB:**
+#### CrateDB
 ```bash
 # Basic format
 postgresql://username:password@hostname:port/schema#table_name
@@ -423,7 +429,7 @@ tinyetl data.csv "postgresql://admin:@db.example.com:5432/analytics#sales_data"
 ```
 TinyETL detects CrateDB and creates decimal columns as `NUMERIC(38,10)`, since CrateDB needs a precision and scale.
 
-**DuckDB:**
+#### DuckDB
 ```bash
 # File path (table name inferred from filename without extension)
 tinyetl data.csv output.duckdb              # Creates table named 'output'
@@ -437,7 +443,7 @@ tinyetl "products.duckdb#inventory" output.csv
 tinyetl "analytics.duckdb#daily_sales" report.parquet
 ```
 
-**ODBC:**
+#### ODBC
 
 `odbc://` works with any database that has an ODBC driver. Everything after `odbc://` up to the last `#` is passed to the driver unchanged, and the text after `#` is the table (`table`, or `schema.table`).
 
@@ -484,7 +490,7 @@ TinyETL includes the ODBC driver manager, so you only need the driver for your d
 - The database must exist before using TinyETL
 - For SQL Server driver names: `ODBC Driver 18 for SQL Server` (latest), `ODBC Driver 17 for SQL Server`, or `SQL Server` (older). Driver 18 encrypts by default; add `TrustServerCertificate=yes` for servers with self-signed certificates
 
-**Snowflake:**
+#### Snowflake
 
 ```bash
 # Format
@@ -570,11 +576,11 @@ WARN Warning: Using passwords in CLI parameters for target is insecure. Consider
 - ❌ Avoid putting passwords directly in connection strings
 - ❌ Avoid storing passwords in shell scripts or command history
 
-### Data Transformations
+## Data Transformations
 
 TinyETL supports powerful data transformations using Lua scripting during the ETL process. Transform, combine, filter, and modify data as it flows from source to target.
 
-#### Using Inline Transformations
+### Using Inline Transformations
 
 Use the `--transform` option with semicolon-separated expressions. **All original columns are automatically preserved**, and you can add new columns or override existing ones:
 
@@ -589,7 +595,7 @@ tinyetl sales.csv output.db --transform "total=row.quantity * row.price; profit=
 tinyetl data.csv output.db --transform "email=string.lower(row.email); age_group=row.age < 30 and 'young' or 'mature'"
 ```
 
-#### Using Lua Files
+### Using Lua Files
 
 For complex transformations, create a Lua file with a `transform` function. **Note**: With Lua files, you have full control over which columns to include. Only columns explicitly returned are kept:
 
@@ -630,7 +636,7 @@ end
 tinyetl data.csv output.db --transform-file transform.lua
 ```
 
-#### In YAML Job Files
+### In YAML Job Files
 
 ```yaml
 # Assignments, one per line (or separated by ";"), like --transform
@@ -645,7 +651,7 @@ transform_file: transform.lua
 
 Job files from earlier versions, with `transform: { type: script|inline|file, value: ... }` under `options:`, still work.
 
-#### Transformation Rules
+### Transformation Rules
 
 1. **Schema Inference**: The output schema is determined by the first transformed row
 2. **Column Preservation**: For assignments (`--transform`, YAML `transform`), all original columns are preserved, and each assignment can use the ones before it by name (`total=row.qty * row.price; profit=total * 0.3`)
@@ -656,7 +662,7 @@ Job files from earlier versions, with `transform: { type: script|inline|file, va
 7. **Type Conversion**: Lua values are converted back to TinyETL types (see below)
 8. **Error Handling**: Transformation errors stop the process with clear error messages
 
-#### Available Data Types
+### Available Data Types
 
 - **Strings**: `"text"` or `'text'`
 - **Numbers**: `42`, `3.14` (Lua integers become integers, other numbers become decimals)
@@ -665,14 +671,14 @@ Job files from earlier versions, with `transform: { type: script|inline|file, va
 - **Dates**: Passed to Lua as RFC 3339 strings (`2024-01-15T10:30:00+00:00`), returned as strings
 - **JSON**: Passed to Lua as JSON text
 
-#### Lua Built-ins Available
+### Lua Built-ins Available
 
 - String functions: `string.find()`, `string.match()`, `string.gsub()`, concatenation with `..`
 - Math functions: `math.floor()`, `math.ceil()`, `math.abs()`, basic operators
 - Logic: `and`, `or`, `not`, conditional expressions
 - Pattern matching with string methods
 
-#### Row Filtering (Lua Files Only)
+### Row Filtering (Lua Files Only)
 
 You can filter out rows by returning `nil` or an empty table `{}` from your transform function:
 
@@ -701,7 +707,7 @@ end
 
 **Note**: Inline expressions (`--transform`) always preserve all rows. Row filtering only works with Lua files (`--transform-file`).
 
-#### Examples
+### Transform Examples
 
 ```bash
 # Clean and standardize phone numbers
@@ -720,7 +726,11 @@ tinyetl messy_data.csv clean_data.db --transform-file filter.lua
 tinyetl data.csv output.db --transform "total=row.qty * row.price" --preview 5
 ```
 
-#### Schema File Format
+## Schema Files
+
+A schema file sets column types and validates rows, instead of inferring types (`--schema-file schema.yaml`).
+
+### Schema File Format
 
 Create a YAML file defining your expected schema. Here's the complete format:
 
@@ -760,7 +770,7 @@ columns:
     pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
 ```
 
-#### Supported Data Types
+### Supported Data Types
 
 Type names are case-insensitive:
 
@@ -771,7 +781,7 @@ Type names are case-insensitive:
 - **Date**, **DateTime** - Dates and timestamps (values are UTC)
 - **Json** - JSON values; text in a Json column is parsed as JSON
 
-#### Schema Field Properties
+### Schema Field Properties
 
 | Property | Type | Required | Description |
 |----------|------|----------|-------------|
@@ -781,7 +791,7 @@ Type names are case-insensitive:
 | `pattern` | String | ❌ | Regex pattern for validation (Text/DateTime types) |
 | `default` | Any | ❌ | Default value when field is missing or null |
 
-#### Validation Behavior
+### Validation Behavior
 
 **Type Checking:**
 - Each value must already have the column's type. CSV values are typed as they're read: whole numbers, decimals, `true`/`false` and dates are recognized; anything else is text
@@ -803,7 +813,7 @@ Type names are case-insensitive:
 - Clear error messages indicate field name, expected type, and actual value
 - Pattern validation failures show the expected regex pattern
 
-#### Schema Examples
+### Schema Examples
 
 **Customer Data Schema:**
 ```yaml
@@ -873,7 +883,27 @@ columns:
     nullable: false
 ```
 
-#### Integration with Transformations
+### Command Examples
+
+```bash
+# Basic schema validation
+tinyetl customer_data.csv clean_customers.db --schema-file customer_schema.yaml
+
+# Schema validation with preview
+tinyetl large_import.csv target.db --schema-file validation.yaml --preview 5
+
+# Combined schema validation and transformations
+tinyetl sales_export.csv analytics.db \
+  --schema-file sales_schema.yaml \
+  --transform "profit_margin=(row.total_amount - row.cost) / row.total_amount"
+
+# Validate API data before processing
+tinyetl "https://api.example.com/export" local_data.db \
+  --source-type=csv \
+  --schema-file api_schema.yaml
+```
+
+### Integration with Transformations
 
 Schema validation occurs **before** transformations, ensuring input data quality:
 
@@ -891,7 +921,7 @@ tinyetl raw_sales.csv processed.db \
 4. **Apply transformations** to validated data
 5. **Transfer** to target
 
-#### Use Cases
+### Use Cases
 
 - **Data Quality Assurance**: Ensure incoming data meets quality standards
 - **API Integration**: Validate data from external APIs before processing
@@ -899,7 +929,7 @@ tinyetl raw_sales.csv processed.db \
 - **Data Contracts**: Define and enforce data format agreements
 - **Migration Validation**: Ensure data integrity during system migrations
 
-## YAML Configuration Files
+## YAML Job Files
 
 For complex ETL jobs, TinyETL supports YAML configuration files that make your data pipelines more maintainable and version-controllable:
 
@@ -1091,27 +1121,7 @@ source:
 target: s3://my-bucket/exports/export.parquet
 ```
 
-#### Command Examples
-
-```bash
-# Basic schema validation
-tinyetl customer_data.csv clean_customers.db --schema-file customer_schema.yaml
-
-# Schema validation with preview
-tinyetl large_import.csv target.db --schema-file validation.yaml --preview 5
-
-# Combined schema validation and transformations
-tinyetl sales_export.csv analytics.db \
-  --schema-file sales_schema.yaml \
-  --transform "profit_margin=(row.total_amount - row.cost) / row.total_amount"
-
-# Validate API data before processing
-tinyetl "https://api.example.com/export" local_data.db \
-  --source-type=csv \
-  --schema-file api_schema.yaml
-```
-
-### Sample Output
+## Sample Output
 
 ```
 $ tinyetl sales.csv "sales.db#sales" --transform "total=row.amount * row.quantity"
@@ -1130,7 +1140,7 @@ INFO tinyetl: Processed 100000 rows in 0.98s (101586 rows/sec)
 
 (Timestamps trimmed. A progress bar is shown while copying.)
 
-### Performance
+## Performance
 
 An 8-column CSV converted on an Apple M4 Pro with the default batch size. Times are for 1,000,000 rows (83 MB); peak memory is shown for 1M and 10M rows (843 MB):
 
@@ -1147,7 +1157,7 @@ An 8-column CSV converted on an Apple M4 Pro with the default batch size. Times 
 
 Every source and file target streams: rows are read and written a batch at a time, so memory stays flat as files grow. Reading the 10M-row Parquet, JSON or Avro file back to CSV peaks at 31–79 MB. Excel is the exception on the read side: a sheet is loaded whole. Network databases and warehouses depend mostly on the server and the network.
 
-### Roadmap
+## Roadmap
 
 **Done:**
 - Files: CSV/TSV, JSON, JSON Lines, Parquet, Avro, Excel, streamed with flat memory, gzip and zstd compressed ✅
@@ -1157,14 +1167,13 @@ Every source and file target streams: rows are read and written a batch at a tim
 - Schema inference, schema files, Lua transforms, YAML jobs ✅
 
 **Next:**
-- Databricks and OneLake
-- `--skip-existing` (the flag exists but has no effect yet)
-- Advanced transformation functions and libraries
-- Multi-file processing with glob patterns
-- Advanced schema mapping
-- Data validation and quality checks
+- Source queries: read the result of a `SELECT` instead of a whole table
+- SQL transforms with the built-in DuckDB engine, alongside Lua
+- Many files at once: globs and partitioned datasets
+- Reading from stdin and writing to stdout
+- Incremental loads and upserts
 
-### Contributors
+## Contributors
 
 Special thanks to:
 - Michael Descy @mjdescy (Excel)
@@ -1174,7 +1183,7 @@ Special thanks to:
 for contributing to TinyETL!
 
 
-### License
+## License
 
 This project is licensed under a modified Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 

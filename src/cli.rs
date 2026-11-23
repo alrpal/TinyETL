@@ -42,8 +42,8 @@ pub struct Cli {
     #[arg(long, default_value = "info")]
     pub log_level: LogLevel,
 
-    /// Not implemented yet; has no effect
-    #[arg(long)]
+    /// Not implemented yet; has no effect (hidden from --help, still accepted)
+    #[arg(long, hide = true)]
     pub skip_existing: bool,
 
     /// Truncate target before writing (overrides append-first behavior)
@@ -121,8 +121,8 @@ pub enum Commands {
         #[arg(long, default_value = "info")]
         log_level: LogLevel,
 
-        /// Not implemented yet; has no effect
-        #[arg(long)]
+        /// Not implemented yet; has no effect (hidden from --help, still accepted)
+        #[arg(long, hide = true)]
         skip_existing: bool,
 
         /// Truncate target before writing (overrides append-first behavior)

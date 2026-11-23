@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests for the transfer engine's contract with targets (when tables are created, truncated, appended to and finalized; value conversion; transforms; schema-file rejection; preview and dry run), and a shared database test that SQLite and DuckDB run against temp files (typed round trip, streaming reads, rollback of unfinished loads, deferred truncate)
 
 ### Changed
+- **`--skip-existing` is hidden from `--help`** and the README, since it has never done anything. It's still accepted, so existing commands keep working
 - **Unknown keys in YAML job files are an error** (with the line and the valid keys) instead of being ignored. A misspelled `batchsize:` or `transform_file:` placed where it isn't read used to run the job without it
 - **Unknown endpoint options are an error** instead of being ignored, with a suggestion for a misspelled key: `--source-option auth.baerer=…` used to send the request without authentication. Each source and target accepts its protocol's and its file format's options (README, Endpoint Options); databases other than Snowflake take none
 - **Nested JSON objects and arrays stay JSON** (#3) instead of becoming strings: they load into `jsonb` in PostgreSQL (`JSON` in DuckDB, `VARIANT` in Snowflake) and stay nested when written to JSON. CSV, Parquet and other text targets get the same compact JSON text as before
