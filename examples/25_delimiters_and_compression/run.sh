@@ -20,7 +20,7 @@ COMPARE="python3 -I $(pwd)/compare.py"
 WORK=$(mktemp -d)
 SERVER_PID=""
 cleanup() {
-    if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; fi
+    if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
