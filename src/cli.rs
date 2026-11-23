@@ -62,6 +62,10 @@ pub struct Cli {
     #[arg(long, value_name = "TYPE")]
     pub source_type: Option<String>,
 
+    /// SQL query to read from a database source instead of a whole table (the URL then has no #table)
+    #[arg(long, value_name = "SQL")]
+    pub source_query: Option<String>,
+
     /// Secret ID for source password (resolves to TINYETL_SECRET_{id})
     #[arg(long, value_name = "ID")]
     pub source_secret_id: Option<String>,
@@ -140,6 +144,10 @@ pub enum Commands {
         /// Force source file type (csv, json, parquet, avro, xlsx, ...)
         #[arg(long, value_name = "TYPE")]
         source_type: Option<String>,
+
+        /// SQL query to read from a database source instead of a whole table
+        #[arg(long, value_name = "SQL")]
+        source_query: Option<String>,
 
         /// Secret ID for source password (resolves to TINYETL_SECRET_{id})
         #[arg(long, value_name = "ID")]
@@ -229,6 +237,7 @@ impl From<Cli> for Config {
             truncate: cli.truncate,
             transform: transform_config,
             source_type: cli.source_type,
+            source_query: cli.source_query,
             source_secret_id: cli.source_secret_id,
             dest_secret_id: cli.dest_secret_id,
             source_options: cli.source_options.into_iter().collect(),

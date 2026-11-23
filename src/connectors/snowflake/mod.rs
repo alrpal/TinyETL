@@ -107,6 +107,12 @@ impl SnowflakeConfig {
         Self::parse_with_env(connection_string, options, |name| std::env::var(name).ok())
     }
 
+    /// [`SnowflakeConfig::parse`] for a source query: the URL has no table
+    fn parse_for_query(connection_string: &str, options: &HashMap<String, String>) -> Result<Self> {
+        // The table isn't used; a placeholder keeps one parser for both forms
+        Self::parse(&format!("{}#query", connection_string), options)
+    }
+
     fn parse_with_env(
         connection_string: &str,
         options: &HashMap<String, String>,
@@ -507,6 +513,8 @@ async fn open_client(config: &SnowflakeConfig) -> Result<Box<dyn SnowflakeClient
 /// Snowflake source: streams every row of one table.
 pub struct SnowflakeSource {
     config: SnowflakeConfig,
+    /// `--source-query`: read this query's result instead of the table
+    query: Option<String>,
     client: Option<Box<dyn SnowflakeClient>>,
     /// Behind a `Mutex` only so the source is `Sync`; it's always used through `&mut self`.
     result: std::sync::Mutex<Option<QueryStream>>,
@@ -526,9 +534,24 @@ impl SnowflakeSource {
         )?))
     }
 
+    /// Read the result of `query`; `connection_string` has no `#table`
+    pub fn with_query(
+        connection_string: &str,
+        query: &str,
+        options: &HashMap<String, String>,
+    ) -> Result<Self> {
+        let mut source = Self::with_config(SnowflakeConfig::parse_for_query(
+            connection_string,
+            options,
+        )?);
+        source.query = Some(query.to_string());
+        Ok(source)
+    }
+
     fn with_config(config: SnowflakeConfig) -> Self {
         Self {
             config,
+            query: None,
             client: None,
             result: std::sync::Mutex::new(None),
             schema: None,
@@ -543,7 +566,10 @@ impl SnowflakeSource {
         if self.client.is_none() {
             self.client = Some(open_client(&self.config).await?);
         }
-        let sql = format!("SELECT * FROM {}", qualified(&self.config.table));
+        let sql = match &self.query {
+            Some(query) => query.clone(),
+            None => format!("SELECT * FROM {}", qualified(&self.config.table)),
+        };
         debug!("Snowflake source query: {}", sql);
         let result = self.client.as_ref().expect("connected").query(&sql).await?;
         self.schema = Some(Schema {

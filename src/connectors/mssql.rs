@@ -46,9 +46,18 @@ impl MssqlSource {
         })
     }
 
-    pub fn with_query(mut self, query: String) -> Self {
-        self.query = Some(query);
-        self
+    /// Read the result of `query`; `connection_string` has no `#table`
+    pub fn with_query(connection_string: &str, query: &str) -> Result<Self> {
+        Ok(Self {
+            connection_string: connection_string.to_string(),
+            client: None,
+            table_name: String::new(),
+            query: Some(query.to_string()),
+            total_rows: None,
+            stream: None,
+            consumed: false,
+            schema: None,
+        })
     }
 
     fn parse_connection_string(connection_string: &str) -> Result<(String, String)> {
@@ -186,7 +195,11 @@ fn parse_bool(key: &str, value: &str) -> Result<bool> {
 #[async_trait]
 impl Source for MssqlSource {
     async fn connect(&mut self) -> Result<()> {
-        let (db_part, _) = Self::parse_connection_string(&self.connection_string)?;
+        // A query source has no `#table`
+        let db_part = match &self.query {
+            Some(_) => self.connection_string.clone(),
+            None => Self::parse_connection_string(&self.connection_string)?.0,
+        };
         self.client = Some(Self::create_client(&db_part).await?);
         Ok(())
     }
@@ -198,15 +211,34 @@ impl Source for MssqlSource {
 
         let client = self.client.as_mut().unwrap();
 
-        // Get column information from the table
-        let query = format!(
-            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
-            self.table_name
-        );
-
-        let mut stream = client.query(query, &[]).await.map_err(|e| {
-            TinyEtlError::SchemaInference(format!("Failed to get table schema: {}", e))
-        })?;
+        // Column names and types: of the table, or of the query's result. SQL Server describes
+        // a query without running it (sp_describe_first_result_set), which also works for
+        // queries with WITH or ORDER BY that can't be wrapped in a subquery.
+        let mut stream = match &self.query {
+            Some(sql) => client
+                .query(
+                    "SELECT name, system_type_name, CASE is_nullable WHEN 1 THEN 'YES' ELSE 'NO' END \
+                     FROM sys.dm_exec_describe_first_result_set(@P1, NULL, 0) \
+                     WHERE is_hidden = 0 ORDER BY column_ordinal",
+                    &[sql],
+                )
+                .await
+                .map_err(|e| {
+                    TinyEtlError::SchemaInference(format!("Failed to describe the query: {}", e))
+                })?,
+            None => client
+                .query(
+                    format!(
+                        "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
+                        self.table_name
+                    ),
+                    &[],
+                )
+                .await
+                .map_err(|e| {
+                    TinyEtlError::SchemaInference(format!("Failed to get table schema: {}", e))
+                })?,
+        };
 
         let mut columns = Vec::new();
 
@@ -224,7 +256,9 @@ impl Source for MssqlSource {
                     TinyEtlError::SchemaInference("Missing nullable info".to_string())
                 })?;
 
-                let data_type = match data_type.to_uppercase().as_str() {
+                // `decimal(10,2)` / `nvarchar(50)` from a query description: the base name
+                let base_type = data_type.split('(').next().unwrap_or(data_type).trim();
+                let data_type = match base_type.to_uppercase().as_str() {
                     "INT" | "SMALLINT" | "TINYINT" | "BIGINT" => DataType::Integer,
                     "FLOAT" | "REAL" | "DECIMAL" | "NUMERIC" | "MONEY" | "SMALLMONEY" => {
                         DataType::Decimal
@@ -248,10 +282,10 @@ impl Source for MssqlSource {
         }
 
         if columns.is_empty() {
-            return Err(TinyEtlError::SchemaInference(format!(
-                "Table '{}' not found or has no columns",
-                self.table_name
-            )));
+            return Err(TinyEtlError::SchemaInference(match &self.query {
+                Some(_) => "The query returns no columns".to_string(),
+                None => format!("Table '{}' not found or has no columns", self.table_name),
+            }));
         }
 
         let schema = Schema {
@@ -919,9 +953,11 @@ mod tests {
 
     #[test]
     fn test_mssql_source_with_query() {
-        let source = MssqlSource::new("mssql://user:pass@localhost:1433/testdb#testtable")
-            .unwrap()
-            .with_query("SELECT * FROM testtable WHERE id > 100".to_string());
+        let source = MssqlSource::with_query(
+            "mssql://user:pass@localhost:1433/testdb",
+            "SELECT * FROM testtable WHERE id > 100",
+        )
+        .unwrap();
 
         assert_eq!(
             source.query,
@@ -1448,9 +1484,11 @@ mod tests {
 
     #[test]
     fn test_source_with_query() {
-        let source = MssqlSource::new("mssql://user:pass@localhost/db#table")
-            .unwrap()
-            .with_query("SELECT * FROM custom_table WHERE active = 1".to_string());
+        let source = MssqlSource::with_query(
+            "mssql://user:pass@localhost/db",
+            "SELECT * FROM custom_table WHERE active = 1",
+        )
+        .unwrap();
 
         assert!(source.query.is_some());
         assert_eq!(

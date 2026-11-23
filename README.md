@@ -42,7 +42,7 @@ Most data movement doesn't need a platform. TinyETL keeps it to one command.
 - [Quick Install](#quick-install) · [Get Started in 30 Seconds](#get-started-in-30-seconds) · [Usage](#usage)
 - [Sources and targets](#supported-data-sources-and-targets): [Files and protocols](#file-based-sources-multiple-protocols) · [Endpoint options](#endpoint-options) · [CSV delimiters](#csv-delimiters) · [Excel](#excel)
 - [Databases](#database-connection-strings): [PostgreSQL](#postgresql) · [MySQL](#mysql) · [SQLite](#sqlite) · [SQL Server](#sql-server-native) · [CrateDB](#cratedb) · [DuckDB](#duckdb) · [ODBC](#odbc) · [Snowflake](#snowflake)
-- [Passwords and secrets](#secure-password-management)
+- [Source queries](#source-queries) · [Passwords and secrets](#secure-password-management)
 - [Transforms](#data-transformations) · [Schema files](#schema-files) · [YAML job files](#yaml-job-files) ([HTTP options](#http-source-options), [S3 options](#s3-options), [environment variables](#environment-variables))
 - [Performance](#performance) · [Roadmap](#roadmap) · [License](#license)
 
@@ -108,6 +108,9 @@ tinyetl report.xlsx report.csv
 # Database to database 
 tinyetl "postgresql://user:@host/db#users" "mysql://user:@host/db#users"
 
+# Only the rows you need, selected on the source database
+tinyetl "postgresql://user:@host/db" active_users.csv --source-query "SELECT * FROM users WHERE active"
+
 # Transform while transferring
 tinyetl sales.csv results.db --transform "profit=row.revenue - row.costs; margin=profit / row.revenue"
 
@@ -151,6 +154,7 @@ Options:
       --transform-file <FILE>      Path to Lua file containing a 'transform' function
       --transform <EXPRESSIONS>    Inline transformation expressions (semicolon-separated, e.g., "new_col=row.old_col * 2; name=row.first .. ' ' .. row.last")
       --source-type <TYPE>         Force source file type (csv, json, parquet, avro, xlsx, ...) - useful for URLs without clear extensions
+      --source-query <SQL>         SQL query to read from a database source instead of a whole table (the URL then has no #table)
       --source-secret-id <ID>      Secret ID for source password (resolves to TINYETL_SECRET_{id})
       --dest-secret-id <ID>        Secret ID for destination password (resolves to TINYETL_SECRET_{id})
       --source-option <KEY=VALUE>  Source option, repeatable (e.g. delimiter=tab); the same keys as `options:` in YAML
@@ -537,6 +541,35 @@ See [`examples/22_snowflake`](examples/22_snowflake/) for a complete setup, from
 - DuckDB is optimized for analytical (OLAP) workloads and offers better performance than SQLite for aggregations
 - Connection strings should be quoted to prevent shell interpretation
 - Default ports: PostgreSQL (5432), CrateDB (5432), MySQL (3306)
+
+### Source Queries
+
+Read the result of a SQL query instead of a whole table with `--source-query` (YAML: `source_query`). The query runs on the source database, so filtering, joins and aggregation happen there and only the result crosses the network. Leave the `#table` off the source:
+
+```bash
+# Yesterday's orders from PostgreSQL to Parquet
+tinyetl "postgresql://user@host/shop" orders.parquet \
+  --source-query "SELECT id, customer_id, total FROM orders WHERE created_at >= now() - interval '1 day'"
+
+# A join and an aggregate from SQL Server into Snowflake
+tinyetl "mssql://user:pass@host/erp" "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#daily_sales" \
+  --source-query "SELECT o.day, c.region, SUM(o.amount) AS amount FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY o.day, c.region"
+```
+
+```yaml
+source: postgresql://user:${DB_PASSWORD}@host/shop
+source_query: |
+  SELECT id, customer_id, total
+  FROM orders
+  WHERE created_at >= now() - interval '1 day'
+target: s3://my-bucket/orders/latest.parquet
+```
+
+- Works with PostgreSQL (and CrateDB), MySQL, SQL Server, SQLite, DuckDB, ODBC and Snowflake. Use the database's own SQL dialect; the query runs as written, including `WITH` and `ORDER BY`
+- Column types come from the database where it can describe a query (SQL Server, DuckDB, ODBC, Snowflake), and otherwise from the first rows of the result, as for tables
+- To get the column types, PostgreSQL and MySQL run the query once with a `LIMIT` before reading it in full, so an expensive query does some of its work twice. The other databases describe the query, or read the sample from the same run
+- There's no row count up front, so the progress bar doesn't show a percentage
+- For ODBC, the whole text after `odbc://` is the connection string
 
 ### Secure Password Management
 
@@ -968,6 +1001,7 @@ target: postgres://etl:${DB_PASSWORD:-etl}@localhost/hr#employees
 #     auth.bearer: ${API_TOKEN}
 #     delimiter: ";"
 
+# source_query: SELECT * FROM orders WHERE paid   # a database source's query, instead of #table
 # truncate: true                       # replace the target's rows instead of appending
 # batch_size: 10000                    # rows per batch
 # schema_file: employees_schema.yaml   # column types and validation, instead of inference
@@ -1167,9 +1201,9 @@ Every source and file target streams: rows are read and written a batch at a tim
 - Snowflake (staged bulk loads) ✅
 - Remote files over HTTP(S), SSH and S3 ✅
 - Schema inference, schema files, Lua transforms, YAML jobs ✅
+- Source queries: read a SQL query's result instead of a whole table ✅
 
 **Next:**
-- Source queries: read the result of a `SELECT` instead of a whole table
 - SQL transforms with the built-in DuckDB engine, alongside Lua
 - Many files at once: globs and partitioned datasets
 - Reading from stdin and writing to stdout

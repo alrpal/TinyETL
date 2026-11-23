@@ -6,8 +6,8 @@ use tinyetl::{
     cli::Cli,
     config::Config,
     connectors::{
-        create_source_from_url_with_type_and_options, create_target_from_url_with_options, Source,
-        Target,
+        create_query_source, create_source_from_url_with_type_and_options,
+        create_target_from_url_with_options, Source, Target,
     },
     secrets::process_connection_string,
     transfer::TransferEngine,
@@ -74,6 +74,7 @@ fn handle_generate_config(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         transform_file,
         transform,
         source_type,
+        source_query,
         source_secret_id,
         dest_secret_id,
         source_options,
@@ -95,6 +96,7 @@ fn handle_generate_config(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             truncate,
             transform: transform_config,
             source_type,
+            source_query,
             source_secret_id,
             dest_secret_id,
             source_options: source_options.into_iter().collect(),
@@ -184,12 +186,17 @@ async fn create_connectors(
         "destination",
     )?;
 
-    let source = create_source_from_url_with_type_and_options(
-        &processed_source,
-        config.source_type.as_deref(),
-        &config.source_options,
-    )
-    .await?;
+    let source = match &config.source_query {
+        Some(query) => create_query_source(&processed_source, query, &config.source_options)?,
+        None => {
+            create_source_from_url_with_type_and_options(
+                &processed_source,
+                config.source_type.as_deref(),
+                &config.source_options,
+            )
+            .await?
+        }
+    };
 
     let target =
         create_target_from_url_with_options(&processed_target, &config.target_options).await?;

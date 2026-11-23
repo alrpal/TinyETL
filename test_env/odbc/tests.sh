@@ -79,6 +79,15 @@ for db in sqlserver postgres mysql sqlite; do
     else
         fail "--truncate run failed"
     fi
+
+    # --source-query: the connection string without #table, and the query's result
+    rm -f "$WORK/query.csv"
+    if etl "odbc://$conn" "$WORK/query.csv" --source-query "SELECT COUNT(*) AS n FROM $TABLE;"; then
+        n=$(sed -n 2p "$WORK/query.csv" | tr -d '\r')
+        [ "$n" = "$ROWS" ] && pass "--source-query: COUNT(*) = $n" || fail "--source-query: expected $ROWS, got $n"
+    else
+        fail "--source-query run failed"
+    fi
 done
 
 # A table TinyETL didn't create: test_env seeds employees in Postgres

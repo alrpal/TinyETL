@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use crate::{
     connectors::{row_stream::RowStream, Source, Target},
-    schema::{Column as SchemaColumn, DataType, Row, Schema, Value},
+    schema::{Column as SchemaColumn, DataType, Row, Schema, SchemaInferer, Value},
     Result, TinyEtlError,
 };
 
@@ -42,6 +42,8 @@ pub struct SqliteSource {
     connection_string: String,
     pool: Option<SqlitePool>,
     table_name: String,
+    /// `--source-query`: read this query's result instead of the table
+    query: Option<String>,
     /// One streaming `SELECT` for the whole read (no OFFSET paging)
     stream: Option<RowStream>,
     consumed: bool,
@@ -68,9 +70,68 @@ impl SqliteSource {
             connection_string: format!("sqlite:{}", db_path),
             pool: None,
             table_name: table.to_string(),
+            query: None,
             stream: None,
             consumed: false,
         })
+    }
+
+    /// Read the result of `query`; `connection_string` is the database file, without `#table`
+    pub fn with_query(connection_string: &str, query: &str) -> Result<Self> {
+        let db_path = connection_string
+            .trim_start_matches("sqlite://")
+            .trim_start_matches("sqlite:");
+        Ok(Self {
+            connection_string: format!("sqlite:{}", db_path),
+            pool: None,
+            table_name: String::new(),
+            query: Some(query.to_string()),
+            stream: None,
+            consumed: false,
+        })
+    }
+
+    /// The statement that reads every row
+    fn select_sql(&self) -> String {
+        match &self.query {
+            Some(query) => query.clone(),
+            None => format!("SELECT * FROM \"{}\"", self.table_name),
+        }
+    }
+
+    /// A query's columns and types, from a sample of its rows (a query has no declared types)
+    async fn infer_query_schema(&self, query: &str, sample_size: usize) -> Result<Schema> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
+        // Run the query as written and stop after the sample: SQLite produces rows lazily, and
+        // errors then point at the user's SQL rather than at a wrapper
+        let mut sample = Vec::new();
+        let mut rows = sqlx::query(sqlx::AssertSqlSafe(query.to_string())).fetch(pool);
+        while sample.len() < sample_size {
+            match rows.next().await {
+                Some(row) => sample.push(row.map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to run the query: {}", e))
+                })?),
+                None => break,
+            }
+        }
+        drop(rows);
+        let Some(first) = sample.first() else {
+            return Ok(Schema {
+                columns: Vec::new(),
+                estimated_rows: Some(0),
+                primary_key_candidate: None,
+            });
+        };
+        let order: Vec<String> = first
+            .columns()
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        let rows: Vec<Row> = sample.iter().map(Self::row_values).collect();
+        SchemaInferer::infer_from_rows_ordered(&rows, &order)
     }
 
     /// Run `SELECT *` once on its own connection and stream the rows.
@@ -79,7 +140,7 @@ impl SqliteSource {
             .pool
             .clone()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
-        let sql = format!("SELECT * FROM \"{}\"", self.table_name);
+        let sql = self.select_sql();
         Ok(RowStream::spawn(move |mut sink| async move {
             let mut conn = match pool.acquire().await {
                 Ok(conn) => conn,
@@ -161,6 +222,9 @@ impl Source for SqliteSource {
     async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
         if self.pool.is_none() {
             self.connect().await?;
+        }
+        if let Some(query) = &self.query {
+            return self.infer_query_schema(query, sample_size).await;
         }
 
         let pool = self.pool.as_ref().unwrap();
@@ -255,6 +319,9 @@ impl Source for SqliteSource {
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
+        if self.query.is_some() {
+            return Ok(None); // counting would run the query
+        }
         if let Some(pool) = &self.pool {
             let count_result = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "SELECT COUNT(*) as count FROM {}",

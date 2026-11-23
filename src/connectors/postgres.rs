@@ -91,7 +91,7 @@ impl Source for PostgresSource {
 
         let query = if let Some(ref custom_query) = self.query {
             format!(
-                "SELECT * FROM ({}) AS subquery LIMIT {}",
+                "SELECT * FROM ({}) AS tinyetl_query LIMIT {}",
                 custom_query, sample_size
             )
         } else {
@@ -217,8 +217,9 @@ impl PostgresSource {
             .pool
             .clone()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
+        // A query runs exactly as written; only the schema sample wraps it
         let sql = match &self.query {
-            Some(query) => format!("SELECT * FROM ({}) AS subquery", query),
+            Some(query) => query.clone(),
             None => format!("SELECT * FROM {}", self.table_name),
         };
         Ok(RowStream::spawn(move |mut sink| async move {

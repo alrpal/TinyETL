@@ -470,6 +470,8 @@ struct OpenCursor {
 pub struct OdbcSource {
     connection_string: String,
     table_name: String,
+    /// `--source-query`: read this query's result instead of the table
+    query: Option<String>,
     /// Behind a `Mutex` because `Source` must be `Sync`; ODBC handles are only `Send`.
     open: Mutex<Option<OpenCursor>>,
     schema: Option<Schema>,
@@ -482,32 +484,51 @@ impl OdbcSource {
         Ok(Self {
             connection_string,
             table_name,
+            query: None,
             open: Mutex::new(None),
             schema: None,
             exhausted: false,
         })
     }
 
-    /// Connect and run `SELECT * FROM <table>`, replacing any cursor already open.
+    /// Read the result of `query`; `connection_string` has no `#table`
+    pub fn with_query(connection_string: &str, query: &str) -> Result<Self> {
+        Ok(Self {
+            connection_string: connection_string.trim_start_matches("odbc://").to_string(),
+            table_name: String::new(),
+            query: Some(query.to_string()),
+            open: Mutex::new(None),
+            schema: None,
+            exhausted: false,
+        })
+    }
+
+    /// What is read, for error messages
+    fn what(&self) -> String {
+        match &self.query {
+            Some(_) => "the query".to_string(),
+            None => format!("table '{}'", self.table_name),
+        }
+    }
+
+    /// Connect and run `SELECT * FROM <table>` (or the query), replacing any cursor already open.
     fn open_cursor(&mut self) -> Result<()> {
         let conn = connect(&self.connection_string)?;
         let dialect = Dialect::detect(&conn);
-        let query = format!("SELECT * FROM {}", dialect.qualified(&self.table_name));
+        let query = match &self.query {
+            Some(query) => query.clone(),
+            None => format!("SELECT * FROM {}", dialect.qualified(&self.table_name)),
+        };
         debug!("ODBC source query: {}", query);
 
+        let what = self.what();
         let mut cursor = conn
             .into_cursor(&query, (), None)
             .map_err(|e| {
-                TinyEtlError::DataTransfer(format!(
-                    "Failed to read table '{}': {}",
-                    self.table_name, e.error
-                ))
+                TinyEtlError::DataTransfer(format!("Failed to read {}: {}", what, e.error))
             })?
             .ok_or_else(|| {
-                TinyEtlError::DataTransfer(format!(
-                    "Query on table '{}' returned no result set",
-                    self.table_name
-                ))
+                TinyEtlError::DataTransfer(format!("Reading {} returned no result set", what))
             })?;
 
         let num_cols = cursor.num_result_cols().map_err(|e| {

@@ -16,6 +16,8 @@ use crate::{
 pub struct MysqlSource {
     database_url: String,
     table_name: String,
+    /// `--source-query`: read this query's result instead of the table
+    query: Option<String>,
     pool: Option<MySqlPool>,
     /// One streaming `SELECT` for the whole read (no OFFSET paging)
     stream: Option<RowStream>,
@@ -29,10 +31,31 @@ impl MysqlSource {
         Ok(Self {
             database_url: db_url,
             table_name,
+            query: None,
             pool: None,
             stream: None,
             consumed: false,
         })
+    }
+
+    /// Read the result of `query`; `connection_string` has no `#table`
+    pub fn with_query(connection_string: &str, query: &str) -> Result<Self> {
+        Ok(Self {
+            database_url: connection_string.to_string(),
+            table_name: String::new(),
+            query: Some(query.to_string()),
+            pool: None,
+            stream: None,
+            consumed: false,
+        })
+    }
+
+    /// The statement that reads every row
+    fn select_sql(&self) -> String {
+        match &self.query {
+            Some(query) => query.clone(),
+            None => format!("SELECT * FROM `{}`", self.table_name),
+        }
     }
 
     fn parse_connection_string(connection_string: &str) -> Result<(String, String)> {
@@ -57,7 +80,7 @@ impl MysqlSource {
         let pool = self.pool.clone().ok_or_else(|| {
             TinyEtlError::Connection("MySQL connection not established".to_string())
         })?;
-        let sql = format!("SELECT * FROM `{}`", self.table_name);
+        let sql = self.select_sql();
         Ok(RowStream::spawn(move |mut sink| async move {
             let mut conn = match pool.acquire().await {
                 Ok(conn) => conn,
@@ -227,7 +250,11 @@ impl Source for MysqlSource {
     async fn infer_schema(&mut self, sample_size: usize) -> Result<Schema> {
         let pool = self.get_pool().await?;
 
-        let query = format!("SELECT * FROM `{}` LIMIT {}", self.table_name, sample_size);
+        let query = format!(
+            "SELECT * FROM ({}) AS tinyetl_sample LIMIT {}",
+            self.select_sql(),
+            sample_size
+        );
 
         let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
             .fetch_all(pool)
@@ -287,6 +314,9 @@ impl Source for MysqlSource {
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
+        if self.query.is_some() {
+            return Ok(None); // counting would run the query
+        }
         let pool = self.get_pool().await?;
 
         // Try to get estimated count from information_schema

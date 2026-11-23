@@ -119,6 +119,19 @@ else
 fi
 
 echo ""
+echo "Step 6: --source-query (a CTE, an aggregate and ORDER BY, run in Snowflake)"
+rm -f "$WORK/regions.csv"
+if $TINYETL "$SAMPLE_URL" "$WORK/regions.csv" --source-query \
+    "WITH n AS (SELECT * FROM NATION) SELECT N_REGIONKEY AS region, COUNT(*) AS nations FROM n GROUP BY 1 ORDER BY 1;" \
+    >/dev/null 2>&1; then
+    got=$(tail -n +2 "$WORK/regions.csv" | paste -sd'|' -)
+    [ "$got" = "0,5|1,5|2,5|3,5|4,5" ] && pass "5 regions with 5 nations each" \
+        || fail "expected 5 regions of 5 nations, got $got"
+else
+    echo "⚠️  Could not query SNOWFLAKE_SAMPLE_DATA (it may not be shared with this account); skipping"
+fi
+
+echo ""
 if [ "$FAILED" = 0 ]; then
     echo "✅ Example 22 completed successfully"
 else

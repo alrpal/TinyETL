@@ -296,6 +296,99 @@ pub async fn create_source_from_url_with_type_and_options(
     }
 }
 
+/// A database source that reads the result of `query` instead of a whole table
+/// (`--source-query`). The connection string names the database without a `#table`.
+pub fn create_query_source(
+    connection_string: &str,
+    query: &str,
+    options: &std::collections::HashMap<String, String>,
+) -> Result<Box<dyn Source>> {
+    crate::options::check(
+        crate::options::Role::Source,
+        connection_string,
+        None,
+        options,
+    )?;
+    let query = normalize_query(query)?;
+    let configuration = |message: String| crate::TinyEtlError::Configuration(message);
+
+    let scheme = connection_string
+        .split_once("://")
+        .map(|(scheme, _)| scheme);
+    let is_file_db = |extensions: &[&str]| {
+        scheme.is_none()
+            && extensions.iter().any(|ext| {
+                connection_string
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .ends_with(ext)
+            })
+    };
+    let kind = match scheme {
+        Some("postgres" | "postgresql") => "postgres",
+        Some("mysql") => "mysql",
+        Some("mssql" | "sqlserver") => "mssql",
+        Some("odbc") => "odbc",
+        Some("snowflake") => "snowflake",
+        Some("sqlite") => "sqlite",
+        Some("duckdb") => "duckdb",
+        None if connection_string.starts_with("sqlite:")
+            || is_file_db(&[".db", ".sqlite", ".sqlite3"]) =>
+        {
+            "sqlite"
+        }
+        None if connection_string.starts_with("duckdb:") || is_file_db(&[".duckdb"]) => "duckdb",
+        _ => {
+            return Err(configuration(
+                "--source-query needs a database source (PostgreSQL, MySQL, SQL Server, SQLite, \
+                 DuckDB, ODBC or Snowflake)"
+                    .to_string(),
+            ))
+        }
+    };
+    // With a query there's no table. An ODBC connection string is passed to the driver whole,
+    // since its values may contain `#`; for the others a `#table` is a mistake.
+    let database =
+        if kind == "odbc" {
+            connection_string
+        } else {
+            match connection_string.split_once('#') {
+                Some((_, table)) if !table.is_empty() => return Err(configuration(
+                    "--source-query reads the query's result, so leave the #table off the source"
+                        .to_string(),
+                )),
+                Some((database, _)) => database,
+                None => connection_string,
+            }
+        };
+
+    Ok(match kind {
+        "postgres" => Box::new(postgres::PostgresSource::with_query(database, &query)?),
+        "mysql" => Box::new(mysql::MysqlSource::with_query(database, &query)?),
+        "mssql" => Box::new(mssql::MssqlSource::with_query(database, &query)?),
+        "odbc" => Box::new(odbc::OdbcSource::with_query(database, &query)?),
+        "snowflake" => Box::new(snowflake::SnowflakeSource::with_query(
+            database, &query, options,
+        )?),
+        "sqlite" => Box::new(sqlite::SqliteSource::with_query(database, &query)?),
+        _ => Box::new(duckdb::DuckdbSource::with_query(database, &query)?),
+    })
+}
+
+/// Trim a query and drop trailing semicolons, so it can be sampled or wrapped
+fn normalize_query(query: &str) -> Result<String> {
+    let query = query
+        .trim()
+        .trim_end_matches(|c: char| c == ';' || c.is_whitespace());
+    if query.is_empty() {
+        return Err(crate::TinyEtlError::Configuration(
+            "--source-query is empty".to_string(),
+        ));
+    }
+    Ok(query.to_string())
+}
+
 /// Create a target using the new protocol abstraction
 pub async fn create_target_from_url(connection_string: &str) -> Result<Box<dyn Target>> {
     create_target_from_url_with_options(connection_string, &std::collections::HashMap::new()).await
@@ -443,6 +536,138 @@ mod tests {
     fn test_create_sqlite_target_with_table() {
         let target = create_target("output.db#mytable");
         assert!(target.is_ok());
+    }
+
+    #[test]
+    fn test_query_source_errors() {
+        let none = std::collections::HashMap::new();
+        let err = |url: &str, query: &str| {
+            create_query_source(url, query, &none)
+                .err()
+                .expect("should fail")
+                .to_string()
+        };
+        assert!(err("data.csv", "SELECT 1").contains("needs a database source"));
+        assert!(err("s3://b/data.parquet", "SELECT 1").contains("needs a database source"));
+        assert!(err("out.db#t", "SELECT 1").contains("leave the #table off"));
+        assert!(err("postgres://u@h/db#t", "SELECT 1").contains("leave the #table off"));
+        assert!(err("postgres://u@h/db", " ; ").contains("is empty"));
+        for url in [
+            "postgres://u@h/db",
+            "postgresql://u@h/db",
+            "mysql://u@h/db",
+            "mssql://u:p@h/db",
+            "odbc://DSN=x;PWD={a#b}",
+            "data.db",
+            "sqlite:///tmp/data.db",
+            "data.duckdb",
+            "snowflake://u@acct/db/schema?warehouse=WH",
+        ] {
+            assert!(
+                create_query_source(url, "SELECT 1;", &none).is_ok(),
+                "{}",
+                url
+            );
+        }
+    }
+
+    /// Load rows into a table, then read them back through a query
+    async fn check_query_source(table_url: &str, database_url: &str) {
+        use crate::schema::{Column, DataType, Schema, Value};
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                },
+                Column {
+                    name: "region".into(),
+                    data_type: DataType::String,
+                    nullable: true,
+                },
+                Column {
+                    name: "amount".into(),
+                    data_type: DataType::Integer,
+                    nullable: true,
+                },
+            ],
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
+        let rows: Vec<crate::schema::Row> = (1..=6)
+            .map(|i| {
+                [
+                    ("id".to_string(), Value::Integer(i)),
+                    (
+                        "region".to_string(),
+                        Value::String(if i % 2 == 0 { "east" } else { "west" }.into()),
+                    ),
+                    ("amount".to_string(), Value::Integer(i * 10)),
+                ]
+                .into_iter()
+                .collect()
+            })
+            .collect();
+        let mut target = create_target(table_url).unwrap();
+        target.connect().await.unwrap();
+        target.create_table("", &schema).await.unwrap();
+        target.write_batch(&rows).await.unwrap();
+        target.finalize().await.unwrap();
+
+        // A CTE, an aggregate, ORDER BY and a trailing semicolon
+        let query = "WITH big AS (SELECT * FROM sales WHERE amount > 10)
+                     SELECT region, COUNT(*) AS orders, SUM(amount) AS total
+                     FROM big GROUP BY region ORDER BY region;";
+        let mut source =
+            create_query_source(database_url, query, &std::collections::HashMap::new()).unwrap();
+        source.connect().await.unwrap();
+        let schema = source.infer_schema(100).await.unwrap();
+        let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["region", "orders", "total"]);
+        assert_eq!(schema.columns[1].data_type, DataType::Integer);
+        source.reset().await.unwrap();
+        let mut read = Vec::new();
+        while source.has_more() {
+            let batch = source.read_batch(100).await.unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            read.extend(batch);
+        }
+        let summary: Vec<(String, String, String)> = read
+            .iter()
+            .map(|r| {
+                let text = |k: &str| match &r[k] {
+                    Value::String(s) => s.clone(),
+                    Value::Integer(i) => i.to_string(),
+                    Value::Decimal(d) => d.normalize().to_string(),
+                    other => format!("{:?}", other),
+                };
+                (text("region"), text("orders"), text("total"))
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("east".into(), "3".into(), "120".into()),
+                ("west".into(), "2".into(), "80".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_query_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("q.db").display().to_string();
+        check_query_source(&format!("{}#sales", db), &db).await;
+    }
+
+    #[tokio::test]
+    async fn test_duckdb_query_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("q.duckdb").display().to_string();
+        check_query_source(&format!("{}#sales", db), &db).await;
     }
 
     #[tokio::test]

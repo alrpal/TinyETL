@@ -16,6 +16,8 @@ pub struct Config {
     pub truncate: bool,
     pub transform: TransformConfig,
     pub source_type: Option<String>,
+    /// SQL to run on a database source instead of reading a whole table
+    pub source_query: Option<String>,
     pub source_secret_id: Option<String>,
     pub dest_secret_id: Option<String>,
     pub source_options: HashMap<String, String>,
@@ -37,6 +39,7 @@ impl Default for Config {
             truncate: false,
             transform: TransformConfig::None,
             source_type: None,
+            source_query: None,
             source_secret_id: None,
             dest_secret_id: None,
             source_options: HashMap::new(),

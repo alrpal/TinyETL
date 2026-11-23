@@ -37,6 +37,7 @@ target: postgres://etl:${DB_PASSWORD:-etl}@localhost/hr#employees
 #     auth.bearer: ${API_TOKEN}
 #     delimiter: ";"
 
+# source_query: SELECT * FROM orders WHERE paid   # a database source's query, instead of #table
 # truncate: true                       # replace the target's rows instead of appending
 # batch_size: 10000                    # rows per batch
 # schema_file: employees_schema.yaml   # column types and validation, instead of inference
@@ -81,6 +82,9 @@ pub struct YamlConfig {
     pub truncate: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_type: Option<String>,
+    /// SQL to run on a database source instead of reading a whole table
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_query: Option<String>,
     /// Lua assignments (a string), or the older `{ type, value }` form
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<Transform>,
@@ -168,6 +172,7 @@ impl YamlConfig {
             log_level: Some(config.log_level).filter(|l| *l != LogLevel::Info),
             truncate: Some(config.truncate).filter(|t| *t),
             source_type: config.source_type,
+            source_query: config.source_query,
             transform,
             transform_file,
             skip_existing: None,
@@ -234,6 +239,10 @@ impl YamlConfig {
             truncate: truncate.unwrap_or(false),
             transform,
             source_type: source_type.map(|t| substitute_env_vars(&t)).transpose()?,
+            source_query: self
+                .source_query
+                .map(|q| substitute_env_vars(&q))
+                .transpose()?,
             source_secret_id: None, // Not used with config files - env vars are substituted directly
             dest_secret_id: None,
             source_options: substitute_env_vars_in_map(&self.source.options)?,
@@ -441,6 +450,15 @@ transform: |
             TransformConfig::Script(
                 "total = row.qty * row.price\nprofit = total * 0.3\n".to_string()
             )
+        );
+
+        let config = load(
+            "source: postgres://u@h/db\ntarget: out.parquet\nsource_query: |\n  SELECT id\n  FROM orders\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.source_query.as_deref(),
+            Some("SELECT id\nFROM orders\n")
         );
 
         let config = load("source: a.csv\ntarget: b.csv\ntransform_file: t.lua\n").unwrap();

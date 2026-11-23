@@ -80,6 +80,8 @@ pub struct DuckdbSource {
     connection_string: String,
     connection: Option<Arc<Mutex<Connection>>>,
     table_name: String,
+    /// `--source-query`: read this query's result instead of the table
+    query: Option<String>,
     /// One streaming `SELECT` for the whole read (no OFFSET paging), on its own thread
     stream: Option<RowStream>,
     consumed: bool,
@@ -106,9 +108,33 @@ impl DuckdbSource {
             connection_string: db_path.to_string(),
             connection: None,
             table_name: table.to_string(),
+            query: None,
             stream: None,
             consumed: false,
         })
+    }
+
+    /// Read the result of `query`; `connection_string` is the database file, without `#table`
+    pub fn with_query(connection_string: &str, query: &str) -> Result<Self> {
+        let db_path = connection_string
+            .trim_start_matches("duckdb://")
+            .trim_start_matches("duckdb:");
+        Ok(Self {
+            connection_string: db_path.to_string(),
+            connection: None,
+            table_name: String::new(),
+            query: Some(query.to_string()),
+            stream: None,
+            consumed: false,
+        })
+    }
+
+    /// The statement that reads every row
+    fn select_sql(&self) -> String {
+        match &self.query {
+            Some(query) => query.clone(),
+            None => format!("SELECT * FROM \"{}\"", self.table_name),
+        }
     }
 
     /// Run `SELECT *` once on a cloned connection, on its own thread, and stream the rows.
@@ -121,7 +147,7 @@ impl DuckdbSource {
             .unwrap_or_else(|e| e.into_inner())
             .try_clone()
             .map_err(|e| TinyEtlError::Connection(format!("Failed to open a connection: {}", e)))?;
-        let sql = format!("SELECT * FROM \"{}\"", self.table_name);
+        let sql = self.select_sql();
         RowStream::spawn_blocking(move |mut sink| {
             let result = (|| -> std::result::Result<(), String> {
                 let mut stmt = conn
@@ -238,13 +264,17 @@ impl Source for DuckdbSource {
         let conn = self.connection.as_ref().unwrap();
         let conn = conn.lock().unwrap();
 
-        // Get table schema using PRAGMA or DESCRIBE
-        let query = format!("DESCRIBE \"{}\"", self.table_name);
-        let mut stmt = conn.prepare(&query).map_err(|e| {
-            TinyEtlError::DataTransfer(format!(
+        // Column names and types; DESCRIBE works for a query's result too, without running it
+        let query = match &self.query {
+            Some(query) => format!("DESCRIBE {}", query),
+            None => format!("DESCRIBE \"{}\"", self.table_name),
+        };
+        let mut stmt = conn.prepare(&query).map_err(|e| match &self.query {
+            Some(_) => TinyEtlError::DataTransfer(format!("Failed to run the query: {}", e)),
+            None => TinyEtlError::DataTransfer(format!(
                 "Failed to describe table '{}': {}",
                 self.table_name, e
-            ))
+            )),
         })?;
 
         let rows = stmt
@@ -294,15 +324,20 @@ impl Source for DuckdbSource {
             });
         }
 
-        // Get estimated row count
-        let count_query = format!("SELECT COUNT(*) FROM \"{}\"", self.table_name);
-        let count: i64 = conn
-            .query_row(&count_query, [], |row| row.get(0))
-            .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to count rows: {}", e)))?;
+        // Row count for the progress bar; not for a query, where counting would run it
+        let estimated_rows = if self.query.is_some() {
+            None
+        } else {
+            let count_query = format!("SELECT COUNT(*) FROM \"{}\"", self.table_name);
+            let count: i64 = conn
+                .query_row(&count_query, [], |row| row.get(0))
+                .map_err(|e| TinyEtlError::DataTransfer(format!("Failed to count rows: {}", e)))?;
+            Some(count as usize)
+        };
 
         Ok(Schema {
             columns,
-            estimated_rows: Some(count as usize),
+            estimated_rows,
             primary_key_candidate: None,
         })
     }
@@ -325,6 +360,9 @@ impl Source for DuckdbSource {
     }
 
     async fn estimated_row_count(&self) -> Result<Option<usize>> {
+        if self.query.is_some() {
+            return Ok(None); // counting would run the query
+        }
         if let Some(conn) = &self.connection {
             let conn = conn.lock().unwrap();
             let count_query = format!("SELECT COUNT(*) FROM \"{}\"", self.table_name);
