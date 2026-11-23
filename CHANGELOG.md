@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Examples 25 and 26**, which check delimited and compressed files (#21, #12) and JSON documents (#16, #3, #13), including the CrateDB and GH Archive files from those issues when the network is available
 - **Simpler YAML job files.** `source:` and `target:` can be plain strings, `version:` is optional, and every setting is a top-level key with the name of its command-line flag (`batch_size`, `truncate`, `transform`, `transform_file`, ...). `transform: |` takes Lua assignments directly. `${VAR:-default}` gives an environment variable a default. Job files in the older layout (`uri:`, settings under `options:`, `transform: { type, value }`) still load. `generate-config` prints only the settings that differ from the defaults, in the new layout
 - **Tab, semicolon and pipe delimited files** (#21). CSV sources detect the delimiter from the first lines (comma, tab, semicolon or pipe), `.tsv` files are read and written tab-separated, and the `delimiter` option sets it explicitly for sources and targets, including over HTTP, SSH and S3
 - **Gzip and Zstandard compressed files** (#12). Add `.gz` or `.zst` to any file format (`data.csv.gz`, `events.jsonl.gz`, `trips.parquet.zst`): sources are decompressed to a temporary file with flat memory, targets are compressed when the transfer finishes. Works locally and over HTTP, SSH and S3. Multi-member gzip files (`cat a.gz b.gz`) are read whole
