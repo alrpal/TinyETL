@@ -100,7 +100,7 @@ tinyetl report.xlsx report.csv
 tinyetl "postgresql://user:@host/db#users" "mysql://user:@host/db#users"
 
 # Transform while transferring
-tinyetl sales.csv results.db --transform "profit=row.revenue - row.costs; margin=profit/revenue"
+tinyetl sales.csv results.db --transform "profit=row.revenue - row.costs; margin=profit / row.revenue"
 
 # Large files stream with flat memory
 tinyetl huge_dataset.csv output.parquet
@@ -230,7 +230,7 @@ TinyETL supports two main categories of data sources and targets:
   tinyetl "https://api.example.com/export" data.csv --source-type=csv
   # For authenticated APIs, use --source-option or a YAML config (see HTTP Source Options section)
   ```
-- **SSH/SCP** - Secure file transfer
+- **SSH/SCP** - Download a remote file with the system's `scp` (sources only; key-based login as configured for `ssh`)
   ```bash
   tinyetl "ssh://user@server.com/data/file.csv" output.json
   tinyetl "ssh://user@server.com:2222/remote/data.parquet" local.csv
@@ -244,11 +244,9 @@ TinyETL supports two main categories of data sources and targets:
 
 **Protocol Features:**
 - **file://** - Local file system (default for simple paths)
-- **http://** and **https://** - Web downloads with progress tracking
-  - Supports Basic and Bearer token authentication
-  - Custom HTTP headers via YAML configuration
-  - Environment variable substitution for secure credential management
-- **ssh://** - Secure shell file transfer using SCP
+- **http://** and **https://** - Web downloads (sources only)
+  - Basic and Bearer token authentication, and custom headers, via endpoint options
+- **ssh://** - Downloads with the system's `scp` command, which must be installed (sources only)
 - **s3://** - Amazon S3 and S3-compatible object storage, as both source and target
   - Credentials from `AWS_*` environment variables, IAM roles, or YAML options (see S3 Options section)
 - **--source-type** parameter for format override (useful for URLs without clear extensions)
@@ -511,7 +509,7 @@ tinyetl "snowflake://LOADER@MYORG-MYACCOUNT/ANALYTICS/RAW?warehouse=LOAD_WH#orde
 - **Names:** plain names (letters, digits, `_`, `$`) are left unquoted, so Snowflake stores them upper-case: a CSV column `customer_id` becomes `CUSTOMER_ID`, which you can query as `customer_id`, and reading the table back gives `CUSTOMER_ID`. Names with other characters are quoted and keep their exact case
 - **Column types for new tables:** `VARCHAR`, `NUMBER(38,0)`, `NUMBER(38,10)`, `BOOLEAN`, `DATE`, `TIMESTAMP_NTZ` (TinyETL's timestamps are UTC) and `VARIANT` for JSON. To choose your own types, create the table first
 
-YAML options for Snowflake endpoints (under `source.options` / `target.options`):
+Endpoint options for Snowflake (`--source-option` / `--target-option`, or `options:` in a job file):
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -881,8 +879,8 @@ Schema validation occurs **before** transformations, ensuring input data quality
 
 ```bash
 # Validate input, then transform 
-tinyetl raw_sales.csv processed.db 
-  --schema-file sales_schema.yaml 
+tinyetl raw_sales.csv processed.db \
+  --schema-file sales_schema.yaml \
   --transform "profit=row.total_amount * 0.3; order_year=tonumber(row.order_date:match('^(%d%d%d%d)'))"
 ```
 
@@ -1103,13 +1101,13 @@ tinyetl customer_data.csv clean_customers.db --schema-file customer_schema.yaml
 tinyetl large_import.csv target.db --schema-file validation.yaml --preview 5
 
 # Combined schema validation and transformations
-tinyetl sales_export.csv analytics.db 
-  --schema-file sales_schema.yaml 
+tinyetl sales_export.csv analytics.db \
+  --schema-file sales_schema.yaml \
   --transform "profit_margin=(row.total_amount - row.cost) / row.total_amount"
 
 # Validate API data before processing
-tinyetl "https://api.example.com/export" local_data.db 
-  --source-type=csv 
+tinyetl "https://api.example.com/export" local_data.db \
+  --source-type=csv \
   --schema-file api_schema.yaml
 ```
 
