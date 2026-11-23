@@ -1,5 +1,5 @@
 # TinyETL
-**Move data from anywhere to anywhere with one command**
+**Data from here to there, in one command.**
 
 [![CI](https://github.com/alrpal/TinyETL/actions/workflows/pr.yaml/badge.svg?branch=master)](https://github.com/alrpal/TinyETL/actions/workflows/pr.yaml)
 [![Version](https://img.shields.io/badge/version-0.11.1-blue)](https://github.com/alrpal/tinyetl/releases)
@@ -8,7 +8,7 @@
 
 ![TinyETL Demo](examples/tinyetl_preview2-normal-framerate.gif)
 
-One binary, no setup: give TinyETL a source and a target, and it works out the formats, column types and tables. Quick enough for a one-off job, and robust enough to be the data transfer step in your pipeline.
+TinyETL replaces the throwaway script. Move any file or database to any other in one command: no Python, no drivers, no setup. It works out formats, column types and tables on its own, and it's fast and predictable enough to be the transfer step in a production pipeline. Think `cp`, for data.
 
 ```bash
 # MySQL → Parquet with inline transformation 
@@ -34,6 +34,8 @@ tinyetl "https://api.data.gov/export.json" analysis.parquet
 - ✅ **Lua transformations** — add, change and filter columns and rows on the way
 - ✅ **Pipeline-ready** — each database load runs in one transaction, so a failed run leaves the table as it was; errors are plain text with a non-zero exit code; jobs can live in YAML files with environment variables for secrets
 - ✅ **Cross-platform** — Linux, macOS and Windows, on x86_64 and ARM64
+
+Most data movement doesn't need a platform. TinyETL keeps it to one command.
 
 ## Contents
 
