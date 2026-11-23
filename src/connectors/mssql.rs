@@ -86,15 +86,16 @@ impl MssqlSource {
         }
 
         // Set database name
-        let database = url.path().trim_start_matches('/');
+        let database = decode(url.path().trim_start_matches('/'));
         if !database.is_empty() {
             config.database(database);
         }
 
         // Set authentication
         if !url.username().is_empty() {
-            let username = url.username();
-            let password = url.password().unwrap_or("");
+            // A password with `@`, `:` or `/` has to be percent-encoded in the URL
+            let username = decode(url.username());
+            let password = decode(url.password().unwrap_or(""));
             config.authentication(AuthMethod::sql_server(username, password));
         } else {
             // For simplicity, we require username/password authentication
@@ -103,10 +104,31 @@ impl MssqlSource {
             ));
         }
 
-        // Configure encryption - use NotSupported to avoid TLS issues with self-signed certs
-        // This is equivalent to TrustServerCertificate=yes in ODBC
-        config.encryption(EncryptionLevel::NotSupported);
-        config.trust_cert();
+        // Encrypted by default, like ODBC Driver 18. The server certificate is trusted unless
+        // `trust_server_certificate=false`, since most servers have a self-signed one.
+        let mut encrypt = true;
+        let mut trust_cert = true;
+        for (key, value) in url.query_pairs() {
+            match key.as_ref() {
+                "encrypt" => encrypt = parse_bool(&key, &value)?,
+                "trust_server_certificate" => trust_cert = parse_bool(&key, &value)?,
+                other => {
+                    return Err(TinyEtlError::Configuration(format!(
+                        "Unknown SQL Server parameter '{}'. Valid parameters: encrypt, trust_server_certificate",
+                        other
+                    )))
+                }
+            }
+        }
+        // `encrypt=false` still encrypts the login, so the password never crosses in clear text
+        config.encryption(if encrypt {
+            EncryptionLevel::Required
+        } else {
+            EncryptionLevel::Off
+        });
+        if trust_cert {
+            config.trust_cert();
+        }
 
         // Add connection timeout (10 seconds)
         let tcp = timeout(
@@ -141,6 +163,23 @@ impl MssqlSource {
         })?;
 
         Ok(client)
+    }
+}
+
+fn decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" => Ok(true),
+        "false" | "no" | "0" => Ok(false),
+        _ => Err(TinyEtlError::Configuration(format!(
+            "Invalid SQL Server parameter {}={}: use true or false",
+            key, value
+        ))),
     }
 }
 
@@ -791,6 +830,41 @@ mod tests {
     use super::*;
     use crate::schema::{DataType, Value};
     use std::collections::HashMap;
+
+    #[test]
+    fn test_parse_bool() {
+        assert!(parse_bool("encrypt", "TRUE").unwrap());
+        assert!(parse_bool("encrypt", "yes").unwrap());
+        assert!(!parse_bool("encrypt", "0").unwrap());
+        assert!(parse_bool("encrypt", "maybe").is_err());
+    }
+
+    #[test]
+    fn test_decode_credentials() {
+        assert_eq!(decode("p%40ss%3Aw%2Frd%21"), "p@ss:w/rd!");
+        assert_eq!(decode("plain"), "plain");
+    }
+
+    #[tokio::test]
+    async fn test_connection_parameters_are_checked_before_connecting() {
+        let err = MssqlSource::create_client("mssql://sa:p@localhost:1/db?encrpyt=true")
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("Unknown SQL Server parameter 'encrpyt'"),
+            "{}",
+            err
+        );
+
+        let err = MssqlSource::create_client("mssql://sa:p@localhost:1/db?encrypt=maybe")
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("encrypt=maybe"), "{}", err);
+    }
 
     #[test]
     fn test_parse_connection_string_valid() {

@@ -312,7 +312,8 @@ pub async fn create_target_from_url_with_options(
     // Check if this looks like a protocol URL
     if connection_string.contains("://") {
         // Try database connectors first for database protocols
-        if connection_string.starts_with("sqlite://")
+        if connection_string.starts_with("duckdb://")
+            || connection_string.starts_with("sqlite://")
             || connection_string.starts_with("postgres://")
             || connection_string.starts_with("postgresql://")
             || connection_string.starts_with("mysql://")
@@ -433,6 +434,23 @@ mod tests {
     fn test_create_sqlite_target_with_table() {
         let target = create_target("output.db#mytable");
         assert!(target.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_database_url_targets_skip_protocols() {
+        for url in [
+            "duckdb://output.duckdb#t",
+            "sqlite://output.db#t",
+            "postgres://u:p@localhost/db#t",
+        ] {
+            assert!(
+                create_target_from_url_with_options(url, &Default::default())
+                    .await
+                    .is_ok(),
+                "{}",
+                url
+            );
+        }
     }
 
     #[test]

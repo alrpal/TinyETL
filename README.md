@@ -360,7 +360,11 @@ postgresql://username:password@hostname:port/database#table_name
 # Examples
 tinyetl data.csv "postgresql://user:@localhost/mydb#customers"
 tinyetl data.csv "postgresql://admin:@db.example.com:5432/analytics#sales_data"
+
+# A table in another schema, and a connection parameter
+tinyetl data.csv "postgresql://admin:@db.example.com/analytics?sslmode=require#staging.sales"
 ```
+URL parameters such as `sslmode` go to the driver unchanged.
 
 **MySQL:**
 ```bash
@@ -394,7 +398,11 @@ mssql://username:password@hostname:port/database#table_name
 # Examples
 tinyetl data.csv "mssql://sa:MyPass123@localhost:1433/mydb#customers"
 tinyetl "mssql://sa:MyPass123@localhost:1433/mydb#orders" orders.csv
+
+# Verify the server's certificate (e.g. Azure SQL)
+tinyetl data.csv "mssql://user:pass@myserver.database.windows.net/mydb?trust_server_certificate=false#customers"
 ```
+Connections are encrypted, like ODBC Driver 18. Parameters: `encrypt=false` encrypts only the login; `trust_server_certificate=false` checks the server's certificate, which is trusted by default since most servers use a self-signed one. Percent-encode special characters in the password (`@` → `%40`, `:` → `%3A`, `/` → `%2F`).
 Tables are in the login's default schema (usually `dbo`); `schema.table` names aren't supported by the native connector yet. For other schemas, Windows authentication or other driver features, use `odbc://` with Microsoft's ODBC driver (below).
 
 **CrateDB:**

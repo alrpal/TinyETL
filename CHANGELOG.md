@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Example `16_csv_to_mssql_odbc`, which needed Microsoft's ODBC driver installed locally. `test_env/odbc/run.sh` covers SQL Server through ODBC (Driver 18) in Docker, along with PostgreSQL, MySQL and SQLite
 
 ### Fixed
+- **SQL Server connections are encrypted.** The native connector switched encryption off (TLS now uses rustls, since macOS's TLS stack hung in the handshake), so the login, password included, crossed the network unencrypted, and servers that require encryption (Azure SQL) refused it. Connections are now encrypted by default, like ODBC Driver 18. `?encrypt=false` encrypts only the login, and `?trust_server_certificate=false` verifies the server's certificate (it's trusted by default, since most servers have a self-signed one)
+- **SQL Server passwords with special characters.** The user name and password weren't URL-decoded, so a password containing `@`, `:` or `/` (which must be percent-encoded in the URL) failed to log in
+- **PostgreSQL `schema.table` targets** created a table literally named `"schema.table"` in the default schema; they now write to `table` in `schema`. Checking whether the target table exists now looks only in that schema (or the default one), not in every schema
+- **`duckdb://` targets** failed with "Unsupported protocol: duckdb" (`file.duckdb#table` worked)
+- **CrateDB `--truncate` right after a load** left the newest rows behind, since CrateDB's `DELETE` only sees rows after its periodic refresh. The table is refreshed first
 - **SQLite and MySQL targets dropped values when rows had different keys.** They took the columns to insert from the first row of each batch, so with JSON sources whose objects have optional fields, a field missing from that first row was lost for the whole batch: loading a GH Archive hour into SQLite kept 0 of 3,245 `org` values. MySQL also wrote a missing value as an empty string instead of NULL, and SQL Server rejected such rows ("Row has 7 values but schema expects 8"). Every row is now written with the table's columns, and a missing key is NULL
 
 ## [0.11.1] - 2026-11-22

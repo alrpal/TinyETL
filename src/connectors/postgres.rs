@@ -364,11 +364,24 @@ impl PostgresTarget {
             TinyEtlError::DataTransfer(format!("Failed to start a transaction: {}", e))
         })?;
         if let Some(table) = self.truncate_table.take() {
+            // CrateDB's DELETE only sees refreshed rows (about once a second), so rows loaded
+            // just before would survive it
+            if self.cratedb {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "REFRESH TABLE {}",
+                    qualified(&table)
+                )))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    TinyEtlError::DataTransfer(format!("Failed to refresh table: {}", e))
+                })?;
+            }
             // TRUNCATE is transactional in PostgreSQL; CrateDB has no TRUNCATE
             let sql = if self.cratedb {
-                format!("DELETE FROM \"{}\"", table)
+                format!("DELETE FROM {}", qualified(&table))
             } else {
-                format!("TRUNCATE TABLE \"{}\"", table)
+                format!("TRUNCATE TABLE {}", qualified(&table))
             };
             sqlx::query(sqlx::AssertSqlSafe(sql))
                 .execute(&mut *tx)
@@ -423,6 +436,14 @@ impl PostgresTarget {
     }
 }
 
+/// Quote a table name for SQL; `schema.table` becomes `"schema"."table"`
+fn qualified(name: &str) -> String {
+    name.split('.')
+        .map(|part| format!("\"{}\"", part.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 #[async_trait]
 impl Target for PostgresTarget {
     async fn connect(&mut self) -> Result<()> {
@@ -463,7 +484,10 @@ impl Target for PostgresTarget {
         self.table_name = Some(actual_table_name.clone());
         self.schema = Some(schema.clone());
 
-        let mut create_sql = format!("CREATE TABLE IF NOT EXISTS \"{}\" (", actual_table_name);
+        let mut create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} (",
+            qualified(&actual_table_name)
+        );
 
         let column_defs: Vec<String> = schema
             .columns
@@ -541,8 +565,8 @@ impl Target for PostgresTarget {
             }
 
             let insert_sql = format!(
-                "INSERT INTO \"{}\" ({}) VALUES {}",
-                table_name,
+                "INSERT INTO {} ({}) VALUES {}",
+                qualified(table_name),
                 column_names.join(", "),
                 placeholders.join(", ")
             );
@@ -621,16 +645,22 @@ impl Target for PostgresTarget {
             .as_ref()
             .ok_or_else(|| TinyEtlError::Connection("Not connected".to_string()))?;
 
-        let exists_query =
-            "SELECT EXISTS (SELECT * FROM information_schema.tables WHERE table_name = $1)";
-
-        let exists: bool = sqlx::query_scalar(exists_query)
-            .bind(table_name)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| {
-                TinyEtlError::DataTransfer(format!("Failed to check table existence: {}", e))
-            })?;
+        // `schema.table`, or a table in the schema an unqualified CREATE TABLE writes to
+        let (schema, table) = match table_name.split_once('.') {
+            Some((schema, table)) => (Some(schema), table),
+            None => (None, table_name),
+        };
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT * FROM information_schema.tables \
+             WHERE table_name = $1 AND table_schema = COALESCE($2, current_schema()))",
+        )
+        .bind(table)
+        .bind(schema)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to check table existence: {}", e))
+        })?;
 
         Ok(exists)
     }
@@ -650,6 +680,13 @@ impl Target for PostgresTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_qualified() {
+        assert_eq!(qualified("users"), "\"users\"");
+        assert_eq!(qualified("s1.users"), "\"s1\".\"users\"");
+        assert_eq!(qualified("we\"ird"), "\"we\"\"ird\"");
+    }
 
     #[test]
     fn test_postgres_source_new() {
