@@ -374,11 +374,22 @@ fn connect(connection_string: &str) -> Result<Connection<'static>> {
     let env = odbc_api::environment().map_err(|e| {
         TinyEtlError::Connection(format!("Failed to create ODBC environment: {}", e))
     })?;
-    let connection_string = resolve_driver_path(connection_string);
+    let connection_string = terminated(&resolve_driver_path(connection_string));
     env.connect_with_connection_string(&connection_string, ConnectionOptions::default())
         .map_err(|e| {
             TinyEtlError::Connection(format!("Failed to connect to ODBC data source: {}", e))
         })
+}
+
+/// End the connection string with `;`. The string is passed with its length and no NUL, and
+/// some drivers read past the end of the last value: MariaDB Connector/ODBC 3.1 then fails to
+/// log in when the password comes last ("Access denied", depending on what's in memory).
+fn terminated(connection_string: &str) -> String {
+    let mut connection_string = connection_string.trim_end().to_string();
+    if !connection_string.is_empty() && !connection_string.ends_with(';') {
+        connection_string.push(';');
+    }
+    connection_string
 }
 
 /// Split `odbc://<connection string>#<table>` into its two parts.
@@ -853,6 +864,14 @@ impl Target for OdbcTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_terminated() {
+        assert_eq!(terminated("DSN=x;PWD=secret"), "DSN=x;PWD=secret;");
+        assert_eq!(terminated("DSN=x;PWD={a;b} "), "DSN=x;PWD={a;b};");
+        assert_eq!(terminated("DSN=x;"), "DSN=x;");
+        assert_eq!(terminated(""), "");
+    }
 
     #[test]
     fn test_homebrew_odbc_sysini() {

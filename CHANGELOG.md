@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Example `16_csv_to_mssql_odbc`, which needed Microsoft's ODBC driver installed locally. `test_env/odbc/run.sh` covers SQL Server through ODBC (Driver 18) in Docker, along with PostgreSQL, MySQL and SQLite
 
 ### Fixed
+- **ODBC logins failing with "Access denied" now and then** with MariaDB Connector/ODBC when the password came last in the connection string: the driver read past the end of the string. TinyETL now ends the connection string with `;`
 - **Inline transforms can use earlier assignments**: `--transform "total=row.qty * row.price; profit=total * 0.3"` (the README's own example) failed with "attempt to perform arithmetic on a nil value (global 'total')". Inline and YAML transforms now work the same way, and `;` inside a quoted string no longer splits an assignment
 - **Lua transforms ran twice when loaded**, so top-level code in a `--transform-file` ran twice
 - **SQL Server connections are encrypted.** The native connector switched encryption off (TLS now uses rustls, since macOS's TLS stack hung in the handshake), so the login, password included, crossed the network unencrypted, and servers that require encryption (Azure SQL) refused it. Connections are now encrypted by default, like ODBC Driver 18. `?encrypt=false` encrypts only the login, and `?trust_server_certificate=false` verifies the server's certificate (it's trusted by default, since most servers have a self-signed one)
