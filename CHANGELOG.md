@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-24
+
 ### Added
 - **SQL transforms** (#2): `--sql "SELECT … FROM source"` (YAML `sql:`) runs DuckDB SQL over all the source rows, as a table named `source`: filters, aggregates, joins, window functions, `QUALIFY`, JSON functions. The rows are loaded into a temporary DuckDB database first, so the query sees the whole dataset and memory stays bounded (DuckDB spills to disk); the temp directory needs room for a copy of the data. A job uses SQL or Lua, not both
 - **Source queries**: `--source-query "SELECT …"` (YAML `source_query`) reads the result of a SQL query instead of a whole table, from PostgreSQL, MySQL, SQL Server, SQLite, DuckDB, ODBC and Snowflake. The query runs on the source database as written, including `WITH` and `ORDER BY`; SQL Server, DuckDB, ODBC and Snowflake take the column types from the database's description of the result
@@ -320,7 +322,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment variable support for secrets
 - Data transformation capabilities
 
-[Unreleased]: https://github.com/alrpal/TinyETL/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/alrpal/TinyETL/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/alrpal/TinyETL/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/alrpal/TinyETL/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/alrpal/TinyETL/compare/v0.10.0...v0.11.0
 [0.5.0]: https://github.com/alrpal/TinyETL/compare/v0.4.0...v0.5.0
