@@ -43,10 +43,11 @@ impl DataType {
             | ArrowDataType::Int16
             | ArrowDataType::Int32
             | ArrowDataType::Int64 => DataType::Integer,
-            ArrowDataType::UInt8
-            | ArrowDataType::UInt16
-            | ArrowDataType::UInt32
-            | ArrowDataType::UInt64 => DataType::Integer,
+            ArrowDataType::UInt8 | ArrowDataType::UInt16 | ArrowDataType::UInt32 => {
+                DataType::Integer
+            }
+            // Past i64::MAX: an exact decimal
+            ArrowDataType::UInt64 => DataType::Decimal,
             ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => {
                 DataType::Decimal
             }
@@ -55,7 +56,15 @@ impl DataType {
             ArrowDataType::Date32 | ArrowDataType::Date64 => DataType::Date,
             ArrowDataType::Timestamp(_, _) => DataType::DateTime,
             ArrowDataType::Null => DataType::Null,
-            _ => DataType::String, // Default to string for complex types
+            // Nested values are JSON (a JSON/JSONB column, nested in JSON output)
+            ArrowDataType::List(_)
+            | ArrowDataType::LargeList(_)
+            | ArrowDataType::FixedSizeList(_, _)
+            | ArrowDataType::Struct(_)
+            | ArrowDataType::Map(_, _) => DataType::Json,
+            // Text: strings in a dictionary, times, binary (as 0x hex), durations
+            ArrowDataType::Dictionary(_, value) => DataType::from_arrow(value),
+            _ => DataType::String,
         }
     }
 }
@@ -692,6 +701,8 @@ impl SchemaInferer {
             Value::Integer(_) => DataType::Integer,
             Value::Decimal(_) => DataType::Decimal,
             Value::Boolean(_) => DataType::Boolean,
+            // A value at midnight is a date; a column of dates and datetimes is DateTime
+            Value::Date(dt) if dt.time() == chrono::NaiveTime::MIN => DataType::Date,
             Value::Date(_) => DataType::DateTime,
             Value::Json(_) => DataType::Json,
             Value::Null => DataType::Null,
@@ -722,6 +733,12 @@ impl SchemaInferer {
         {
             // Whole and fractional numbers in one column (e.g. 84 and 29.85)
             DataType::Decimal
+        } else if non_null_types
+            .iter()
+            .all(|t| matches!(t, DataType::Date | DataType::DateTime))
+        {
+            // Dates and datetimes in one column
+            DataType::DateTime
         } else {
             // Mixed types default to String
             DataType::String

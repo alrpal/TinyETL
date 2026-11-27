@@ -1080,7 +1080,7 @@ mod tests {
         std::fs::write(&path, "{\"zip\":\"01826\",\"day\":\"2024-01-01\"}\n").unwrap();
         let (schema, rows) = read(&path, 10).await;
         assert_eq!(schema.columns[0].data_type, DataType::String);
-        assert_eq!(schema.columns[1].data_type, DataType::DateTime); // inferred from the text
+        assert_eq!(schema.columns[1].data_type, DataType::Date); // inferred from the text
         assert_eq!(rows[0]["zip"], Value::String("01826".to_string()));
         assert_eq!(rows[0]["day"], Value::String("2024-01-01".to_string()));
     }
