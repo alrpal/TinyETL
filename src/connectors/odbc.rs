@@ -424,6 +424,269 @@ fn map_odbc_type_to_datatype(col_desc: &ColumnDescription) -> DataType {
     }
 }
 
+/// How a column's values are read and converted
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadAs {
+    /// As text, parsed as the column's type ([`text_to_value`])
+    Text,
+    /// As bytes, written `0x` + lowercase hex (reading binary as text fails in some drivers)
+    Binary,
+    /// As bytes, a boolean: MySQL's bit(1), which its driver sends as the raw byte (a false one
+    /// as an empty string)
+    BitBytes,
+    /// JSON text, parsed
+    Json,
+    /// Text in lowercase (UUIDs, which drivers report in uppercase)
+    Lowercase,
+    /// Money as text (`$1,234.56`, `12.3400`): the digits; `normalize` drops trailing zeros
+    Money { normalize: bool },
+    /// A float as text (`0.10000000000000001`): its shortest decimal (`0.1`)
+    Float,
+    /// A time of day (`13:45:30.0000000`), without trailing fractional zeros
+    Time,
+    /// A PostgreSQL array literal (`{1,2}`, `{"a b",NULL}`), as a JSON array
+    PgArray,
+}
+
+/// The TinyETL type and the way to read a column, from its ODBC type and the database's own
+/// type name (`SQL_DESC_TYPE_NAME`: `json`, `uuid`, `money`, `_int4`, ...)
+fn column_reading(
+    col_desc: &ColumnDescription,
+    type_name: &str,
+    unsigned: bool,
+    kind: DbKind,
+) -> (DataType, ReadAs) {
+    use odbc_api::DataType as OdbcDataType;
+    let name = type_name.to_ascii_lowercase();
+    match (&col_desc.data_type, name.as_str()) {
+        // MySQL's booleans (declared types from the catalog)
+        (OdbcDataType::Bit, _) if kind == DbKind::MySql => (DataType::Boolean, ReadAs::BitBytes),
+        (_, "tinyint(1)") => (DataType::Boolean, ReadAs::Text),
+        // Past i64::MAX: an exact decimal
+        (OdbcDataType::BigInt, _) if unsigned => (DataType::Decimal, ReadAs::Text),
+        (_, name) if name.starts_with("bigint") && name.contains("unsigned") => {
+            (DataType::Decimal, ReadAs::Text)
+        }
+        (
+            OdbcDataType::Binary { .. }
+            | OdbcDataType::Varbinary { .. }
+            | OdbcDataType::LongVarbinary { .. },
+            _,
+        )
+        | (_, "bytea" | "blob" | "tinyblob" | "mediumblob" | "longblob" | "image") => {
+            (DataType::String, ReadAs::Binary)
+        }
+        (_, "json" | "jsonb") => (DataType::Json, ReadAs::Json),
+        (_, "uuid" | "uniqueidentifier") => (DataType::String, ReadAs::Lowercase),
+        (_, "money" | "smallmoney") => (
+            DataType::Decimal,
+            ReadAs::Money {
+                normalize: kind == DbKind::SqlServer,
+            },
+        ),
+        (_, "datetimeoffset" | "timestamptz") => (DataType::DateTime, ReadAs::Text),
+        (_, "bool" | "boolean") => (DataType::Boolean, ReadAs::Text),
+        // PostgreSQL arrays: `text[]` from the catalog, `_text` from some drivers
+        (_, name)
+            if kind == DbKind::Postgres && (name.starts_with('_') || name.ends_with("[]")) =>
+        {
+            (DataType::Json, ReadAs::PgArray)
+        }
+        (OdbcDataType::Time { .. }, _) | (_, "time" | "time2" | "timetz") => {
+            (DataType::String, ReadAs::Time)
+        }
+        (OdbcDataType::Real | OdbcDataType::Float { .. } | OdbcDataType::Double, _) => {
+            (DataType::Decimal, ReadAs::Float)
+        }
+        _ => (map_odbc_type_to_datatype(col_desc), ReadAs::Text),
+    }
+}
+
+/// The declared type of each column of `table` (lowercase, e.g. `jsonb`, `text[]`,
+/// `tinyint(1)`, `bigint unsigned`), from the database's catalog. Drivers report some types
+/// only vaguely (psqlODBC says "unknown" for jsonb and arrays; MariaDB's driver says "tinyint"
+/// for tinyint(1)). Empty for databases without a lookup here, or if it fails.
+fn declared_types(
+    conn: &Connection<'_>,
+    kind: DbKind,
+    table: &str,
+) -> std::collections::HashMap<String, String> {
+    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let unquote = |s: &str| s.trim_matches(|c| c == '"' || c == '`').to_string();
+    let (schema, name) = match table.rsplit_once('.') {
+        Some((schema, name)) => (Some(schema), name),
+        None => (None, table),
+    };
+    let query = match kind {
+        DbKind::Postgres => format!(
+            "SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a \
+             WHERE a.attrelid = to_regclass({}) AND a.attnum > 0 AND NOT a.attisdropped",
+            literal(table)
+        ),
+        DbKind::MySql => format!(
+            "SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {}",
+            schema.map_or("DATABASE()".to_string(), |s| literal(&unquote(s))),
+            literal(&unquote(name))
+        ),
+        _ => return Default::default(),
+    };
+    let mut types = std::collections::HashMap::new();
+    let Ok(Some(mut cursor)) = conn.execute(&query, (), None) else {
+        debug!("ODBC: no declared types for {}", table);
+        return types;
+    };
+    let (mut column, mut declared) = (Vec::new(), Vec::new());
+    while let Ok(Some(mut row)) = cursor.next_row() {
+        if row.get_wide_text(1, &mut column).unwrap_or(false)
+            && row.get_wide_text(2, &mut declared).unwrap_or(false)
+        {
+            types.insert(
+                String::from_utf16_lossy(&column),
+                String::from_utf16_lossy(&declared).to_ascii_lowercase(),
+            );
+        }
+    }
+    types
+}
+
+/// The database's name for a result column's type (`SQL_DESC_TYPE_NAME`), or "" if the driver
+/// doesn't say
+fn col_type_name(cursor: &mut impl odbc_api::ResultSetMetadata, column: u16) -> String {
+    use odbc_api::handles::Statement;
+    let statement = cursor.as_stmt_ref();
+    let mut buffer = vec![0u8; 256];
+    let mut length: i16 = 0;
+    // SAFETY: the buffer outlives the call, and its length is passed
+    let ret = unsafe {
+        odbc_api::sys::SQLColAttribute(
+            statement.as_sys(),
+            column,
+            odbc_api::sys::Desc::TypeName,
+            buffer.as_mut_ptr() as odbc_api::sys::Pointer,
+            buffer.len() as i16,
+            &mut length,
+            std::ptr::null_mut(),
+        )
+    };
+    if ret != odbc_api::sys::SqlReturn::SUCCESS
+        && ret != odbc_api::sys::SqlReturn::SUCCESS_WITH_INFO
+    {
+        return String::new();
+    }
+    let length = (length.max(0) as usize).min(buffer.len());
+    String::from_utf8_lossy(&buffer[..length])
+        .trim_end_matches('\0')
+        .to_string()
+}
+
+/// A value read as text, converted the way `read_as` says
+fn read_text(text: String, data_type: &DataType, read_as: ReadAs) -> Value {
+    match read_as {
+        ReadAs::Json => match serde_json::from_str(&text) {
+            Ok(json) => Value::Json(json),
+            Err(_) => Value::String(text),
+        },
+        ReadAs::Lowercase => Value::String(text.to_ascii_lowercase()),
+        ReadAs::Money { normalize } => {
+            let negative = text.contains('-') || (text.starts_with('(') && text.ends_with(')'));
+            let digits: String = text
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            match Decimal::from_str(&digits) {
+                Ok(d) => {
+                    let d = if negative { -d } else { d };
+                    Value::Decimal(if normalize { d.normalize() } else { d })
+                }
+                Err(_) => Value::String(text),
+            }
+        }
+        ReadAs::Float => match text.trim().parse::<f64>() {
+            Ok(f) if f.is_finite() => match Decimal::from_str(&f.to_string())
+                .or_else(|_| Decimal::from_scientific(&format!("{:e}", f)))
+            {
+                Ok(d) => Value::Decimal(d),
+                Err(_) => Value::String(text),
+            },
+            _ => Value::String(text),
+        },
+        ReadAs::Time => Value::String(match text.split_once('.') {
+            Some((whole, fraction)) => {
+                let fraction = fraction.trim_end_matches('0');
+                if fraction.is_empty() {
+                    whole.to_string()
+                } else {
+                    format!("{}.{}", whole, fraction)
+                }
+            }
+            None => text,
+        }),
+        ReadAs::PgArray => match pg_array_to_json(&text) {
+            Some(json) => Value::Json(json),
+            None => Value::String(text),
+        },
+        ReadAs::Text | ReadAs::Binary | ReadAs::BitBytes => text_to_value(text, data_type),
+    }
+}
+
+/// A PostgreSQL array literal as JSON: `{1,2}` → `[1,2]`, `{{1,2},{3,4}}` → nested,
+/// `{"a b",NULL}` → `["a b",null]`. Unquoted elements that are numbers or `t`/`f` become
+/// numbers and booleans.
+fn pg_array_to_json(text: &str) -> Option<serde_json::Value> {
+    fn parse(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<serde_json::Value> {
+        if chars.next()? != '{' {
+            return None;
+        }
+        let mut items = Vec::new();
+        loop {
+            match chars.peek()? {
+                '}' => {
+                    chars.next();
+                    return Some(serde_json::Value::Array(items));
+                }
+                ',' => {
+                    chars.next();
+                }
+                '{' => items.push(parse(chars)?),
+                '"' => {
+                    chars.next();
+                    let mut item = String::new();
+                    loop {
+                        match chars.next()? {
+                            '\\' => item.push(chars.next()?),
+                            '"' => break,
+                            c => item.push(c),
+                        }
+                    }
+                    items.push(serde_json::Value::String(item));
+                }
+                _ => {
+                    let mut item = String::new();
+                    while let Some(&c) = chars.peek() {
+                        if c == ',' || c == '}' {
+                            break;
+                        }
+                        item.push(c);
+                        chars.next();
+                    }
+                    items.push(match item.as_str() {
+                        "NULL" => serde_json::Value::Null,
+                        "t" => serde_json::Value::Bool(true),
+                        "f" => serde_json::Value::Bool(false),
+                        _ => serde_json::from_str::<serde_json::Number>(&item)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::String(item)),
+                    });
+                }
+            }
+        }
+    }
+    let mut chars = text.trim().chars().peekable();
+    let json = parse(&mut chars)?;
+    chars.next().is_none().then_some(json)
+}
+
 /// Convert a value read as text into the type of its column. If the text doesn't parse as that
 /// type, it is kept as a string so no data is lost.
 fn text_to_value(text: String, data_type: &DataType) -> Value {
@@ -435,8 +698,9 @@ fn text_to_value(text: String, data_type: &DataType) -> Value {
             .ok()
             .map(Value::Decimal),
         DataType::Boolean => match trimmed.to_ascii_lowercase().as_str() {
-            "1" | "true" | "t" | "yes" | "y" => Some(Value::Boolean(true)),
-            "0" | "false" | "f" | "no" | "n" => Some(Value::Boolean(false)),
+            // MariaDB's driver sends bit(1) as the byte itself
+            "1" | "true" | "t" | "yes" | "y" | "\u{1}" => Some(Value::Boolean(true)),
+            "0" | "false" | "f" | "no" | "n" | "\u{0}" => Some(Value::Boolean(false)),
             _ => None,
         },
         DataType::Date | DataType::DateTime => DateParser::try_parse(trimmed),
@@ -461,7 +725,7 @@ fn value_to_text(value: &Value) -> Option<String> {
 /// The open result set of a source, with the type of each column.
 struct OpenCursor {
     cursor: OwnedCursor<Connection<'static>>,
-    columns: Vec<(String, DataType)>,
+    columns: Vec<(String, DataType, ReadAs)>,
     /// No row has been fetched yet, so the cursor is still at the start.
     fresh: bool,
 }
@@ -515,6 +779,10 @@ impl OdbcSource {
     fn open_cursor(&mut self) -> Result<()> {
         let conn = connect(&self.connection_string)?;
         let dialect = Dialect::detect(&conn);
+        let declared = match &self.query {
+            Some(_) => Default::default(),
+            None => declared_types(&conn, dialect.kind, &self.table_name),
+        };
         let query = match &self.query {
             Some(query) => query.clone(),
             None => format!("SELECT * FROM {}", dialect.qualified(&self.table_name)),
@@ -544,14 +812,25 @@ impl OdbcSource {
             let name = col_desc.name_to_string().map_err(|e| {
                 TinyEtlError::DataTransfer(format!("Failed to get column name: {}", e))
             })?;
-            let data_type = map_odbc_type_to_datatype(&col_desc);
+            // The catalog's declared type when there is one, else what the driver reports
+            let type_name = declared
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| col_type_name(&mut cursor, i));
+            let unsigned = cursor.column_is_unsigned(i).unwrap_or(false);
+            let (data_type, read_as) =
+                column_reading(&col_desc, &type_name, unsigned, dialect.kind);
+            debug!(
+                "ODBC column {}: {:?} ({}) → {:?}",
+                name, col_desc.data_type, type_name, data_type
+            );
             schema_columns.push(Column {
                 name: name.clone(),
                 data_type: data_type.clone(),
                 // Drivers that can't tell report "unknown"; treat that as nullable
                 nullable: col_desc.nullability != odbc_api::Nullability::NoNulls,
             });
-            columns.push((name, data_type));
+            columns.push((name, data_type, read_as));
         }
 
         self.schema = Some(Schema {
@@ -602,8 +881,10 @@ impl Source for OdbcSource {
         open.fresh = false;
 
         let mut rows = Vec::with_capacity(batch_size.min(10_000));
-        // Read as UTF-16 (SQL_C_WCHAR) so the driver never converts through a narrow code page
+        // Read as UTF-16 (SQL_C_WCHAR) so the driver never converts through a narrow code page;
+        // binary columns as bytes
         let mut buf: Vec<u16> = Vec::new();
+        let mut bytes: Vec<u8> = Vec::new();
         while rows.len() < batch_size {
             let mut row_cursor =
                 match open.cursor.next_row().map_err(|e| {
@@ -617,16 +898,26 @@ impl Source for OdbcSource {
                 };
 
             let mut row = Row::new();
-            for (index, (name, data_type)) in open.columns.iter().enumerate() {
-                let is_non_null = row_cursor
-                    .get_wide_text(index as u16 + 1, &mut buf)
-                    .map_err(|e| {
-                        TinyEtlError::DataTransfer(format!("Failed to read column {}: {}", name, e))
-                    })?;
-                let value = if is_non_null {
-                    text_to_value(String::from_utf16_lossy(&buf), data_type)
+            for (index, (name, data_type, read_as)) in open.columns.iter().enumerate() {
+                let column = index as u16 + 1;
+                let failed = |e: odbc_api::Error| {
+                    TinyEtlError::DataTransfer(format!("Failed to read column {}: {}", name, e))
+                };
+                let value = if *read_as == ReadAs::Binary {
+                    match row_cursor.get_binary(column, &mut bytes).map_err(failed)? {
+                        true => Value::String(format!("0x{}", hex::encode(&bytes))),
+                        false => Value::Null,
+                    }
+                } else if *read_as == ReadAs::BitBytes {
+                    match row_cursor.get_binary(column, &mut bytes).map_err(failed)? {
+                        true => Value::Boolean(bytes.iter().any(|b| *b != 0 && *b != b'0')),
+                        false => Value::Null,
+                    }
                 } else {
-                    Value::Null
+                    match row_cursor.get_wide_text(column, &mut buf).map_err(failed)? {
+                        true => read_text(String::from_utf16_lossy(&buf), data_type, *read_as),
+                        false => Value::Null,
+                    }
                 };
                 row.insert(name.clone(), value);
             }
@@ -1071,6 +1362,54 @@ mod tests {
                 "VARCHAR(4000)"
             ]
         );
+    }
+
+    #[test]
+    fn test_read_text_by_database_type() {
+        let read =
+            |text: &str, read_as| render(read_text(text.to_string(), &DataType::String, read_as));
+        assert_eq!(
+            read("$1,234.56", ReadAs::Money { normalize: false }),
+            "dec 1234.56"
+        );
+        assert_eq!(
+            read("-$5.00", ReadAs::Money { normalize: false }),
+            "dec -5.00"
+        );
+        assert_eq!(
+            read("12.3400", ReadAs::Money { normalize: true }),
+            "dec 12.34"
+        );
+        assert_eq!(read("0.10000000000000001", ReadAs::Float), "dec 0.1");
+        assert_eq!(read("13:45:30.0000000", ReadAs::Time), "str 13:45:30");
+        assert_eq!(read("13:45:30.1230000", ReadAs::Time), "str 13:45:30.123");
+        assert_eq!(read("123E4567-AB", ReadAs::Lowercase), "str 123e4567-ab");
+        assert_eq!(read("{\"a\": [1]}", ReadAs::Json), "json {\"a\":[1]}");
+    }
+
+    #[test]
+    fn test_pg_array_to_json() {
+        let json = |text: &str| pg_array_to_json(text).map(|j| j.to_string());
+        assert_eq!(json("{1,2,3}").as_deref(), Some("[1,2,3]"));
+        assert_eq!(json("{}").as_deref(), Some("[]"));
+        assert_eq!(json("{a,b}").as_deref(), Some("[\"a\",\"b\"]"));
+        assert_eq!(
+            json("{\"a b\",NULL,\"say \\\"hi\\\"\"}").as_deref(),
+            Some("[\"a b\",null,\"say \\\"hi\\\"\"]")
+        );
+        assert_eq!(json("{{1,2},{3,4}}").as_deref(), Some("[[1,2],[3,4]]"));
+        assert_eq!(json("{t,f}").as_deref(), Some("[true,false]"));
+        assert_eq!(json("not an array"), None);
+        assert_eq!(json("{1,2"), None);
+    }
+
+    fn render(value: Value) -> String {
+        match value {
+            Value::Decimal(d) => format!("dec {}", d),
+            Value::String(s) => format!("str {}", s),
+            Value::Json(j) => format!("json {}", j),
+            other => format!("{:?}", other),
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Type detection test for every source** (`tests/type_detection`): about 300 column checks of awkward values (codes with leading zeros, thousands separators, dates in many layouts, booleans in mixed case, nested values, every database type's extremes) across CSV, TSV, gzip, JSON, Excel, Parquet, Avro, SQLite, DuckDB, PostgreSQL, MySQL and SQL Server. The database checks run against `test_env` and are skipped when it isn't running
+- **Type detection test for every source** (`tests/type_detection`): about 400 column checks of awkward values (codes with leading zeros, thousands separators, dates in many layouts, booleans in mixed case, nested values, every database type's extremes) across CSV, TSV, gzip, JSON, Excel, Parquet, Avro, SQLite, DuckDB, PostgreSQL, MySQL, SQL Server and Snowflake, and ODBC (each database table read again through `odbc://` by `test_env/odbc/run.sh`, with the Linux drivers). The database checks run against `test_env` and are skipped when it isn't running; Snowflake runs when `SNOWFLAKE_*` settings are in the environment or `.env`
 - **Detection of more text values** (README, Type Detection): scientific notation (`1.5e3`), US thousands separators (`1,234`, when every group has three digits), padded numbers (` 42 `), `TRUE`/`False`, datetimes with any number of fractional digits or a UTC offset (`2024-01-15 10:30:00.123456`, `2024-01-15 10:30:00+02:00`)
 
 ### Changed
@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nested values read as text: Parquet lists and structs, Avro arrays, maps and records, PostgreSQL arrays are JSON now
 - Avro decimals read as Rust debug text (`Decimal { value: 12345, len: 2 }`), bytes as `[222, 173]` and times as `37800123ms`
 - SQLite columns with no declared type were always text; they're typed from their values
+- **ODBC: reading a MySQL `BLOB` column stopped the transfer** (MariaDB's driver failed converting the bytes to text). Binary columns are read as bytes, as `0x` hex. Other ODBC values now match the native connectors: PostgreSQL `json`/`jsonb` and arrays are JSON (from the catalog's declared types, since psqlODBC reports them as "unknown"), booleans are booleans (psqlODBC sends `1`/`0` text; MySQL's `tinyint(1)` and `bit(1)`), `money` is an exact decimal without a currency sign, floats are their shortest decimal (`0.1`, not `0.10000000000000001`), SQL Server `datetimeoffset` is a UTC datetime, times lose trailing zeros, UUIDs are lowercase and MySQL `bigint unsigned` is a decimal
 
 ## [0.12.1] - 2026-11-27
 

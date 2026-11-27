@@ -53,18 +53,21 @@ where
     }
 }
 
-/// The first of `names` that an odbcinst.ini on this machine lists, for reading the same table
-/// through `odbc://`. `TINYETL_TEST_ODBC_DRIVERS=0` turns ODBC reads off.
+/// The first of `names` that this machine's odbcinst.ini lists, for reading the same table
+/// through `odbc://`. ODBC reads are opt-in (`TINYETL_TEST_ODBC=1`, set by
+/// `test_env/odbc/run.sh`), since a listed driver may not load.
 fn odbc_driver(names: &[&str]) -> Option<String> {
-    if std::env::var("TINYETL_TEST_ODBC_DRIVERS").as_deref() == Ok("0") {
+    if std::env::var("TINYETL_TEST_ODBC").as_deref() != Ok("1") {
         return None;
     }
-    // The CLI points the driver manager at Homebrew's odbcinst.ini before any thread starts
-    // (connectors::odbc::configure_driver_manager); a test can't, so it needs ODBCSYSINI
-    let sysini = std::env::var("ODBCSYSINI").ok();
-    let ini: String = sysini
-        .iter()
+    // What the CLI does in main: Homebrew's odbcinst.ini on macOS, a UTF-8 LC_CTYPE (psqlODBC
+    // needs it). Tests here run one at a time on a current-thread runtime.
+    static CONFIGURE: std::sync::Once = std::sync::Once::new();
+    CONFIGURE.call_once(tinyetl::connectors::odbc::configure_driver_manager);
+    let ini: String = std::env::var("ODBCSYSINI")
+        .ok()
         .map(|dir| format!("{}/odbcinst.ini", dir))
+        .into_iter()
         .chain([
             "/etc/odbcinst.ini".to_string(),
             "/etc/unixODBC/odbcinst.ini".to_string(),
@@ -76,15 +79,20 @@ fn odbc_driver(names: &[&str]) -> Option<String> {
         .find(|name| ini.contains(&format!("[{}]", name)))
         .map(|name| name.to_string());
     if found.is_none() {
-        let homebrew =
-            std::fs::read_to_string("/opt/homebrew/etc/odbcinst.ini").unwrap_or_default();
-        if sysini.is_none() && names.iter().any(|n| homebrew.contains(&format!("[{}]", n))) {
-            println!("⚠ ODBC skipped: set ODBCSYSINI=/opt/homebrew/etc to read through the Homebrew drivers");
-        } else {
-            println!("⚠ ODBC skipped: none of {:?} is installed", names);
-        }
+        println!("⚠ ODBC skipped: none of {:?} is installed", names);
     }
     found
+}
+
+/// The host and port of a database URL, for the matching ODBC connection string
+fn host_port(url: &str, default_port: u16) -> (String, u16) {
+    let parsed = url::Url::parse(url).ok();
+    let host = parsed
+        .as_ref()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "localhost".to_string());
+    let port = parsed.and_then(|u| u.port()).unwrap_or(default_port);
+    (host, port)
 }
 
 /// The native reader, plus `odbc://{connection};#table` when one of `drivers` is installed
@@ -352,7 +360,8 @@ async fn databases_postgres() {
         format!("{}#{}", url, TABLE),
         &["PostgreSQL Unicode", "PostgreSQL ANSI"],
         |driver| {
-            format!("Driver={{{}}};Server=localhost;Port=5432;Database=testdb;UID=testuser;PWD=testpass", driver)
+            let (host, port) = host_port(&url, 5432);
+            format!("Driver={{{driver}}};Server={host};Port={port};Database=testdb;UID=testuser;PWD=testpass")
         },
     );
     run_then(&readers, &checks, || async move {
@@ -593,7 +602,8 @@ async fn databases_mysql() {
             "MariaDB Unicode",
         ],
         |driver| {
-            format!("Driver={{{}}};Server=127.0.0.1;Port=3306;Database=testdb;UID=testuser;PWD=testpass", driver)
+            let (host, port) = host_port(&url, 3306);
+            format!("Driver={{{driver}}};Server={host};Port={port};Database=testdb;UID=testuser;PWD=testpass")
         },
     );
     run_then(&readers, &checks, || async move {
@@ -872,7 +882,8 @@ async fn databases_mssql() {
             "ODBC Driver 17 for SQL Server",
         ],
         |driver| {
-            format!("Driver={{{}}};Server=127.0.0.1,1433;Database=master;UID=sa;PWD=TestPass123!;TrustServerCertificate=yes", driver)
+            let (host, port) = host_port(&url, 1433);
+            format!("Driver={{{driver}}};Server={host},{port};Database=master;UID=sa;PWD=TestPass123!;TrustServerCertificate=yes")
         },
     );
     run_then(&readers, &checks, || async move {

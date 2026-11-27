@@ -13,8 +13,8 @@
 //! The file connectors always run. PostgreSQL, MySQL and SQL Server run against the
 //! `test_env` containers (or `TINYETL_TEST_POSTGRES_URL` / `_MYSQL_URL` / `_MSSQL_URL`) and
 //! are skipped when they can't connect, unless `TINYETL_TEST_REQUIRE_DATABASES=1`.
-//! Each database table is also read through `odbc://` when an ODBC driver for it is installed
-//! (on macOS with Homebrew drivers, run with `ODBCSYSINI=/opt/homebrew/etc`).
+//! With `TINYETL_TEST_ODBC=1`, each database table is also read through `odbc://` with an
+//! installed driver; `test_env/odbc/run.sh` does that on Linux in Docker.
 //! Snowflake runs when `SNOWFLAKE_*` settings are in the environment or the repo's `.env`.
 //!
 //! `cargo test --test type_detection -- --nocapture` prints every connector's results.

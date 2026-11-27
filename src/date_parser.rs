@@ -73,6 +73,9 @@ const ZONED: &[&str] = &[
     "%Y-%m-%d %H:%M:%S%.f%:z",
     "%Y-%m-%d %H:%M:%S%:z",
     "%Y-%m-%d %H:%M:%S%#z",
+    // SQL Server datetimeoffset text: 2024-01-15 10:30:00.0000000 +02:00
+    "%Y-%m-%d %H:%M:%S%.f %:z",
+    "%Y-%m-%d %H:%M:%S %:z",
 ];
 
 /// A reusable date parser that attempts to parse common date/datetime formats
