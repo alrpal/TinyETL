@@ -47,6 +47,8 @@ pub struct SqliteSource {
     /// One streaming `SELECT` for the whole read (no OFFSET paging)
     stream: Option<RowStream>,
     consumed: bool,
+    /// BOOLEAN columns, whose 0/1 integers are read as booleans
+    boolean_columns: Vec<String>,
 }
 
 impl SqliteSource {
@@ -73,6 +75,7 @@ impl SqliteSource {
             query: None,
             stream: None,
             consumed: false,
+            boolean_columns: Vec::new(),
         })
     }
 
@@ -88,6 +91,7 @@ impl SqliteSource {
             query: Some(query.to_string()),
             stream: None,
             consumed: false,
+            boolean_columns: Vec::new(),
         })
     }
 
@@ -238,44 +242,46 @@ impl Source for SqliteSource {
         .await?;
 
         let mut columns = Vec::new();
+        let mut untyped = Vec::new();
         for row in table_info {
             let name: String = row.get(1);
             let sql_type: String = row.get(2);
             let not_null: bool = row.get(3);
 
-            let data_type = declared_type(&sql_type);
-
+            if sql_type.trim().is_empty() {
+                untyped.push(name.clone());
+            }
             columns.push(SchemaColumn {
                 name,
-                data_type,
+                data_type: declared_type(&sql_type),
                 nullable: !not_null,
             });
         }
 
-        // SQLite doesn't enforce JSON in a JSON-declared column: read a sample, and keep a
-        // column as text if any sampled value isn't valid JSON
+        // A sample decides the columns with no declared type, and checks JSON-declared ones:
+        // SQLite doesn't enforce JSON, so a column with a sampled value that isn't valid JSON
+        // stays text
         let json_columns: Vec<String> = columns
             .iter()
             .filter(|c| c.data_type == DataType::Json)
             .map(|c| c.name.clone())
             .collect();
-        if !json_columns.is_empty() {
-            let select = json_columns
-                .iter()
-                .map(|name| format!("\"{}\"", name.replace('"', "\"\"")))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sample = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SELECT {} FROM \"{}\" LIMIT {}",
-                select, self.table_name, sample_size
+        if !json_columns.is_empty() || !untyped.is_empty() {
+            let sample: Vec<Row> = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT * FROM \"{}\" LIMIT {}",
+                self.table_name, sample_size
             )))
             .fetch_all(pool)
-            .await?;
-            for (i, name) in json_columns.iter().enumerate() {
-                let all_json = sample.iter().all(|row| match Self::value_at(row, i) {
-                    Value::Null => true,
-                    Value::String(text) => serde_json::from_str::<serde_json::Value>(&text).is_ok(),
-                    _ => true, // numbers are valid JSON scalars
+            .await?
+            .iter()
+            .map(Self::row_values)
+            .collect();
+            for name in &json_columns {
+                let all_json = sample.iter().all(|row| match row.get(name) {
+                    Some(Value::String(text)) => {
+                        serde_json::from_str::<serde_json::Value>(text).is_ok()
+                    }
+                    _ => true, // NULL, and numbers, which are valid JSON scalars
                 });
                 if !all_json {
                     if let Some(column) = columns.iter_mut().find(|c| &c.name == name) {
@@ -283,7 +289,23 @@ impl Source for SqliteSource {
                     }
                 }
             }
+            if !untyped.is_empty() {
+                let inferred = SchemaInferer::infer_from_rows_ordered(&sample, &untyped)?;
+                for found in inferred.columns {
+                    if !untyped.contains(&found.name) {
+                        continue;
+                    }
+                    if let Some(column) = columns.iter_mut().find(|c| c.name == found.name) {
+                        column.data_type = found.data_type;
+                    }
+                }
+            }
         }
+        self.boolean_columns = columns
+            .iter()
+            .filter(|c| c.data_type == DataType::Boolean)
+            .map(|c| c.name.clone())
+            .collect();
 
         // Get estimated row count
         let count_result = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -308,12 +330,24 @@ impl Source for SqliteSource {
         if self.stream.is_none() {
             self.stream = Some(self.start_stream()?);
         }
-        let rows = self
+        let mut rows = self
             .stream
             .as_mut()
             .expect("started above")
             .next_batch(batch_size)
             .await?;
+        // SQLite stores booleans as 0 and 1
+        for row in &mut rows {
+            for name in &self.boolean_columns {
+                if let Some(value) = row.get_mut(name) {
+                    match value {
+                        Value::Integer(0) => *value = Value::Boolean(false),
+                        Value::Integer(1) => *value = Value::Boolean(true),
+                        _ => {}
+                    }
+                }
+            }
+        }
         self.consumed |= !rows.is_empty();
         Ok(rows)
     }
@@ -361,6 +395,8 @@ pub struct SqliteTarget {
     truncate_table: Option<String>,
     /// Column names from create_table; every row is written with all of them
     columns: Vec<String>,
+    /// Date columns, written as YYYY-MM-DD
+    date_columns: Vec<String>,
 }
 
 impl SqliteTarget {
@@ -418,6 +454,7 @@ impl SqliteTarget {
             tx: None,
             truncate_table: None,
             columns: Vec::new(),
+            date_columns: Vec::new(),
         })
     }
 
@@ -431,9 +468,10 @@ impl SqliteTarget {
             DataType::Integer => "INTEGER",
             DataType::Decimal => "REAL",
             DataType::String => "TEXT",
-            DataType::Boolean => "INTEGER", // SQLite uses INTEGER for boolean
-            DataType::Date => "TEXT",
-            DataType::DateTime => "TEXT",
+            // Declared so they read back with their type; SQLite stores 0/1 and date text as is
+            DataType::Boolean => "BOOLEAN",
+            DataType::Date => "DATE",
+            DataType::DateTime => "DATETIME",
             DataType::Json => "TEXT", // SQLite stores JSON as TEXT
             DataType::Null => "TEXT",
         }
@@ -473,6 +511,12 @@ impl Target for SqliteTarget {
             self.connect().await?;
         }
         self.columns = schema.columns.iter().map(|c| c.name.clone()).collect();
+        self.date_columns = schema
+            .columns
+            .iter()
+            .filter(|c| c.data_type == DataType::Date)
+            .map(|c| c.name.clone())
+            .collect();
 
         let pool = self.pool.as_ref().unwrap();
 
@@ -582,6 +626,9 @@ impl Target for SqliteTarget {
                             query.bind(f)
                         }
                         Value::Boolean(b) => query.bind(*b),
+                        Value::Date(dt) if self.date_columns.contains(column) => {
+                            query.bind(dt.format("%Y-%m-%d").to_string())
+                        }
                         Value::Date(dt) => query.bind(dt.to_rfc3339()),
                         Value::Json(j) => query
                             .bind(serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string())),

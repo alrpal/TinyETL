@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
 use duckdb::{
     types::{Value as OwnedValue, ValueRef},
@@ -204,17 +203,16 @@ fn value_at(row: &duckdb::Row, i: usize) -> Value {
         ValueRef::SmallInt(n) => Value::Integer(n as i64),
         ValueRef::Int(n) => Value::Integer(n as i64),
         ValueRef::BigInt(n) => Value::Integer(n),
-        ValueRef::HugeInt(n) => match i64::try_from(n) {
-            Ok(n) => Value::Integer(n),
+        // HUGEINT and UBIGINT are Decimal columns (they go past i64); text if a value is too
+        // wide even for a Decimal
+        ValueRef::HugeInt(n) => match Decimal::try_from_i128_with_scale(n, 0) {
+            Ok(d) => Value::Decimal(d),
             Err(_) => Value::String(n.to_string()),
         },
         ValueRef::UTinyInt(n) => Value::Integer(n as i64),
         ValueRef::USmallInt(n) => Value::Integer(n as i64),
         ValueRef::UInt(n) => Value::Integer(n as i64),
-        ValueRef::UBigInt(n) => match i64::try_from(n) {
-            Ok(n) => Value::Integer(n),
-            Err(_) => Value::String(n.to_string()),
-        },
+        ValueRef::UBigInt(n) => Value::Decimal(Decimal::from(n)),
         ValueRef::Float(f) => match Decimal::try_from(f) {
             Ok(d) => Value::Decimal(d),
             Err(_) => Value::String(f.to_string()),
@@ -239,7 +237,8 @@ fn value_at(row: &duckdb::Row, i: usize) -> Value {
             Ok(s) => Value::String(s.to_string()),
             Err(_) => Value::Null,
         },
-        ValueRef::Blob(bytes) => Value::String(general_purpose::STANDARD.encode(bytes)),
+        // Binary data as `0x` and lowercase hex, as every connector writes it
+        ValueRef::Blob(bytes) => Value::String(format!("0x{}", hex::encode(bytes))),
         // Lists, structs, maps and unions become JSON; enums, times and intervals text
         other => match other.to_owned() {
             v @ (OwnedValue::List(_)
@@ -323,7 +322,7 @@ fn to_json(value: OwnedValue) -> serde_json::Value {
         OwnedValue::Double(f) => serde_json::Number::from_f64(f).map_or(Json::Null, Json::Number),
         OwnedValue::Decimal(d) => serde_json::from_str(&d.to_string()).unwrap_or(Json::Null),
         OwnedValue::Text(s) | OwnedValue::Enum(s) => Json::String(s),
-        OwnedValue::Blob(bytes) => Json::String(general_purpose::STANDARD.encode(bytes)),
+        OwnedValue::Blob(bytes) => Json::String(format!("0x{}", hex::encode(bytes))),
         OwnedValue::Timestamp(unit, value) => {
             DateTime::<Utc>::from_timestamp_micros(unit.to_micros(value))
                 .map_or(Json::Null, |dt| Json::String(dt.to_rfc3339()))
@@ -371,8 +370,10 @@ fn column_type(duckdb_type: &str) -> DataType {
         return DataType::Json;
     }
     match t.split('(').next().unwrap_or("").trim() {
-        "TINYINT" | "SMALLINT" | "INTEGER" | "INT" | "BIGINT" | "HUGEINT" | "UTINYINT"
-        | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT" => DataType::Integer,
+        "TINYINT" | "SMALLINT" | "INTEGER" | "INT" | "BIGINT" | "UTINYINT" | "USMALLINT"
+        | "UINTEGER" => DataType::Integer,
+        // Past i64: exact decimals
+        "HUGEINT" | "UBIGINT" | "UHUGEINT" => DataType::Decimal,
         "FLOAT" | "REAL" | "DOUBLE" | "DECIMAL" | "NUMERIC" => DataType::Decimal,
         "BOOLEAN" | "BOOL" => DataType::Boolean,
         "DATE" => DataType::Date,

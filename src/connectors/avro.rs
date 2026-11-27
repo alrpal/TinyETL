@@ -105,6 +105,8 @@ pub struct AvroSource {
     file_path: PathBuf,
     records: Option<AvroRecords>,
     columns: Vec<Column>,
+    /// Each field's schema, for decimal scales and nested values
+    field_schemas: HashMap<String, AvroSchema>,
     /// Whether records have been read since the reader was opened
     consumed: bool,
     exhausted: bool,
@@ -116,6 +118,7 @@ impl AvroSource {
             file_path: PathBuf::from(file_path),
             records: None,
             columns: Vec::new(),
+            field_schemas: HashMap::new(),
             consumed: false,
             exhausted: true,
         })
@@ -132,6 +135,7 @@ impl AvroSource {
         let reader = Reader::new(BufReader::new(file))
             .map_err(|e| TinyEtlError::DataTransfer(format!("Invalid Avro file: {}", e)))?;
         self.columns = Self::columns_from_schema(reader.writer_schema());
+        self.field_schemas = Self::field_schemas(reader.writer_schema());
         let mut records = reader.peekable();
         self.exhausted = records.peek().is_none();
         self.records = Some(records);
@@ -177,6 +181,10 @@ impl AvroSource {
             AvroSchema::Int | AvroSchema::Long => (DataType::Integer, false),
             AvroSchema::Float | AvroSchema::Double => (DataType::Decimal, false),
             AvroSchema::Boolean => (DataType::Boolean, false),
+            AvroSchema::Decimal(_) => (DataType::Decimal, false),
+            AvroSchema::Array(_) | AvroSchema::Map(_) | AvroSchema::Record(_) => {
+                (DataType::Json, false)
+            }
             AvroSchema::Date => (DataType::Date, false),
             AvroSchema::TimestampMillis
             | AvroSchema::TimestampMicros
@@ -187,151 +195,211 @@ impl AvroSource {
         }
     }
 
+    #[cfg(test)]
     fn avro_value_to_value(avro_value: &AvroValue) -> Result<Value> {
-        match avro_value {
-            AvroValue::Null => Ok(Value::Null),
-            AvroValue::Boolean(b) => Ok(Value::Boolean(*b)),
-            AvroValue::Int(i) => Ok(Value::Integer(*i as i64)),
-            AvroValue::Long(l) => Ok(Value::Integer(*l)),
-            AvroValue::Float(f) => {
-                // Convert f32 to Decimal
-                match Decimal::try_from(*f as f64) {
-                    Ok(d) => Ok(Value::Decimal(d)),
-                    Err(_) => Ok(Value::String(f.to_string())),
-                }
-            }
-            AvroValue::Double(d) => {
-                // Convert f64 to Decimal
-                match Decimal::try_from(*d) {
-                    Ok(decimal) => Ok(Value::Decimal(decimal)),
-                    Err(_) => Ok(Value::String(d.to_string())),
-                }
-            }
-            AvroValue::Bytes(b) => Ok(Value::String(format!("{:?}", b))),
-            AvroValue::String(s) => Ok(Value::String(s.clone())),
-            AvroValue::Fixed(_, bytes) => Ok(Value::String(format!("{:?}", bytes))),
-            AvroValue::Enum(_, symbol) => Ok(Value::String(symbol.clone())),
-            AvroValue::Union(_, boxed_value) => Self::avro_value_to_value(boxed_value),
-            AvroValue::Array(values) => {
-                // Convert array to JSON string for now
-                let json_values: std::result::Result<Vec<JsonValue>, _> =
-                    values.iter().map(Self::avro_value_to_json_value).collect();
-                match json_values {
-                    Ok(vals) => Ok(Value::String(
-                        serde_json::to_string(&vals).unwrap_or_default(),
-                    )),
-                    Err(_) => Ok(Value::String("[]".to_string())),
-                }
-            }
-            AvroValue::Map(map) => {
-                // Convert map to JSON string
-                let mut json_map = serde_json::Map::new();
-                for (k, v) in map {
-                    if let Ok(json_val) = Self::avro_value_to_json_value(v) {
-                        json_map.insert(k.clone(), json_val);
-                    }
-                }
-                Ok(Value::String(
-                    serde_json::to_string(&json_map).unwrap_or_default(),
-                ))
-            }
-            AvroValue::Record(fields) => {
-                // Convert record to JSON string
-                let mut json_map = serde_json::Map::new();
-                for (field_name, field_value) in fields {
-                    if let Ok(json_val) = Self::avro_value_to_json_value(field_value) {
-                        json_map.insert(field_name.clone(), json_val);
-                    }
-                }
-                Ok(Value::String(
-                    serde_json::to_string(&json_map).unwrap_or_default(),
-                ))
-            }
-            AvroValue::Date(days) => {
-                // Convert days since epoch to date
-                let base_date = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                    .ok_or_else(|| TinyEtlError::DataTransfer("Invalid base date".to_string()))?;
-                let target_date = base_date + chrono::Duration::days(*days as i64);
-                let datetime = target_date
-                    .and_hms_opt(0, 0, 0)
-                    .ok_or_else(|| {
-                        TinyEtlError::DataTransfer("Invalid time conversion".to_string())
-                    })?
-                    .and_utc();
-                Ok(Value::Date(datetime))
-            }
-            AvroValue::TimeMillis(millis) => {
-                // Time in milliseconds since midnight
-                Ok(Value::String(format!("{}ms", millis)))
-            }
-            AvroValue::TimeMicros(micros) => {
-                // Time in microseconds since midnight
-                Ok(Value::String(format!("{}μs", micros)))
-            }
-            AvroValue::TimestampMillis(millis) => {
-                // Timestamp in milliseconds since epoch
-                let datetime = chrono::DateTime::from_timestamp(
-                    *millis / 1000,
-                    ((*millis % 1000) * 1_000_000) as u32,
-                )
-                .ok_or_else(|| TinyEtlError::DataTransfer("Invalid timestamp".to_string()))?;
-                Ok(Value::Date(datetime))
-            }
-            AvroValue::TimestampMicros(micros) => {
-                // Timestamp in microseconds since epoch
-                let datetime = chrono::DateTime::from_timestamp(
-                    *micros / 1_000_000,
-                    ((*micros % 1_000_000) * 1000) as u32,
-                )
-                .ok_or_else(|| TinyEtlError::DataTransfer("Invalid timestamp".to_string()))?;
-                Ok(Value::Date(datetime))
-            }
-            AvroValue::LocalTimestampMillis(millis) => {
-                // Local timestamp in milliseconds since epoch
-                let datetime = chrono::DateTime::from_timestamp(
-                    *millis / 1000,
-                    ((*millis % 1000) * 1_000_000) as u32,
-                )
-                .ok_or_else(|| TinyEtlError::DataTransfer("Invalid local timestamp".to_string()))?;
-                Ok(Value::Date(datetime))
-            }
-            AvroValue::LocalTimestampMicros(micros) => {
-                // Local timestamp in microseconds since epoch
-                let datetime = chrono::DateTime::from_timestamp(
-                    *micros / 1_000_000,
-                    ((*micros % 1_000_000) * 1000) as u32,
-                )
-                .ok_or_else(|| TinyEtlError::DataTransfer("Invalid local timestamp".to_string()))?;
-                Ok(Value::Date(datetime))
-            }
-            AvroValue::Decimal(decimal) => {
-                // Convert decimal to string representation
-                Ok(Value::String(format!("{:?}", decimal)))
-            }
-            AvroValue::Uuid(uuid) => Ok(Value::String(uuid.to_string())),
-            AvroValue::Duration(duration) => {
-                // Convert duration to string representation
-                Ok(Value::String(format!("{:?}", duration)))
-            }
-        }
+        Ok(avro_to_value(avro_value, None))
     }
 
+    #[cfg(test)]
     fn avro_value_to_json_value(avro_value: &AvroValue) -> Result<JsonValue> {
-        match avro_value {
-            AvroValue::Null => Ok(JsonValue::Null),
-            AvroValue::Boolean(b) => Ok(JsonValue::Bool(*b)),
-            AvroValue::Int(i) => Ok(JsonValue::Number(serde_json::Number::from(*i))),
-            AvroValue::Long(l) => Ok(JsonValue::Number(serde_json::Number::from(*l))),
-            AvroValue::Float(f) => Ok(JsonValue::Number(
-                serde_json::Number::from_f64(*f as f64).unwrap_or(serde_json::Number::from(0)),
-            )),
-            AvroValue::Double(d) => Ok(JsonValue::Number(
-                serde_json::Number::from_f64(*d).unwrap_or(serde_json::Number::from(0)),
-            )),
-            AvroValue::String(s) => Ok(JsonValue::String(s.clone())),
-            AvroValue::Union(_, boxed_value) => Self::avro_value_to_json_value(boxed_value),
-            _ => Ok(JsonValue::String(format!("{:?}", avro_value))),
+        Ok(avro_to_json(avro_value, None))
+    }
+
+    /// The schema of each top-level field, for converting its values
+    fn field_schemas(schema: &AvroSchema) -> HashMap<String, AvroSchema> {
+        match schema {
+            AvroSchema::Record(record) => record
+                .fields
+                .iter()
+                .map(|f| (f.name.clone(), f.schema.clone()))
+                .collect(),
+            _ => HashMap::new(),
         }
+    }
+}
+
+/// The schema of the value a union holds, when the union's schema is known
+fn union_variant(schema: Option<&AvroSchema>, index: u32) -> Option<&AvroSchema> {
+    match schema {
+        Some(AvroSchema::Union(union)) => union.variants().get(index as usize),
+        _ => None,
+    }
+}
+
+/// Binary data as text: `0x` and lowercase hex, as every connector writes it
+fn hex_text(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+/// Seconds and nanoseconds since midnight as `HH:MM:SS[.fff]`
+fn time_text(seconds: i64, nanos: u32) -> Option<String> {
+    let seconds = u32::try_from(seconds).ok()?;
+    chrono::NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos)
+        .map(|t| t.format("%H:%M:%S%.f").to_string())
+}
+
+/// An Avro decimal (a big-endian two's complement unscaled value) with its schema's scale
+fn decimal_value(decimal: &apache_avro::Decimal, schema: Option<&AvroSchema>) -> Value {
+    let bytes = <Vec<u8>>::try_from(decimal).unwrap_or_default();
+    let scale = match schema {
+        Some(AvroSchema::Decimal(d)) => d.scale,
+        _ => 0,
+    };
+    if bytes.is_empty() || bytes.len() > 16 {
+        return Value::String(hex_text(&bytes));
+    }
+    let negative = bytes[0] & 0x80 != 0;
+    let mut padded = [if negative { 0xff } else { 0 }; 16];
+    padded[16 - bytes.len()..].copy_from_slice(&bytes);
+    let unscaled = i128::from_be_bytes(padded);
+    match u32::try_from(scale)
+        .ok()
+        .and_then(|scale| Decimal::try_from_i128_with_scale(unscaled, scale).ok())
+    {
+        Some(d) => Value::Decimal(d),
+        // Too wide for a Decimal: the exact digits as text
+        None => {
+            let digits = format!("{:0>width$}", unscaled.unsigned_abs(), width = scale + 1);
+            let (whole, fraction) = digits.split_at(digits.len() - scale);
+            let sign = if unscaled < 0 { "-" } else { "" };
+            Value::String(if scale == 0 {
+                format!("{}{}", sign, whole)
+            } else {
+                format!("{}{}.{}", sign, whole, fraction)
+            })
+        }
+    }
+}
+
+fn millis_timestamp(millis: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::from_timestamp(
+        millis.div_euclid(1000),
+        (millis.rem_euclid(1000) * 1_000_000) as u32,
+    )
+}
+
+fn micros_timestamp(micros: i64) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::from_timestamp(
+        micros.div_euclid(1_000_000),
+        (micros.rem_euclid(1_000_000) * 1000) as u32,
+    )
+}
+
+/// A float as a decimal, from the shortest text that reads back as it (0.1f32 is 0.1)
+fn float_value(f: f64, text: String) -> Value {
+    text.parse::<Decimal>()
+        .ok()
+        .or_else(|| Decimal::try_from(f).ok())
+        .map(Value::Decimal)
+        .unwrap_or(Value::String(text))
+}
+
+/// An Avro value as a TinyETL value. `schema` is the value's schema, when known: it carries a
+/// decimal's scale. Nested values (arrays, maps, records) become JSON.
+fn avro_to_value(value: &AvroValue, schema: Option<&AvroSchema>) -> Value {
+    match value {
+        AvroValue::Null => Value::Null,
+        AvroValue::Boolean(b) => Value::Boolean(*b),
+        AvroValue::Int(i) => Value::Integer(*i as i64),
+        AvroValue::Long(l) => Value::Integer(*l),
+        AvroValue::Float(f) => float_value(*f as f64, f.to_string()),
+        AvroValue::Double(d) => float_value(*d, d.to_string()),
+        AvroValue::Bytes(b) | AvroValue::Fixed(_, b) => Value::String(hex_text(b)),
+        AvroValue::String(s) => Value::String(s.clone()),
+        AvroValue::Enum(_, symbol) => Value::String(symbol.clone()),
+        AvroValue::Union(index, inner) => avro_to_value(inner, union_variant(schema, *index)),
+        AvroValue::Array(_) | AvroValue::Map(_) | AvroValue::Record(_) => {
+            Value::Json(avro_to_json(value, schema))
+        }
+        AvroValue::Date(days) => chrono::DateTime::from_timestamp(*days as i64 * 86_400, 0)
+            .map(Value::Date)
+            .unwrap_or(Value::Integer(*days as i64)),
+        AvroValue::TimeMillis(ms) => {
+            let ms = *ms as i64;
+            time_text(
+                ms.div_euclid(1000),
+                (ms.rem_euclid(1000) * 1_000_000) as u32,
+            )
+            .map(Value::String)
+            .unwrap_or(Value::Integer(ms))
+        }
+        AvroValue::TimeMicros(us) => time_text(
+            us.div_euclid(1_000_000),
+            (us.rem_euclid(1_000_000) * 1000) as u32,
+        )
+        .map(Value::String)
+        .unwrap_or(Value::Integer(*us)),
+        AvroValue::TimestampMillis(ms) | AvroValue::LocalTimestampMillis(ms) => {
+            millis_timestamp(*ms)
+                .map(Value::Date)
+                .unwrap_or(Value::Integer(*ms))
+        }
+        AvroValue::TimestampMicros(us) | AvroValue::LocalTimestampMicros(us) => {
+            micros_timestamp(*us)
+                .map(Value::Date)
+                .unwrap_or(Value::Integer(*us))
+        }
+        AvroValue::Decimal(decimal) => decimal_value(decimal, schema),
+        AvroValue::Uuid(uuid) => Value::String(uuid.to_string()),
+        AvroValue::Duration(duration) => Value::String(format!(
+            "{} months {} days {} ms",
+            u32::from(duration.months()),
+            u32::from(duration.days()),
+            u32::from(duration.millis())
+        )),
+    }
+}
+
+/// An Avro value as JSON, for nested values
+fn avro_to_json(value: &AvroValue, schema: Option<&AvroSchema>) -> JsonValue {
+    match value {
+        AvroValue::Array(items) => {
+            let schema = match schema {
+                Some(AvroSchema::Array(items)) => Some(items.as_ref()),
+                _ => None,
+            };
+            JsonValue::Array(items.iter().map(|v| avro_to_json(v, schema)).collect())
+        }
+        AvroValue::Map(map) => {
+            let schema = match schema {
+                Some(AvroSchema::Map(values)) => Some(values.as_ref()),
+                _ => None,
+            };
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            JsonValue::Object(
+                keys.into_iter()
+                    .map(|k| (k.clone(), avro_to_json(&map[k], schema)))
+                    .collect(),
+            )
+        }
+        AvroValue::Record(fields) => {
+            let field_schema = |name: &str| match schema {
+                Some(AvroSchema::Record(record)) => record
+                    .fields
+                    .iter()
+                    .find(|f| f.name == name)
+                    .map(|f| &f.schema),
+                _ => None,
+            };
+            JsonValue::Object(
+                fields
+                    .iter()
+                    .map(|(name, v)| (name.clone(), avro_to_json(v, field_schema(name))))
+                    .collect(),
+            )
+        }
+        AvroValue::Union(index, inner) => avro_to_json(inner, union_variant(schema, *index)),
+        other => match avro_to_value(other, schema) {
+            Value::Null => JsonValue::Null,
+            Value::Boolean(b) => JsonValue::Bool(b),
+            Value::Integer(i) => JsonValue::from(i),
+            Value::Decimal(d) => serde_json::from_str(&d.to_string())
+                .unwrap_or_else(|_| JsonValue::String(d.to_string())),
+            Value::String(s) => JsonValue::String(s),
+            Value::Date(dt) => JsonValue::String(dt.to_rfc3339()),
+            Value::Json(j) => j,
+        },
     }
 }
 
@@ -365,7 +433,8 @@ impl Source for AvroSource {
             if let AvroValue::Record(fields) = value {
                 let mut row = HashMap::with_capacity(fields.len());
                 for (name, field_value) in fields {
-                    row.insert(name, Self::avro_value_to_value(&field_value)?);
+                    let value = avro_to_value(&field_value, self.field_schemas.get(&name));
+                    row.insert(name, value);
                 }
                 rows.push(row);
             }
@@ -1424,11 +1493,7 @@ mod tests {
         // Test Bytes
         let bytes_value = AvroValue::Bytes(vec![1, 2, 3]);
         let result = AvroSource::avro_value_to_value(&bytes_value).unwrap();
-        if let Value::String(s) = result {
-            assert!(s.contains("1"));
-        } else {
-            panic!("Expected String value");
-        }
+        assert_eq!(result, Value::String("0x010203".to_string()));
 
         // Test Fixed
         let fixed_value = AvroValue::Fixed(4, vec![1, 2, 3, 4]);
@@ -1451,13 +1516,7 @@ mod tests {
             AvroValue::Int(3),
         ]);
         let result = AvroSource::avro_value_to_value(&array_value).unwrap();
-        if let Value::String(s) = result {
-            assert!(s.contains("1"));
-            assert!(s.contains("2"));
-            assert!(s.contains("3"));
-        } else {
-            panic!("Expected String value");
-        }
+        assert_eq!(result, Value::Json(json!([1, 2, 3])));
 
         // Test Map
         let mut map = std::collections::HashMap::new();
@@ -1465,12 +1524,7 @@ mod tests {
         map.insert("key2".to_string(), AvroValue::Int(42));
         let map_value = AvroValue::Map(map);
         let result = AvroSource::avro_value_to_value(&map_value).unwrap();
-        if let Value::String(s) = result {
-            assert!(s.contains("key1"));
-            assert!(s.contains("value1"));
-        } else {
-            panic!("Expected String value");
-        }
+        assert_eq!(result, Value::Json(json!({"key1": "value1", "key2": 42})));
 
         // Test Record
         let record_value = AvroValue::Record(vec![
@@ -1478,30 +1532,20 @@ mod tests {
             ("field2".to_string(), AvroValue::Int(123)),
         ]);
         let result = AvroSource::avro_value_to_value(&record_value).unwrap();
-        if let Value::String(s) = result {
-            assert!(s.contains("field1"));
-            assert!(s.contains("test"));
-        } else {
-            panic!("Expected String value");
-        }
+        assert_eq!(
+            result,
+            Value::Json(json!({"field1": "test", "field2": 123}))
+        );
 
         // Test TimeMillis
         let time_millis = AvroValue::TimeMillis(3600000); // 1 hour
         let result = AvroSource::avro_value_to_value(&time_millis).unwrap();
-        if let Value::String(s) = result {
-            assert!(s.contains("3600000"));
-        } else {
-            panic!("Expected String value");
-        }
+        assert_eq!(result, Value::String("01:00:00".to_string()));
 
         // Test TimeMicros
         let time_micros = AvroValue::TimeMicros(3600000000); // 1 hour
         let result = AvroSource::avro_value_to_value(&time_micros).unwrap();
-        if let Value::String(s) = result {
-            assert!(s.contains("3600000000"));
-        } else {
-            panic!("Expected String value");
-        }
+        assert_eq!(result, Value::String("01:00:00".to_string()));
 
         // Test TimestampMicros
         let timestamp_micros = AvroValue::TimestampMicros(1609459200000000); // 2021-01-01
@@ -1533,12 +1577,9 @@ mod tests {
         // Test Decimal
         let decimal_bytes = vec![1, 2, 3, 4];
         let decimal_value = AvroValue::Decimal(apache_avro::Decimal::from(decimal_bytes));
+        // Without the field's schema there's no scale: the unscaled value, 0x01020304
         let result = AvroSource::avro_value_to_value(&decimal_value).unwrap();
-        if let Value::String(_) = result {
-            // Success
-        } else {
-            panic!("Expected String value");
-        }
+        assert_eq!(result, Value::Decimal(Decimal::from(0x01020304)));
 
         // Test Uuid
         let uuid = uuid::Uuid::new_v4();
@@ -1621,13 +1662,11 @@ mod tests {
 
     #[test]
     fn test_avro_json_value_float_edge_cases() {
-        // Test Float with NaN (should use fallback)
+        // JSON has no NaN: it's kept as text rather than becoming a different number
         let result = AvroSource::avro_value_to_json_value(&AvroValue::Float(f32::NAN)).unwrap();
-        assert_eq!(result, JsonValue::Number(serde_json::Number::from(0)));
-
-        // Test Double with NaN (should use fallback)
+        assert_eq!(result, JsonValue::String("NaN".to_string()));
         let result = AvroSource::avro_value_to_json_value(&AvroValue::Double(f64::NAN)).unwrap();
-        assert_eq!(result, JsonValue::Number(serde_json::Number::from(0)));
+        assert_eq!(result, JsonValue::String("NaN".to_string()));
     }
 
     #[tokio::test]

@@ -81,12 +81,10 @@ fn value_at(array: &dyn Array, index: usize, json: bool, formatter: &ArrayFormat
         DataType::UInt32 => {
             Value::Integer(array.as_primitive::<types::UInt32Type>().value(index) as i64)
         }
-        DataType::UInt64 => {
-            let v = array.as_primitive::<types::UInt64Type>().value(index);
-            i64::try_from(v)
-                .map(Value::Integer)
-                .unwrap_or_else(|_| Value::Decimal(Decimal::from(v)))
-        }
+        // A Decimal column (past i64::MAX), so every value is one
+        DataType::UInt64 => Value::Decimal(Decimal::from(
+            array.as_primitive::<types::UInt64Type>().value(index),
+        )),
         DataType::Float16 | DataType::Float32 | DataType::Float64 => {
             let v = match array.data_type() {
                 DataType::Float16 => array
@@ -154,8 +152,82 @@ fn value_at(array: &dyn Array, index: usize, json: bool, formatter: &ArrayFormat
             )
             .unwrap_or_else(|| Value::String(as_text()))
         }
-        // Times, binary, lists, structs, maps, Decimal256, ...: keep Arrow's text form
+        DataType::Binary => Value::String(hex_text(array.as_binary::<i32>().value(index))),
+        DataType::LargeBinary => Value::String(hex_text(array.as_binary::<i64>().value(index))),
+        DataType::BinaryView => Value::String(hex_text(array.as_binary_view().value(index))),
+        DataType::FixedSizeBinary(_) => {
+            Value::String(hex_text(array.as_fixed_size_binary().value(index)))
+        }
+        DataType::List(_)
+        | DataType::LargeList(_)
+        | DataType::FixedSizeList(_, _)
+        | DataType::Struct(_)
+        | DataType::Map(_, _) => match json_at(array, index) {
+            Ok(json) => Value::Json(json),
+            Err(_) => Value::String(as_text()),
+        },
+        // Times, durations, Decimal256, dictionaries...: keep Arrow's text form
         _ => Value::String(as_text()),
+    }
+}
+
+/// Binary data as text: `0x` and lowercase hex, as every connector writes it
+fn hex_text(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+/// The value at `index` as JSON, for nested values (lists, structs, maps)
+fn json_at(array: &dyn Array, index: usize) -> std::result::Result<serde_json::Value, String> {
+    use serde_json::Value as Json;
+    if array.is_null(index) {
+        return Ok(Json::Null);
+    }
+    let elements = |values: ArrayRef| -> std::result::Result<Json, String> {
+        (0..values.len())
+            .map(|i| json_at(values.as_ref(), i))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map(Json::Array)
+    };
+    match array.data_type() {
+        DataType::List(_) => elements(array.as_list::<i32>().value(index)),
+        DataType::LargeList(_) => elements(array.as_list::<i64>().value(index)),
+        DataType::FixedSizeList(_, _) => elements(array.as_fixed_size_list().value(index)),
+        DataType::Struct(fields) => {
+            let array = array.as_struct();
+            let mut object = serde_json::Map::new();
+            for (field, column) in fields.iter().zip(array.columns()) {
+                object.insert(field.name().clone(), json_at(column.as_ref(), index)?);
+            }
+            Ok(Json::Object(object))
+        }
+        DataType::Map(_, _) => {
+            let entries = array.as_map().value(index);
+            let (keys, values) = (entries.column(0), entries.column(1));
+            let mut object = serde_json::Map::new();
+            for i in 0..entries.len() {
+                let key = match json_at(keys.as_ref(), i)? {
+                    Json::String(s) => s,
+                    other => other.to_string(),
+                };
+                object.insert(key, json_at(values.as_ref(), i)?);
+            }
+            Ok(Json::Object(object))
+        }
+        _ => {
+            let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())
+                .map_err(|e| e.to_string())?;
+            Ok(match value_at(array, index, false, &formatter) {
+                Value::Null => Json::Null,
+                Value::Boolean(b) => Json::Bool(b),
+                Value::Integer(i) => Json::from(i),
+                Value::Decimal(d) => {
+                    serde_json::from_str(&d.to_string()).unwrap_or(Json::String(d.to_string()))
+                }
+                Value::String(s) => Json::String(s),
+                Value::Date(dt) => Json::String(dt.to_rfc3339()),
+                Value::Json(j) => j,
+            })
+        }
     }
 }
 

@@ -54,7 +54,7 @@ case "$got" in
 esac
 pass "CSV → CSV: 01826, 012345, +15550104 and 0012.50 unchanged"
 run "$WORK/p.csv" "$WORK/inferred.db#t"
-[ "$(sqlite_types "$WORK/inferred.db")" = "ZipCode:TEXT,Phone:TEXT,Lic:TEXT,Flag:INTEGER,Amount:TEXT,Day:TEXT,Note:TEXT" ] \
+[ "$(sqlite_types "$WORK/inferred.db")" = "ZipCode:TEXT,Phone:TEXT,Lic:TEXT,Flag:BOOLEAN,Amount:TEXT,Day:DATE,Note:DATE" ] \
     || fail "SQLite types: $(sqlite_types "$WORK/inferred.db")"
 [ "$(python3 -I -c "import sqlite3, sys; print(*sqlite3.connect(sys.argv[1]).execute('SELECT ZipCode, Lic, Phone FROM t ORDER BY ZipCode').fetchone(), sep=',')" "$WORK/inferred.db")" = "01826,012345,9195550102" ] \
     || fail "SQLite values"
