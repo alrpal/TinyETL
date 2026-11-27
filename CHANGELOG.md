@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`on_mismatch` in schema files**, for the whole file or per column: `fail` (the default) stops at a value that doesn't parse as its column's type, `null` writes NULL and reports how many values it replaced, `raw` keeps the source text where the target allows it (files, SQLite)
+- **`infer_types=false`** for CSV sources (`--source-option infer_types=false`) reads every column as text, with no schema file
+- Example `29_text_as_written`
+
+### Changed
+- **A schema file only types the columns it lists**; the others are inferred and kept, in the source's column order. Before, columns it didn't list were dropped
+- Schema-file patterns are checked against the source text, so a pattern on a Date or DateTime column now applies
+- CSV and JSON sources hand rows over as the text in the file; values get their column's type in one step before writing (and before a Lua or SQL transform, which still see numbers). Copying a CSV file is about 20% faster. JSON documents in text keep their key order
+- Library: `SchemaFile::validate_and_transform_row` returns the number of values set to NULL
+
+### Fixed
+- **Codes with leading zeros lost them.** `01826`, `012345` and `0012.50` were read as numbers, so a CSV → CSV copy wrote `1826`, and a zip code column became an integer column. Values with a leading zero before another digit, or a leading `+`, now count as text, in inference and when converting
+- **A schema file's String columns rejected text that looked like a number or a date** ("Column 'ZipCode' expected type String, got Integer"), and JSON strings like `"2024-01-01"` failed in String columns. String columns now keep the source text exactly, and other types parse it as the declared type
+
 ## [0.12.0] - 2026-11-24
 
 ### Added

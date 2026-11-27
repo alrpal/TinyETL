@@ -23,7 +23,20 @@ fn is_tsv(path: &str) -> bool {
 }
 
 /// Endpoint options read by CSV sources and targets (see `crate::options`)
-pub const OPTIONS: &[&str] = &["delimiter"];
+pub const OPTIONS: &[&str] = &["delimiter", "infer_types"];
+
+/// The `infer_types` endpoint option (default true); false reads every column as text
+fn infer_types_option(options: &HashMap<String, String>) -> Result<bool> {
+    match options.get("infer_types").map(|v| v.to_ascii_lowercase()) {
+        None => Ok(true),
+        Some(v) if v == "true" => Ok(true),
+        Some(v) if v == "false" => Ok(false),
+        Some(v) => Err(TinyEtlError::Configuration(format!(
+            "Invalid infer_types {:?}: use true or false",
+            v
+        ))),
+    }
+}
 
 /// The `delimiter` endpoint option: one ASCII character, or `tab` / `\t`
 fn delimiter_option(options: &HashMap<String, String>) -> Result<Option<u8>> {
@@ -97,6 +110,8 @@ pub struct CsvSource {
     /// From the `delimiter` option or a `.tsv` name; otherwise detected in `connect`
     delimiter_option: Option<u8>,
     delimiter: u8,
+    /// False (the `infer_types` option) makes every column text
+    infer_types: bool,
     reader: Option<csv::Reader<std::fs::File>>,
     headers: Vec<String>,
     current_position: u64,
@@ -114,6 +129,7 @@ impl CsvSource {
             file_path: PathBuf::from(file_path),
             delimiter_option,
             delimiter: delimiter_option.unwrap_or(b','),
+            infer_types: infer_types_option(options)?,
             reader: None,
             headers: Vec::new(),
             current_position: 0,
@@ -137,17 +153,26 @@ impl CsvSource {
         Ok(sniff_delimiter(&sample, complete))
     }
 
-    fn parse_value(value: &str) -> Value {
-        // Try to parse as different types
-
-        // Try integer first
-        if let Ok(int_val) = value.parse::<i64>() {
-            return Value::Integer(int_val);
+    /// A field as read: the text exactly as written, or NULL for an empty field. Values get
+    /// their column's type later (`schema::coerce_row`), so a text column keeps `01826`.
+    fn raw_value(field: &str) -> Value {
+        if field.is_empty() {
+            Value::Null
+        } else {
+            Value::String(field.to_string())
         }
+    }
 
-        // Try decimal
-        if let Ok(decimal_val) = value.parse::<Decimal>() {
-            return Value::Decimal(decimal_val);
+    /// The type a field suggests, for schema inference
+    fn parse_value(value: &str) -> Value {
+        // Numbers, unless that would change the text (leading zeros, a leading +)
+        if crate::schema::number_keeps_text(value) {
+            if let Ok(int_val) = value.parse::<i64>() {
+                return Value::Integer(int_val);
+            }
+            if let Ok(decimal_val) = value.parse::<Decimal>() {
+                return Value::Decimal(decimal_val);
+            }
         }
 
         // Try boolean
@@ -217,7 +242,11 @@ impl Source for CsvSource {
 
                 for (i, field) in record.iter().enumerate() {
                     if let Some(header) = self.headers.get(i) {
-                        let value = Self::parse_value(field);
+                        let value = if self.infer_types {
+                            Self::parse_value(field)
+                        } else {
+                            Self::raw_value(field)
+                        };
                         row.insert(header.clone(), value);
                     }
                 }
@@ -252,8 +281,7 @@ impl Source for CsvSource {
 
                         for (i, field) in record.iter().enumerate() {
                             if let Some(header) = self.headers.get(i) {
-                                let value = Self::parse_value(field);
-                                row.insert(header.clone(), value);
+                                row.insert(header.clone(), Self::raw_value(field));
                             }
                         }
 
@@ -449,6 +477,7 @@ impl Target for CsvTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::DataType;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -868,5 +897,51 @@ mod tests {
             target.finalize().await.unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn test_rows_keep_the_text_and_codes_stay_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.csv");
+        std::fs::write(
+            &path,
+            "\"zip\",\"n\",\"flag\",\"phone\"\n\"01826\",\"5\",\"true\",\"+15551234\"\n28801,7,false,5550104\n,8,true,\n",
+        )
+        .unwrap();
+        let mut source = CsvSource::new(path.to_str().unwrap()).unwrap();
+        source.connect().await.unwrap();
+        let schema = source.infer_schema(100).await.unwrap();
+        let types: Vec<_> = schema.columns.iter().map(|c| c.data_type.clone()).collect();
+        assert_eq!(
+            types,
+            [
+                DataType::String,
+                DataType::Integer,
+                DataType::Boolean,
+                DataType::String
+            ]
+        );
+        source.reset().await.unwrap();
+        let rows = source.read_batch(10).await.unwrap();
+        assert_eq!(rows[0]["zip"], Value::String("01826".to_string()));
+        assert_eq!(rows[0]["n"], Value::String("5".to_string())); // typed later, by coerce_row
+        assert_eq!(rows[2]["zip"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn test_infer_types_false_reads_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.csv");
+        std::fs::write(&path, "n,flag,day\n5,true,2024-01-01\n").unwrap();
+        let options = HashMap::from([("infer_types".to_string(), "false".to_string())]);
+        let mut source = CsvSource::with_options(path.to_str().unwrap(), &options).unwrap();
+        source.connect().await.unwrap();
+        let schema = source.infer_schema(100).await.unwrap();
+        assert!(schema
+            .columns
+            .iter()
+            .all(|c| c.data_type == DataType::String));
+        let bad = HashMap::from([("infer_types".to_string(), "no".to_string())]);
+        assert!(CsvSource::with_options(path.to_str().unwrap(), &bad).is_err());
     }
 }

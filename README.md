@@ -40,7 +40,7 @@ Most data movement doesn't need a platform. TinyETL keeps it to one command.
 ## Contents
 
 - [Quick Install](#quick-install) · [Get Started in 30 Seconds](#get-started-in-30-seconds) · [Usage](#usage)
-- [Sources and targets](#supported-data-sources-and-targets): [Files and protocols](#file-based-sources-multiple-protocols) · [Endpoint options](#endpoint-options) · [CSV delimiters](#csv-delimiters) · [Excel](#excel)
+- [Sources and targets](#supported-data-sources-and-targets): [Files and protocols](#file-based-sources-multiple-protocols) · [Endpoint options](#endpoint-options) · [CSV delimiters](#csv-delimiters) · [Text that looks like a number](#text-that-looks-like-a-number) · [Excel](#excel)
 - [Databases](#database-connection-strings): [PostgreSQL](#postgresql) · [MySQL](#mysql) · [SQLite](#sqlite) · [SQL Server](#sql-server-native) · [CrateDB](#cratedb) · [DuckDB](#duckdb) · [ODBC](#odbc) · [Snowflake](#snowflake)
 - [Source queries](#source-queries) · [Passwords and secrets](#secure-password-management)
 - [Transforms](#data-transformations) ([SQL](#sql-transforms), [Lua](#lua-inline-transformations)) · [Schema files](#schema-files) · [YAML job files](#yaml-job-files) ([HTTP options](#http-source-options), [S3 options](#s3-options), [environment variables](#environment-variables))
@@ -338,7 +338,7 @@ Some sources and targets take options: HTTP headers and authentication, S3 crede
 
 | Endpoint | Options |
 |---|---|
-| CSV / TSV files (local, HTTP, SSH, S3, compressed) | `delimiter` |
+| CSV / TSV files (local, HTTP, SSH, S3, compressed) | `delimiter`, `infer_types` |
 | HTTP / HTTPS sources | `header.<Name>`, `auth.basic.username`, `auth.basic.password`, `auth.bearer` |
 | S3 | `region`, `endpoint`, `access_key_id`, `secret_access_key`, `session_token`, `allow_http`, `path_style` |
 | Snowflake | `private_key_path`, `private_key_passphrase`, `warehouse`, `role`, `load_method`, `stage_file_rows` |
@@ -355,6 +355,16 @@ tinyetl data.tsv out.csv                                        # tab in, comma 
 tinyetl export.csv out.json --source-option "delimiter=;"       # skip detection
 tinyetl data.parquet out.csv --target-option "delimiter=|"      # write pipes
 ```
+
+#### Text That Looks Like a Number
+
+CSV values are read as the text in the file. Types come from inference or a schema file, and a value is converted only when that keeps it as written: `01826`, `007` and `+15551234` are codes, so a column holding them stays text, and `01826` is never loaded as `1826`. To read every column as text with no inference ("land raw, type later"), set `infer_types=false`:
+
+```bash
+tinyetl export.csv raw.parquet --source-option infer_types=false
+```
+
+To type some columns and keep others as text, list the text ones as `String` in a [schema file](#schema-files); the other columns are still inferred.
 
 ### Excel
 
@@ -808,7 +818,7 @@ tinyetl data.csv output.db --transform "total=row.qty * row.price" --preview 5
 
 ## Schema Files
 
-A schema file sets column types and validates rows, instead of inferring types (`--schema-file schema.yaml`).
+A schema file sets column types and validates rows (`--schema-file schema.yaml`). The columns it lists get their declared type; columns it doesn't list are still inferred. A `String` column keeps the source text exactly as written (`01826`, `012345`, `3/4/2021`, `true`), and for the other types the source text is parsed as the declared type.
 
 ### Schema File Format
 
@@ -816,7 +826,7 @@ Create a YAML file defining your expected schema. Here's the complete format:
 
 > **📝 Note on Schema Inference:** When TinyETL automatically infers schema from your data, all columns are marked as `nullable: true` by default. This is a safety measure for ETL operations—sample data may not represent all possible values in your dataset. If you need `NOT NULL` constraints or other strict validation, you must provide an explicit schema file.
 >
-> **How types are inferred:** column types come from the first 1,000 rows. A column whose values all have one type gets that type; whole and fractional numbers together (`84`, `29.85`) make a decimal column; any other mix makes a text column. Blank values (empty or whitespace only) don't count. While copying, every value is converted to its column's type: numbers in a text column become text, text that parses in a numeric, boolean, date or JSON column is converted, and blank values in non-text columns become NULL. A later value that can't be converted (`abc` in an integer column) is written unchanged where the target allows it (files, SQLite) and fails with the column name on typed databases such as PostgreSQL. Use a schema file to fix the types up front.
+> **How types are inferred:** column types come from the first 1,000 rows. A column whose values all have one type gets that type; whole and fractional numbers together (`84`, `29.85`) make a decimal column; any other mix makes a text column. Blank values (empty or whitespace only) don't count. Numbers with leading zeros or a leading `+` (`01826`, `+15551234`) count as text, not numbers. While copying, every value is converted to its column's type: numbers in a text column become text, text that parses in a numeric, boolean, date or JSON column is converted, and blank values in non-text columns become NULL. A later value that can't be converted (`abc` in an integer column) is written unchanged where the target allows it (files, SQLite) and fails with the column name on typed databases such as PostgreSQL. Use a schema file to fix the types up front.
 
 **schema.yaml:**
 ```yaml
@@ -870,13 +880,26 @@ Type names are case-insensitive:
 | `nullable` | Boolean | ❌ | Allow null/empty values (default: true) |
 | `pattern` | String | ❌ | Regex pattern for validation (Text/DateTime types) |
 | `default` | Any | ❌ | Default value when field is missing or null |
+| `on_mismatch` | String | ❌ | For this column, what to do with a value that doesn't parse as its type (overrides the file's `on_mismatch`) |
+
+`on_mismatch` can also be set once for the whole file, next to `columns:`:
+
+```yaml
+on_mismatch: fail        # the default: stop the transfer
+# on_mismatch: null      # write NULL, and report how many values were replaced
+# on_mismatch: raw       # keep the source text where the target allows it (files, SQLite)
+columns:
+  - name: "amount"
+    type: "Decimal"
+    on_mismatch: null
+```
 
 ### Validation Behavior
 
 **Type Checking:**
-- Each value must already have the column's type. CSV values are typed as they're read: whole numbers, decimals, `true`/`false` and dates are recognized; anything else is text
-- Text in a `Json` column is parsed as JSON
-- A mismatch (`yes` in a Boolean column, `abc` in an Integer column) stops the transfer with the column name
+- Source text is parsed as the column's declared type: `42` in an Integer column, `true`/`false` in a Boolean column, a date in a Date or DateTime column, JSON text in a Json column. Numbers with leading zeros (`007`) don't parse as numbers
+- A `String` column keeps the source text as written; values that are already typed (a JSON number, a Parquet integer) become text
+- A value that doesn't parse (`yes` in a Boolean column, `abc` in an Integer column) stops the transfer with the column name and the value, unless `on_mismatch` is `null` or `raw`
 
 **Null Handling:**
 - Missing fields use `default` value if specified
@@ -884,7 +907,7 @@ Type names are case-insensitive:
 - If `nullable: false`, null values without defaults cause validation errors
 
 **Pattern Validation:**
-- Regex patterns applied to Text and DateTime fields
+- Regex patterns are checked against the source text, before it's parsed, so a DateTime column's pattern sees the text as written
 - Validation failures stop processing with clear error messages
 - Write patterns in single quotes (`pattern: '^\d{4}$'`): in double-quoted YAML strings, `\d` is an invalid escape
 

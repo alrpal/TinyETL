@@ -64,6 +64,19 @@ fn default_nullable() -> bool {
     true
 }
 
+/// What a schema file does with a value that doesn't parse as its column's declared type
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnMismatch {
+    /// Stop the transfer, naming the column and the value
+    #[default]
+    Fail,
+    /// Write NULL; the transfer reports how many values it replaced
+    Null,
+    /// Keep the source text; files and SQLite store it, typed databases reject it
+    Raw,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaFileColumn {
     pub name: String,
@@ -73,11 +86,35 @@ pub struct SchemaFileColumn {
     pub nullable: bool,
     pub pattern: Option<String>,
     pub default: Option<String>,
+    /// Overrides the schema file's `on_mismatch` for this column
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_mismatch: Option<OnMismatch>,
+}
+
+impl SchemaFileColumn {
+    fn declared_type(&self) -> DataType {
+        match self.data_type.to_lowercase().as_str() {
+            "integer" => DataType::Integer,
+            "decimal" => DataType::Decimal,
+            "boolean" => DataType::Boolean,
+            "date" => DataType::Date,
+            "datetime" => DataType::DateTime,
+            "json" => DataType::Json,
+            _ => DataType::String, // `validate` rejects unknown names
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaFile {
+    /// The default for every column: `fail` (the default), `null` or `raw`
+    #[serde(default, skip_serializing_if = "is_default_policy")]
+    pub on_mismatch: OnMismatch,
     pub columns: Vec<SchemaFileColumn>,
+}
+
+fn is_default_policy(policy: &OnMismatch) -> bool {
+    *policy == OnMismatch::Fail
 }
 
 impl SchemaFile {
@@ -130,27 +167,15 @@ impl SchemaFile {
         Ok(())
     }
 
+    /// The schema file's columns alone, in its order
     pub fn to_schema(&self) -> Result<Schema> {
         let columns = self
             .columns
             .iter()
-            .map(|col| {
-                let data_type = match col.data_type.to_lowercase().as_str() {
-                    "string" => DataType::String,
-                    "integer" => DataType::Integer,
-                    "decimal" => DataType::Decimal,
-                    "boolean" => DataType::Boolean,
-                    "date" => DataType::Date,
-                    "datetime" => DataType::DateTime,
-                    "json" => DataType::Json,
-                    _ => DataType::String, // Already validated, so this shouldn't happen
-                };
-
-                Column {
-                    name: col.name.clone(),
-                    data_type,
-                    nullable: col.nullable,
-                }
+            .map(|col| Column {
+                name: col.name.clone(),
+                data_type: col.declared_type(),
+                nullable: col.nullable,
             })
             .collect();
 
@@ -161,102 +186,112 @@ impl SchemaFile {
         })
     }
 
-    pub fn validate_and_transform_row(&self, row: &mut Row) -> Result<()> {
-        for schema_col in &self.columns {
-            let value = row.get(&schema_col.name);
+    /// The transfer's schema: the source's columns in the source's order, with the declared
+    /// type and nullability for the columns this file lists. Columns it doesn't list keep their
+    /// inferred type; listed columns the source doesn't have come last.
+    pub fn apply_to(&self, inferred: &Schema) -> Schema {
+        let declared = |name: &str| self.columns.iter().find(|c| c.name == name);
+        let mut columns: Vec<Column> = inferred
+            .columns
+            .iter()
+            .map(|column| match declared(&column.name) {
+                Some(col) => Column {
+                    name: col.name.clone(),
+                    data_type: col.declared_type(),
+                    nullable: col.nullable,
+                },
+                None => column.clone(),
+            })
+            .collect();
+        for col in &self.columns {
+            if !columns.iter().any(|c| c.name == col.name) {
+                columns.push(Column {
+                    name: col.name.clone(),
+                    data_type: col.declared_type(),
+                    nullable: col.nullable,
+                });
+            }
+        }
+        Schema {
+            columns,
+            estimated_rows: inferred.estimated_rows,
+            primary_key_candidate: None,
+        }
+    }
 
-            // Check for required columns
-            if !schema_col.nullable && (value.is_none() || matches!(value, Some(Value::Null))) {
-                // Apply default if available
-                if let Some(default_str) = &schema_col.default {
+    /// Give each listed column its declared type: apply defaults, check `nullable` and
+    /// `pattern` (against the source text), and parse the source text as the declared type.
+    /// A String column keeps the source text exactly. Returns how many values were replaced by
+    /// NULL under `on_mismatch: null`.
+    pub fn validate_and_transform_row(&self, row: &mut Row) -> Result<usize> {
+        let mut nulled = 0;
+        for schema_col in &self.columns {
+            let missing = matches!(row.get(&schema_col.name), None | Some(Value::Null));
+            if missing {
+                if !schema_col.nullable {
+                    let Some(default_str) = &schema_col.default else {
+                        return Err(crate::TinyEtlError::DataValidation(format!(
+                            "Required column '{}' is missing or null",
+                            schema_col.name
+                        )));
+                    };
                     let default_value =
                         self.parse_default_value(default_str, &schema_col.data_type)?;
                     row.insert(schema_col.name.clone(), default_value);
-                } else {
-                    return Err(crate::TinyEtlError::DataValidation(format!(
-                        "Required column '{}' is missing or null",
-                        schema_col.name
-                    )));
+                }
+                continue;
+            }
+
+            let Some(slot) = row.get_mut(&schema_col.name) else {
+                continue;
+            };
+            let declared = schema_col.declared_type();
+            let value = std::mem::replace(slot, Value::Null);
+
+            if let Some(pattern) = &schema_col.pattern {
+                // The source text if there is one, else the value as text in a String column
+                let text = match &value {
+                    Value::String(s) => Some(s.clone()),
+                    other if declared == DataType::String => other.to_string_for_arrow(),
+                    _ => None,
+                };
+                if let Some(text) = text {
+                    let regex = Regex::new(pattern).unwrap(); // Already validated in validate()
+                    if !regex.is_match(&text) {
+                        return Err(crate::TinyEtlError::DataValidation(format!(
+                            "Column '{}' value '{}' does not match pattern '{}'",
+                            schema_col.name, text, pattern
+                        )));
+                    }
                 }
             }
 
-            // Transform and validate existing values
-            if let Some(val) = row.get(&schema_col.name).cloned() {
-                // Convert string to JSON if schema expects JSON type
-                let transformed_val = if schema_col.data_type.to_lowercase() == "json"
-                    && matches!(val, Value::String(_))
-                {
-                    if let Value::String(s) = val {
-                        // Try to parse the string as JSON
-                        match serde_json::from_str::<serde_json::Value>(&s) {
-                            Ok(json_val) => Value::Json(json_val),
-                            Err(e) => {
-                                return Err(crate::TinyEtlError::DataValidation(format!(
-                                    "Column '{}' contains invalid JSON: {}",
-                                    schema_col.name, e
-                                )));
-                            }
-                        }
-                    } else {
-                        val
-                    }
-                } else {
-                    val
-                };
-
-                // Update the row with the transformed value
-                row.insert(schema_col.name.clone(), transformed_val.clone());
-
-                // Validate the transformed value
-                self.validate_column_value(&transformed_val, schema_col)?;
+            let converted = value.clone().coerce_to(&declared);
+            if converted.fits(&declared) {
+                *slot = converted;
+                continue;
+            }
+            match schema_col.on_mismatch.unwrap_or(self.on_mismatch) {
+                OnMismatch::Fail => {
+                    let shown = value.to_string_for_arrow().unwrap_or_default();
+                    return Err(crate::TinyEtlError::DataValidation(format!(
+                        "Column '{}' value '{}' is not a valid {} (set on_mismatch: null or raw in the schema file to load it anyway)",
+                        schema_col.name, shown, schema_col.data_type
+                    )));
+                }
+                OnMismatch::Null if !schema_col.nullable => {
+                    return Err(crate::TinyEtlError::DataValidation(format!(
+                        "Column '{}' value '{}' is not a valid {}, and the column isn't nullable",
+                        schema_col.name,
+                        value.to_string_for_arrow().unwrap_or_default(),
+                        schema_col.data_type
+                    )));
+                }
+                OnMismatch::Null => nulled += 1, // the slot already holds NULL
+                OnMismatch::Raw => *slot = value,
             }
         }
-        Ok(())
-    }
-
-    fn validate_column_value(&self, value: &Value, schema_col: &SchemaFileColumn) -> Result<()> {
-        // Skip null values if column is nullable
-        if matches!(value, Value::Null) && schema_col.nullable {
-            return Ok(());
-        }
-
-        // Validate data type
-        let expected_type = match schema_col.data_type.to_lowercase().as_str() {
-            "string" => DataType::String,
-            "integer" => DataType::Integer,
-            "decimal" => DataType::Decimal,
-            "boolean" => DataType::Boolean,
-            "date" => DataType::Date,
-            "datetime" => DataType::DateTime,
-            "json" => DataType::Json,
-            _ => {
-                return Err(crate::TinyEtlError::DataValidation(format!(
-                    "Unknown data type '{}' for column '{}'",
-                    schema_col.data_type, schema_col.name
-                )))
-            }
-        };
-
-        let actual_type = SchemaInferer::infer_type(value);
-        if actual_type != expected_type && actual_type != DataType::Null {
-            return Err(crate::TinyEtlError::DataValidation(format!(
-                "Column '{}' expected type {:?}, got {:?}",
-                schema_col.name, expected_type, actual_type
-            )));
-        }
-
-        // Validate pattern for string values
-        if let (Some(pattern), Value::String(s)) = (&schema_col.pattern, value) {
-            let regex = Regex::new(pattern).unwrap(); // Already validated in validate()
-            if !regex.is_match(s) {
-                return Err(crate::TinyEtlError::DataValidation(format!(
-                    "Column '{}' value '{}' does not match pattern '{}'",
-                    schema_col.name, s, pattern
-                )));
-            }
-        }
-
-        Ok(())
+        Ok(nulled)
     }
 
     fn parse_default_value(&self, default_str: &str, data_type: &str) -> Result<Value> {
@@ -503,6 +538,11 @@ impl Value {
                 Value::String(value.to_string_for_arrow().unwrap_or_default())
             }
             (Value::String(s), _) if s.trim().is_empty() => Value::Null,
+            (Value::String(s), DataType::Integer | DataType::Decimal)
+                if !number_keeps_text(s.trim()) =>
+            {
+                Value::String(s)
+            }
             (Value::String(s), DataType::Integer) => match s.trim().parse::<i64>() {
                 Ok(i) => Value::Integer(i),
                 Err(_) => Value::String(s),
@@ -544,6 +584,17 @@ impl Value {
             (value, _) => value,
         }
     }
+}
+
+/// Whether `text` can become a number without changing how it reads: false for a leading `+`
+/// or a leading zero before another digit (`01826`, `+15551234`, `0012.50`), which are codes
+/// rather than quantities. `0`, `-7` and `0.5` are fine.
+pub fn number_keeps_text(text: &str) -> bool {
+    if text.starts_with('+') {
+        return false;
+    }
+    let digits = text.strip_prefix('-').unwrap_or(text).as_bytes();
+    !(digits.len() > 1 && digits[0] == b'0' && digits[1].is_ascii_digit())
 }
 
 /// Convert each value in `row` to its column's type with [`Value::coerce_to`].
@@ -1097,12 +1148,14 @@ mod tests {
     #[test]
     fn test_json_default_value() {
         let schema_file = SchemaFile {
+            on_mismatch: OnMismatch::Fail,
             columns: vec![SchemaFileColumn {
                 name: "config".to_string(),
                 data_type: "json".to_string(),
                 nullable: false,
                 pattern: None,
                 default: Some(r#"{"enabled": true, "count": 0}"#.to_string()),
+                on_mismatch: None,
             }],
         };
 
@@ -1117,5 +1170,144 @@ mod tests {
             }
             _ => panic!("Expected JSON value"),
         }
+    }
+
+    fn schema_file(yaml: &str) -> SchemaFile {
+        let file: SchemaFile = serde_yaml::from_str(yaml).unwrap();
+        file.validate().unwrap();
+        file
+    }
+
+    fn text(s: &str) -> Value {
+        Value::String(s.to_string())
+    }
+
+    #[test]
+    fn test_number_keeps_text() {
+        for ok in ["0", "7", "-7", "0.5", "-0.5", "10", "1.50", "0e1"] {
+            assert!(number_keeps_text(ok), "{}", ok);
+        }
+        for code in ["01826", "007", "-01", "0012.50", "+15551234", "00"] {
+            assert!(!number_keeps_text(code), "{}", code);
+        }
+        assert_eq!(text("007").coerce_to(&DataType::Integer), text("007"));
+        assert_eq!(
+            text("0012.50").coerce_to(&DataType::Decimal),
+            text("0012.50")
+        );
+        assert_eq!(text("12").coerce_to(&DataType::Integer), Value::Integer(12));
+    }
+
+    #[test]
+    fn test_string_columns_keep_the_source_text() {
+        let file = schema_file(
+            "columns:\n  - {name: zip, type: String}\n  - {name: day, type: String}\n  - {name: flag, type: String}\n  - {name: n, type: String}\n",
+        );
+        let mut row: Row = [
+            ("zip", text("01826")),
+            ("day", text("3/4/2021")),
+            ("flag", text("true")),
+            ("n", Value::Integer(12)), // already typed, e.g. a JSON number
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(file.validate_and_transform_row(&mut row).unwrap(), 0);
+        assert_eq!(row["zip"], text("01826"));
+        assert_eq!(row["day"], text("3/4/2021"));
+        assert_eq!(row["flag"], text("true"));
+        assert_eq!(row["n"], text("12"));
+    }
+
+    #[test]
+    fn test_declared_types_parse_the_source_text() {
+        let file = schema_file(
+            "columns:\n  - {name: n, type: Integer}\n  - {name: d, type: Date, pattern: '^\\d{4}-'}\n  - {name: j, type: Json}\n",
+        );
+        let mut row: Row = [
+            ("n", text(" 42")),
+            ("d", text("2024-01-02")),
+            ("j", text("[1]")),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        file.validate_and_transform_row(&mut row).unwrap();
+        assert_eq!(row["n"], Value::Integer(42));
+        assert!(matches!(row["d"], Value::Date(_)));
+        assert_eq!(row["j"], Value::Json(serde_json::json!([1])));
+        // The pattern sees the text as written
+        let mut row: Row = [("d".to_string(), text("01/02/2024"))]
+            .into_iter()
+            .collect();
+        let err = file
+            .validate_and_transform_row(&mut row)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not match pattern"), "{}", err);
+    }
+
+    #[test]
+    fn test_on_mismatch() {
+        let row = || -> Row { [("n".to_string(), text("abc"))].into_iter().collect() };
+        let fail = schema_file("columns:\n  - {name: n, type: Integer}\n");
+        let err = fail
+            .validate_and_transform_row(&mut row())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Column 'n' value 'abc' is not a valid Integer"),
+            "{}",
+            err
+        );
+
+        let null = schema_file("on_mismatch: null\ncolumns:\n  - {name: n, type: Integer}\n");
+        let mut r = row();
+        assert_eq!(null.validate_and_transform_row(&mut r).unwrap(), 1);
+        assert_eq!(r["n"], Value::Null);
+
+        // A column's setting overrides the file's
+        let raw = schema_file(
+            "on_mismatch: null\ncolumns:\n  - {name: n, type: Integer, on_mismatch: raw}\n",
+        );
+        let mut r = row();
+        assert_eq!(raw.validate_and_transform_row(&mut r).unwrap(), 0);
+        assert_eq!(r["n"], text("abc"));
+
+        // NULL in a column that isn't nullable is still an error
+        let strict = schema_file(
+            "on_mismatch: null\ncolumns:\n  - {name: n, type: Integer, nullable: false}\n",
+        );
+        assert!(strict.validate_and_transform_row(&mut row()).is_err());
+        assert!(serde_yaml::from_str::<SchemaFile>("on_mismatch: skip\ncolumns: []\n").is_err());
+    }
+
+    #[test]
+    fn test_apply_to_keeps_source_order_and_unlisted_columns() {
+        let file = schema_file(
+            "columns:\n  - {name: b, type: String}\n  - {name: extra, type: Integer}\n",
+        );
+        let inferred = SchemaInferer::infer_from_rows_ordered(
+            &[[("a", Value::Integer(1)), ("b", Value::Integer(2))]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect()],
+            &["a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        let schema = file.apply_to(&inferred);
+        let columns: Vec<_> = schema
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.data_type.clone()))
+            .collect();
+        assert_eq!(
+            columns,
+            [
+                ("a", DataType::Integer),
+                ("b", DataType::String),
+                ("extra", DataType::Integer)
+            ]
+        );
     }
 }

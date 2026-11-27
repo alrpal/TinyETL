@@ -280,12 +280,15 @@ fn count_array_elements(mut file: File, sequence: bool) -> Result<usize> {
     })
 }
 
-fn json_value_to_value(json_val: &serde_json::Value) -> Value {
+/// A JSON value as a row value. Strings stay strings exactly as written; when `detect_dates`
+/// (schema inference only), a string that reads as a date counts as one, so the column can get
+/// a date type and `schema::coerce_row` converts its values.
+fn json_value_to_value(json_val: &serde_json::Value, detect_dates: bool) -> Value {
     match json_val {
-        serde_json::Value::String(s) => {
-            // Try to parse string as date first, fall back to string
+        serde_json::Value::String(s) if detect_dates => {
             DateParser::try_parse(s).unwrap_or_else(|| Value::String(s.clone()))
         }
+        serde_json::Value::String(s) => Value::String(s.clone()),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Value::Integer(i)
@@ -306,11 +309,11 @@ fn json_value_to_value(json_val: &serde_json::Value) -> Value {
 }
 
 /// A row for each JSON object; other values (numbers, arrays at the top level) are skipped.
-fn object_to_row(value: &serde_json::Value) -> Option<Row> {
+fn object_to_row(value: &serde_json::Value, detect_dates: bool) -> Option<Row> {
     value.as_object().map(|object| {
         object
             .iter()
-            .map(|(key, value)| (key.clone(), json_value_to_value(value)))
+            .map(|(key, value)| (key.clone(), json_value_to_value(value, detect_dates)))
             .collect()
     })
 }
@@ -383,7 +386,7 @@ impl Source for JsonSource {
                     }
                 }
             }
-            if let Some(row) = object_to_row(&value) {
+            if let Some(row) = object_to_row(&value, true) {
                 rows.push(row);
             }
         }
@@ -401,7 +404,7 @@ impl Source for JsonSource {
             let Some(value) = values.next_value()? else {
                 break;
             };
-            if let Some(row) = object_to_row(&value) {
+            if let Some(row) = object_to_row(&value, false) {
                 rows.push(row);
             }
         }
@@ -599,6 +602,7 @@ impl Target for JsonTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::DataType;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1067,5 +1071,17 @@ mod tests {
                 .unwrap(),
             r#"{"id":1,"actor":{"login":"a"},"tags":[1,2]}"#
         );
+    }
+
+    #[tokio::test]
+    async fn test_strings_stay_strings_until_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.jsonl");
+        std::fs::write(&path, "{\"zip\":\"01826\",\"day\":\"2024-01-01\"}\n").unwrap();
+        let (schema, rows) = read(&path, 10).await;
+        assert_eq!(schema.columns[0].data_type, DataType::String);
+        assert_eq!(schema.columns[1].data_type, DataType::DateTime); // inferred from the text
+        assert_eq!(rows[0]["zip"], Value::String("01826".to_string()));
+        assert_eq!(rows[0]["day"], Value::String("2024-01-01".to_string()));
     }
 }

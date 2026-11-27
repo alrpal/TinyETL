@@ -170,8 +170,11 @@ mod tests {
 
     #[test]
     fn test_accepted_by_location() {
-        assert_eq!(accepted("data.csv", None), vec!["delimiter"]);
-        assert_eq!(accepted("data.tsv.gz", None), vec!["delimiter"]);
+        assert_eq!(accepted("data.csv", None), vec!["delimiter", "infer_types"]);
+        assert_eq!(
+            accepted("data.tsv.gz", None),
+            vec!["delimiter", "infer_types"]
+        );
         assert!(accepted("data.parquet", None).is_empty());
         assert!(accepted("out.db#t", None).is_empty());
         assert!(accepted("postgres://u:p@h/db#t", None).is_empty());

@@ -15,7 +15,7 @@ use crate::{
         duckdb::{DuckdbSource, DuckdbTarget},
         Source, Target,
     },
-    schema::{coerce_row, Row, Schema, SchemaFile},
+    schema::{Row, Schema, SchemaFile},
     Result, TinyEtlError,
 };
 
@@ -55,21 +55,23 @@ pub async fn stage(
     staging.create_table(TABLE, schema).await?;
     source.reset().await?;
     let mut staged = 0;
+    let mut nulled = 0;
     while source.has_more() {
         let mut batch = source.read_batch(batch_size).await?;
         if batch.is_empty() {
             break;
         }
-        for row in &mut batch {
-            if let Some(schema_file) = schema_file {
-                schema_file.validate_and_transform_row(row)?;
-            }
-            coerce_row(row, schema);
-        }
+        nulled += crate::transfer::TransferEngine::prepare_batch(&mut batch, schema_file, schema)?;
         staged += staging.write_batch(&batch).await?;
     }
     staging.finalize().await?;
     drop(staging);
+    if nulled > 0 {
+        tracing::warn!(
+            "{} values didn't parse as their column's type and were loaded as NULL (on_mismatch: null)",
+            nulled
+        );
+    }
     info!(
         "→ Loaded {} rows in {:.1}s; running the SQL transform",
         staged,

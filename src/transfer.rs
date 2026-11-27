@@ -44,10 +44,8 @@ impl TransferEngine {
                 "→ Loading schema from file: {}",
                 config.schema_file.as_deref().unwrap_or_default()
             );
-            // Even when using a schema file, we need to initialize the source
-            // (e.g., for pagination state in SQLite)
-            let _ = source.infer_schema(1).await?;
-            schema_file.to_schema()?
+            // The file's columns get their declared types; any others are inferred
+            schema_file.apply_to(&source.infer_schema(1000).await?)
         } else {
             info!("→ Inferring schema from source...");
             source.infer_schema(1000).await?
@@ -79,12 +77,20 @@ impl TransferEngine {
 
         // Step 3: Handle preview mode
         if let Some(preview_rows) = config.preview {
-            return Self::handle_preview(source, &schema, preview_rows, config).await;
+            return Self::handle_preview(
+                source,
+                &schema,
+                schema_file.as_ref(),
+                preview_rows,
+                config,
+            )
+            .await;
         }
 
         // Step 4: Handle dry run mode
         if config.dry_run {
-            return Self::handle_dry_run(source, target, &schema, config).await;
+            return Self::handle_dry_run(source, target, &schema, schema_file.as_ref(), config)
+                .await;
         }
 
         // Step 5: Initialize transformer and determine final schema
@@ -94,7 +100,8 @@ impl TransferEngine {
 
             // Read a small sample to infer the transformed schema
             source.reset().await?;
-            let sample_batch = source.read_batch(1).await?;
+            let mut sample_batch = source.read_batch(1).await?;
+            Self::prepare_batch(&mut sample_batch, schema_file.as_ref(), &schema)?;
 
             if !sample_batch.is_empty() {
                 transformer.transform_batch(&sample_batch)?;
@@ -164,6 +171,7 @@ impl TransferEngine {
 
         let mut total_rows = 0;
         let mut batches_processed = 0;
+        let mut nulled = 0;
 
         source.reset().await?;
 
@@ -173,25 +181,18 @@ impl TransferEngine {
                 break;
             }
 
-            // Apply schema validation and defaults if schema file is provided
-            if let Some(ref schema_file) = schema_file {
-                for row in &mut batch {
-                    schema_file.validate_and_transform_row(row)?;
-                }
-            }
+            nulled += Self::prepare_batch(&mut batch, schema_file.as_ref(), &schema)?;
 
-            // Apply transformations
-            let mut processed_batch = if transformer.is_enabled() {
-                transformer.transform_batch(&batch)?
+            // Apply transformations; their output gets the output schema's types
+            let processed_batch = if transformer.is_enabled() {
+                let mut transformed = transformer.transform_batch(&batch)?;
+                for row in &mut transformed {
+                    crate::schema::coerce_row(row, &final_schema);
+                }
+                transformed
             } else {
                 batch
             };
-
-            // The schema came from a sample; give every value its column's type so targets
-            // that bind typed parameters (e.g. Postgres) see one type per column
-            for row in &mut processed_batch {
-                crate::schema::coerce_row(row, &final_schema);
-            }
 
             let written = target.write_batch(&processed_batch).await?;
             total_rows += written;
@@ -212,6 +213,12 @@ impl TransferEngine {
 
         // Step 10: Finalize
         target.finalize().await?;
+        if nulled > 0 {
+            warn!(
+                "{} values didn't parse as their column's type and were written as NULL (on_mismatch: null)",
+                nulled
+            );
+        }
 
         let total_time = start_time.elapsed();
         let rows_per_second = total_rows as f64 / total_time.as_secs_f64();
@@ -226,9 +233,31 @@ impl TransferEngine {
         })
     }
 
+    /// Rows as read become rows with the schema's types: the schema file's checks and declared
+    /// types first (text in a String column stays as written), then every other column is
+    /// converted to its type. Sources hand over text as written (CSV, JSON strings) or typed
+    /// values; the schema came from a sample, so this also gives targets that bind typed
+    /// parameters (e.g. Postgres) one type per column. Returns the values set to NULL under
+    /// `on_mismatch: null`.
+    pub(crate) fn prepare_batch(
+        batch: &mut [crate::schema::Row],
+        schema_file: Option<&SchemaFile>,
+        schema: &Schema,
+    ) -> Result<usize> {
+        let mut nulled = 0;
+        for row in batch.iter_mut() {
+            if let Some(schema_file) = schema_file {
+                nulled += schema_file.validate_and_transform_row(row)?;
+            }
+            crate::schema::coerce_row(row, schema);
+        }
+        Ok(nulled)
+    }
+
     async fn handle_preview(
         mut source: Box<dyn Source>,
         schema: &Schema,
+        schema_file: Option<&SchemaFile>,
         preview_rows: usize,
         config: &Config,
     ) -> Result<TransferStats> {
@@ -239,7 +268,8 @@ impl TransferEngine {
         Self::print_schema(schema);
 
         source.reset().await?;
-        let sample_data = source.read_batch(preview_rows).await?;
+        let mut sample_data = source.read_batch(preview_rows).await?;
+        Self::prepare_batch(&mut sample_data, schema_file, schema)?;
 
         let (final_schema, final_data) = if transformer.is_enabled() && !sample_data.is_empty() {
             println!("\nApplying transformations...");
@@ -366,6 +396,7 @@ impl TransferEngine {
         mut source: Box<dyn Source>,
         target: Box<dyn Target>,
         schema: &Schema,
+        schema_file: Option<&SchemaFile>,
         config: &Config,
     ) -> Result<TransferStats> {
         info!("Dry run mode - validating connections and schema");
@@ -380,7 +411,8 @@ impl TransferEngine {
         if transformer.is_enabled() {
             info!("Testing transformations...");
             source.reset().await?;
-            let test_batch = source.read_batch(10).await?; // Small sample for testing
+            let mut test_batch = source.read_batch(10).await?; // Small sample for testing
+            Self::prepare_batch(&mut test_batch, schema_file, schema)?;
 
             if !test_batch.is_empty() {
                 let _transformed = transformer.transform_batch(&test_batch)?;
@@ -1021,5 +1053,54 @@ mod tests {
 
         // Dry run should not transfer data
         assert_eq!(stats.total_rows, 0);
+    }
+
+    fn text_row(pairs: &[(&str, &str)]) -> Row {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_text_from_the_source_gets_column_types_before_a_transform() {
+        // CSV rows arrive as text; Lua must still see numbers
+        let (target, log) = RecordingTarget::new(false, true);
+        let mut cfg = config("t.db#t");
+        cfg.transform = crate::transformer::TransformConfig::Inline("big=row.n > 9".to_string());
+        let source = FakeSource::new(
+            &[("n", DataType::Integer)],
+            vec![text_row(&[("n", "10")]), text_row(&[("n", "2")])],
+        );
+        run(&cfg, source, target).await.unwrap();
+        let log = log.lock().unwrap();
+        assert_eq!(log.rows[0]["n"], Value::Integer(10));
+        assert_eq!(log.rows[0]["big"], Value::Boolean(true));
+        assert_eq!(log.rows[1]["big"], Value::Boolean(false));
+    }
+
+    #[tokio::test]
+    async fn test_schema_file_types_listed_columns_and_infers_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema_path = dir.path().join("schema.yaml");
+        std::fs::write(&schema_path, "columns:\n  - name: zip\n    type: String\n").unwrap();
+        let mut cfg = config("t.db#t");
+        cfg.schema_file = Some(schema_path.to_string_lossy().into_owned());
+        let (target, log) = RecordingTarget::new(false, true);
+        let source = FakeSource::new(
+            &[("zip", DataType::Integer), ("n", DataType::Integer)],
+            vec![text_row(&[("zip", "01826"), ("n", "5")])],
+        );
+        run(&cfg, source, target).await.unwrap();
+        let log = log.lock().unwrap();
+        let (_, schema) = log.created_with.clone().unwrap();
+        let types: Vec<_> = schema
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.data_type.clone()))
+            .collect();
+        assert_eq!(types, [("zip", DataType::String), ("n", DataType::Integer)]);
+        assert_eq!(log.rows[0]["zip"], Value::String("01826".to_string()));
+        assert_eq!(log.rows[0]["n"], Value::Integer(5));
     }
 }
