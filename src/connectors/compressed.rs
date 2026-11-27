@@ -244,6 +244,13 @@ impl Source for CompressedSource {
     fn has_more(&self) -> bool {
         self.inner.as_ref().is_some_and(|inner| inner.has_more())
     }
+
+    fn day_first_columns(&self) -> Vec<String> {
+        self.inner
+            .as_ref()
+            .map(|inner| inner.day_first_columns())
+            .unwrap_or_default()
+    }
 }
 
 pub struct CompressedTarget {

@@ -94,6 +94,7 @@ impl TransferEngine {
         }
 
         // Step 5: Initialize transformer and determine final schema
+        let day_first = source.day_first_columns();
         let mut transformer = Transformer::new(&config.transform)?;
         let final_schema = if transformer.is_enabled() {
             info!("→ Transformation enabled");
@@ -101,7 +102,7 @@ impl TransferEngine {
             // Read a small sample to infer the transformed schema
             source.reset().await?;
             let mut sample_batch = source.read_batch(1).await?;
-            Self::prepare_batch(&mut sample_batch, schema_file.as_ref(), &schema)?;
+            Self::prepare_batch(&mut sample_batch, schema_file.as_ref(), &schema, &day_first)?;
 
             if !sample_batch.is_empty() {
                 transformer.transform_batch(&sample_batch)?;
@@ -181,7 +182,7 @@ impl TransferEngine {
                 break;
             }
 
-            nulled += Self::prepare_batch(&mut batch, schema_file.as_ref(), &schema)?;
+            nulled += Self::prepare_batch(&mut batch, schema_file.as_ref(), &schema, &day_first)?;
 
             // Apply transformations; their output gets the output schema's types
             let processed_batch = if transformer.is_enabled() {
@@ -243,13 +244,14 @@ impl TransferEngine {
         batch: &mut [crate::schema::Row],
         schema_file: Option<&SchemaFile>,
         schema: &Schema,
+        day_first: &[String],
     ) -> Result<usize> {
         let mut nulled = 0;
         for row in batch.iter_mut() {
             if let Some(schema_file) = schema_file {
-                nulled += schema_file.validate_and_transform_row(row)?;
+                nulled += schema_file.validate_and_transform_row_with(row, day_first)?;
             }
-            crate::schema::coerce_row(row, schema);
+            crate::schema::coerce_row_with(row, schema, day_first);
         }
         Ok(nulled)
     }
@@ -269,7 +271,8 @@ impl TransferEngine {
 
         source.reset().await?;
         let mut sample_data = source.read_batch(preview_rows).await?;
-        Self::prepare_batch(&mut sample_data, schema_file, schema)?;
+        let day_first = source.day_first_columns();
+        Self::prepare_batch(&mut sample_data, schema_file, schema, &day_first)?;
 
         let (final_schema, final_data) = if transformer.is_enabled() && !sample_data.is_empty() {
             println!("\nApplying transformations...");
@@ -412,7 +415,8 @@ impl TransferEngine {
             info!("Testing transformations...");
             source.reset().await?;
             let mut test_batch = source.read_batch(10).await?; // Small sample for testing
-            Self::prepare_batch(&mut test_batch, schema_file, schema)?;
+            let day_first = source.day_first_columns();
+            Self::prepare_batch(&mut test_batch, schema_file, schema, &day_first)?;
 
             if !test_batch.is_empty() {
                 let _transformed = transformer.transform_batch(&test_batch)?;

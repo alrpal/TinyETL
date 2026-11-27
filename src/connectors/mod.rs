@@ -42,6 +42,12 @@ pub trait Source: Send + Sync {
 
     /// Check if there's more data to read
     fn has_more(&self) -> bool;
+
+    /// Columns whose numeric dates read day first (`13/04/2024`), as found by `infer_schema`.
+    /// Only text sources (CSV, JSON) have any; values in them are converted with that order.
+    fn day_first_columns(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[async_trait]

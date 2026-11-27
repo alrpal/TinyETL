@@ -331,6 +331,10 @@ impl Source for S3Source {
     fn has_more(&self) -> bool {
         self.inner.has_more()
     }
+
+    fn day_first_columns(&self) -> Vec<String> {
+        self.inner.day_first_columns()
+    }
 }
 
 /// Target that writes a local staging file with the file connector and uploads it to S3 when

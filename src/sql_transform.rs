@@ -54,6 +54,7 @@ pub async fn stage(
     staging.connect().await?;
     staging.create_table(TABLE, schema).await?;
     source.reset().await?;
+    let day_first = source.day_first_columns();
     let mut staged = 0;
     let mut nulled = 0;
     while source.has_more() {
@@ -61,7 +62,12 @@ pub async fn stage(
         if batch.is_empty() {
             break;
         }
-        nulled += crate::transfer::TransferEngine::prepare_batch(&mut batch, schema_file, schema)?;
+        nulled += crate::transfer::TransferEngine::prepare_batch(
+            &mut batch,
+            schema_file,
+            schema,
+            &day_first,
+        )?;
         staged += staging.write_batch(&batch).await?;
     }
     staging.finalize().await?;

@@ -115,6 +115,8 @@ pub struct CsvSource {
     headers: Vec<String>,
     /// Whether the not-UTF-8 warning has been shown
     warned_encoding: bool,
+    /// Date columns whose numeric dates read day first, from `infer_schema`
+    day_first: Vec<String>,
     current_position: u64,
     has_more_data: bool,
 }
@@ -134,6 +136,7 @@ impl CsvSource {
             reader: None,
             headers: Vec::new(),
             warned_encoding: false,
+            day_first: Vec::new(),
             current_position: 0,
             has_more_data: true,
         })
@@ -204,6 +207,19 @@ impl CsvSource {
         }
         Ok(row)
     }
+}
+
+/// The date columns whose tallies read numeric dates day first
+pub(crate) fn day_first_names(names: &[String], tallies: &[ColumnTally]) -> Vec<String> {
+    names
+        .iter()
+        .zip(tallies)
+        .filter(|(_, tally)| {
+            tally.date_order() == crate::date_parser::DateOrder::DayFirst
+                && matches!(tally.data_type(), DataType::Date | DataType::DateTime)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// Header names made usable as column names: an empty name becomes `column_N`, a repeated
@@ -309,6 +325,7 @@ impl Source for CsvSource {
         // Reset for future reading
         self.reset().await?;
 
+        self.day_first = day_first_names(&self.headers, &tallies);
         let columns = self
             .headers
             .iter()
@@ -379,6 +396,10 @@ impl Source for CsvSource {
 
     fn has_more(&self) -> bool {
         self.has_more_data && self.reader.is_some()
+    }
+
+    fn day_first_columns(&self) -> Vec<String> {
+        self.day_first.clone()
     }
 }
 

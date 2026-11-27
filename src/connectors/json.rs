@@ -320,6 +320,8 @@ pub struct JsonSource {
     values: Option<JsonValues>,
     /// Whether rows have been read since the file was opened
     consumed: bool,
+    /// Date columns whose numeric dates read day first, from `infer_schema`
+    day_first: Vec<String>,
 }
 
 impl JsonSource {
@@ -330,6 +332,7 @@ impl JsonSource {
             file_path,
             values: None,
             consumed: false,
+            day_first: Vec::new(),
         })
     }
 
@@ -388,7 +391,7 @@ impl Source for JsonSource {
         }
         // JSON numbers, booleans and nesting are typed already; strings are text unless they
         // read as dates
-        let columns = key_order
+        let tallies: Vec<ColumnTally> = key_order
             .iter()
             .map(|key| {
                 let mut tally = ColumnTally::default();
@@ -398,11 +401,17 @@ impl Source for JsonSource {
                         Some(value) => tally.add_value(value),
                     }
                 }
-                Column {
-                    name: key.clone(),
-                    data_type: tally.data_type(),
-                    nullable: true,
-                }
+                tally
+            })
+            .collect();
+        self.day_first = crate::connectors::csv::day_first_names(&key_order, &tallies);
+        let columns = key_order
+            .iter()
+            .zip(&tallies)
+            .map(|(key, tally)| Column {
+                name: key.clone(),
+                data_type: tally.data_type(),
+                nullable: true,
             })
             .collect();
         Ok(Schema {
@@ -448,6 +457,10 @@ impl Source for JsonSource {
 
     fn has_more(&self) -> bool {
         self.values.as_ref().is_some_and(JsonValues::has_more)
+    }
+
+    fn day_first_columns(&self) -> Vec<String> {
+        self.day_first.clone()
     }
 }
 

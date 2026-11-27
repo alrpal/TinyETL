@@ -8,7 +8,7 @@
 //! `json {"a":1}`, `bool true`, `null`).
 //!
 //! Rows go through the same steps as a transfer with no schema file: `infer_schema(1000)`,
-//! then every row converted to the schema with `coerce_row`.
+//! then every row converted to the schema with `coerce_row_with` (as `TransferEngine` does).
 //!
 //! The file connectors always run. PostgreSQL, MySQL and SQL Server run against the
 //! `test_env` containers (or `TINYETL_TEST_POSTGRES_URL` / `_MYSQL_URL` / `_MSSQL_URL`) and
@@ -25,7 +25,7 @@ use std::fmt::Write as _;
 
 use chrono::Timelike;
 use tinyetl::connectors::create_source_from_url_with_type_and_options;
-use tinyetl::schema::{coerce_row, DataType, Row, Schema, Value};
+use tinyetl::schema::{coerce_row_with, DataType, Row, Schema, Value};
 
 /// What one column should come out as
 pub struct Check {
@@ -88,8 +88,9 @@ pub async fn try_detect(location: &str) -> Result<(Schema, Vec<Row>), String> {
         }
         rows.extend(batch);
     }
+    let day_first = source.day_first_columns();
     for row in &mut rows {
-        coerce_row(row, &schema);
+        coerce_row_with(row, &schema, &day_first);
     }
     Ok((schema, rows))
 }

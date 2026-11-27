@@ -233,6 +233,16 @@ impl SchemaFile {
     /// A String column keeps the source text exactly. Returns how many values were replaced by
     /// NULL under `on_mismatch: null`.
     pub fn validate_and_transform_row(&self, row: &mut Row) -> Result<usize> {
+        self.validate_and_transform_row_with(row, &[])
+    }
+
+    /// [`SchemaFile::validate_and_transform_row`], reading numeric dates day first in the
+    /// `day_first` columns
+    pub fn validate_and_transform_row_with(
+        &self,
+        row: &mut Row,
+        day_first: &[String],
+    ) -> Result<usize> {
         let mut nulled = 0;
         for schema_col in &self.columns {
             let missing = matches!(row.get(&schema_col.name), None | Some(Value::Null));
@@ -275,7 +285,9 @@ impl SchemaFile {
                 }
             }
 
-            let converted = value.clone().coerce_to(&declared);
+            let converted = value
+                .clone()
+                .coerce_to_ordered(&declared, date_order(&schema_col.name, day_first));
             if converted.fits(&declared) {
                 *slot = converted;
                 continue;
@@ -539,6 +551,15 @@ impl Value {
     /// A value that can't convert is returned unchanged; targets that need exact types
     /// report it.
     pub fn coerce_to(self, data_type: &DataType) -> Value {
+        self.coerce_to_ordered(data_type, crate::date_parser::DateOrder::MonthFirst)
+    }
+
+    /// [`Value::coerce_to`], reading numeric dates like `03/04/2024` in `order`
+    pub fn coerce_to_ordered(
+        self,
+        data_type: &DataType,
+        order: crate::date_parser::DateOrder,
+    ) -> Value {
         if self.fits(data_type) {
             return self;
         }
@@ -562,7 +583,7 @@ impl Value {
                 None => Value::String(s),
             },
             (Value::String(s), DataType::Date | DataType::DateTime) => {
-                match crate::date_parser::DateParser::try_parse(&s) {
+                match crate::date_parser::DateParser::try_parse_ordered(&s, order) {
                     Some(date @ Value::Date(_)) => date,
                     _ => Value::String(s),
                 }
@@ -604,13 +625,28 @@ pub fn number_keeps_text(text: &str) -> bool {
 
 /// Convert each value in `row` to its column's type with [`Value::coerce_to`].
 pub fn coerce_row(row: &mut Row, schema: &Schema) {
+    coerce_row_with(row, schema, &[]);
+}
+
+/// [`coerce_row`], reading numeric dates day first in the `day_first` columns
+/// ([`crate::connectors::Source::day_first_columns`])
+pub fn coerce_row_with(row: &mut Row, schema: &Schema, day_first: &[String]) {
     for column in &schema.columns {
         if let Some(value) = row.get_mut(&column.name) {
             if !value.fits(&column.data_type) {
                 let owned = std::mem::replace(value, Value::Null);
-                *value = owned.coerce_to(&column.data_type);
+                *value =
+                    owned.coerce_to_ordered(&column.data_type, date_order(&column.name, day_first));
             }
         }
+    }
+}
+
+fn date_order(column: &str, day_first: &[String]) -> crate::date_parser::DateOrder {
+    if day_first.iter().any(|c| c == column) {
+        crate::date_parser::DateOrder::DayFirst
+    } else {
+        crate::date_parser::DateOrder::MonthFirst
     }
 }
 
