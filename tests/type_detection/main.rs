@@ -13,11 +13,15 @@
 //! The file connectors always run. PostgreSQL, MySQL and SQL Server run against the
 //! `test_env` containers (or `TINYETL_TEST_POSTGRES_URL` / `_MYSQL_URL` / `_MSSQL_URL`) and
 //! are skipped when they can't connect, unless `TINYETL_TEST_REQUIRE_DATABASES=1`.
+//! Each database table is also read through `odbc://` when an ODBC driver for it is installed
+//! (on macOS with Homebrew drivers, run with `ODBCSYSINI=/opt/homebrew/etc`).
+//! Snowflake runs when `SNOWFLAKE_*` settings are in the environment or the repo's `.env`.
 //!
 //! `cargo test --test type_detection -- --nocapture` prints every connector's results.
 
 mod databases;
 mod files;
+mod snowflake;
 mod text;
 
 use std::collections::HashMap;
@@ -74,7 +78,15 @@ pub async fn detect(location: &str) -> (Schema, Vec<Row>) {
 
 /// [`detect`], with errors as text
 pub async fn try_detect(location: &str) -> Result<(Schema, Vec<Row>), String> {
-    let mut source = create_source_from_url_with_type_and_options(location, None, &HashMap::new())
+    try_detect_with(location, &HashMap::new()).await
+}
+
+/// [`try_detect`] with endpoint options (`--source-option`)
+pub async fn try_detect_with(
+    location: &str,
+    options: &HashMap<String, String>,
+) -> Result<(Schema, Vec<Row>), String> {
+    let mut source = create_source_from_url_with_type_and_options(location, None, options)
         .await
         .map_err(|e| e.to_string())?;
     source.connect().await.map_err(|e| e.to_string())?;

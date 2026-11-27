@@ -1,4 +1,5 @@
-//! PostgreSQL, MySQL and SQL Server: one table per database with a column for each type that
+//! PostgreSQL, MySQL and SQL Server (natively, and through `odbc://` when a driver for the
+//! database is installed): one table per database with a column for each type that
 //! matters, holding ordinary values, the type's extremes and NULL. Each test skips when its
 //! database can't be reached (see `main.rs`).
 
@@ -30,19 +31,77 @@ fn unreachable(db: &str, error: impl std::fmt::Display) {
     println!("⚠ {} skipped: {}", db, error);
 }
 
-/// Run the checks, drop the table whatever happens, then pass on a failure
-async fn run_then<F, Fut>(db: &str, location: &str, checks: &[Check], cleanup: F)
+/// Run the checks against each `(label, location)` (the native connector, then `odbc://` when
+/// a driver is installed), drop the table whatever happens, then fail if any of them failed
+async fn run_then<F, Fut>(readers: &[(String, String)], checks: &[Check], cleanup: F)
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let result = AssertUnwindSafe(run(db, location, checks))
-        .catch_unwind()
-        .await;
+    let mut failures = Vec::new();
+    for (label, location) in readers {
+        if let Err(panic) = AssertUnwindSafe(run(label, location, checks))
+            .catch_unwind()
+            .await
+        {
+            failures.push(panic);
+        }
+    }
     cleanup().await;
-    if let Err(panic) = result {
+    if let Some(panic) = failures.into_iter().next() {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// The first of `names` that an odbcinst.ini on this machine lists, for reading the same table
+/// through `odbc://`. `TINYETL_TEST_ODBC_DRIVERS=0` turns ODBC reads off.
+fn odbc_driver(names: &[&str]) -> Option<String> {
+    if std::env::var("TINYETL_TEST_ODBC_DRIVERS").as_deref() == Ok("0") {
+        return None;
+    }
+    // The CLI points the driver manager at Homebrew's odbcinst.ini before any thread starts
+    // (connectors::odbc::configure_driver_manager); a test can't, so it needs ODBCSYSINI
+    let sysini = std::env::var("ODBCSYSINI").ok();
+    let ini: String = sysini
+        .iter()
+        .map(|dir| format!("{}/odbcinst.ini", dir))
+        .chain([
+            "/etc/odbcinst.ini".to_string(),
+            "/etc/unixODBC/odbcinst.ini".to_string(),
+        ])
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .collect();
+    let found = names
+        .iter()
+        .find(|name| ini.contains(&format!("[{}]", name)))
+        .map(|name| name.to_string());
+    if found.is_none() {
+        let homebrew =
+            std::fs::read_to_string("/opt/homebrew/etc/odbcinst.ini").unwrap_or_default();
+        if sysini.is_none() && names.iter().any(|n| homebrew.contains(&format!("[{}]", n))) {
+            println!("⚠ ODBC skipped: set ODBCSYSINI=/opt/homebrew/etc to read through the Homebrew drivers");
+        } else {
+            println!("⚠ ODBC skipped: none of {:?} is installed", names);
+        }
+    }
+    found
+}
+
+/// The native reader, plus `odbc://{connection};#table` when one of `drivers` is installed
+fn readers(
+    db: &str,
+    native: String,
+    drivers: &[&str],
+    odbc: impl Fn(&str) -> String,
+) -> Vec<(String, String)> {
+    let mut readers = vec![(db.to_string(), native)];
+    if let Some(driver) = odbc_driver(drivers) {
+        readers.push((
+            format!("ODBC ({}, {})", db, driver),
+            format!("odbc://{}#{}", odbc(&driver), TABLE),
+        ));
+    }
+    readers
 }
 
 /// A check whose values are owned strings (for generated values)
@@ -288,8 +347,15 @@ async fn databases_postgres() {
         check("c_bit", DataType::String, &["str 101", "str 000", "null"]),
     ];
 
-    let location = format!("{}#{}", url, TABLE);
-    run_then("PostgreSQL", &location, &checks, || async move {
+    let readers = readers(
+        "PostgreSQL",
+        format!("{}#{}", url, TABLE),
+        &["PostgreSQL Unicode", "PostgreSQL ANSI"],
+        |driver| {
+            format!("Driver={{{}}};Server=localhost;Port=5432;Database=testdb;UID=testuser;PWD=testpass", driver)
+        },
+    );
+    run_then(&readers, &checks, || async move {
         let _ =
             sqlx::raw_sql("DROP TABLE IF EXISTS tinyetl_types; DROP TYPE IF EXISTS tinyetl_mood;")
                 .execute(&mut conn)
@@ -518,8 +584,19 @@ async fn databases_mysql() {
         ),
     ];
 
-    let location = format!("{}#{}", url, TABLE);
-    run_then("MySQL", &location, &checks, || async move {
+    let readers = readers(
+        "MySQL",
+        format!("{}#{}", url, TABLE),
+        &[
+            "MySQL ODBC 8.0 Driver",
+            "MySQL ODBC 9.5 Unicode Driver",
+            "MariaDB Unicode",
+        ],
+        |driver| {
+            format!("Driver={{{}}};Server=127.0.0.1;Port=3306;Database=testdb;UID=testuser;PWD=testpass", driver)
+        },
+    );
+    run_then(&readers, &checks, || async move {
         let _ = sqlx::raw_sql("DROP TABLE IF EXISTS tinyetl_types")
             .execute(&mut conn)
             .await;
@@ -787,8 +864,18 @@ async fn databases_mssql() {
         ),
     ];
 
-    let location = format!("{}#{}", url, TABLE);
-    run_then("SQL Server", &location, &checks, || async move {
+    let readers = readers(
+        "SQL Server",
+        format!("{}#{}", url, TABLE),
+        &[
+            "ODBC Driver 18 for SQL Server",
+            "ODBC Driver 17 for SQL Server",
+        ],
+        |driver| {
+            format!("Driver={{{}}};Server=127.0.0.1,1433;Database=master;UID=sa;PWD=TestPass123!;TrustServerCertificate=yes", driver)
+        },
+    );
+    run_then(&readers, &checks, || async move {
         if let Ok(stream) = client
             .simple_query("IF OBJECT_ID('tinyetl_types') IS NOT NULL DROP TABLE tinyetl_types")
             .await
