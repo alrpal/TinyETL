@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-27
+
 ### Added
 - **`on_mismatch` in schema files**, for the whole file or per column: `fail` (the default) stops at a value that doesn't parse as its column's type, `null` writes NULL and reports how many values it replaced, `raw` keeps the source text where the target allows it (files, SQLite)
 - **`infer_types=false`** for CSV sources (`--source-option infer_types=false`) reads every column as text, with no schema file
@@ -337,7 +339,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment variable support for secrets
 - Data transformation capabilities
 
-[Unreleased]: https://github.com/alrpal/TinyETL/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/alrpal/TinyETL/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/alrpal/TinyETL/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/alrpal/TinyETL/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/alrpal/TinyETL/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/alrpal/TinyETL/compare/v0.10.0...v0.11.0

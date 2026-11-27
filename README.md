@@ -2,7 +2,7 @@
 **Data from here to there, in one command.**
 
 [![CI](https://github.com/alrpal/TinyETL/actions/workflows/pr.yaml/badge.svg?branch=master)](https://github.com/alrpal/TinyETL/actions/workflows/pr.yaml)
-[![Version](https://img.shields.io/badge/version-0.12.0-blue)](https://github.com/alrpal/tinyetl/releases)
+[![Version](https://img.shields.io/badge/version-0.12.1-blue)](https://github.com/alrpal/tinyetl/releases)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org/tools/install)
 [![Download size](https://img.shields.io/badge/download-~20MB-green)](https://github.com/alrpal/tinyetl/releases)
 
@@ -1107,7 +1107,7 @@ source:
   uri: "http://api.example.com/data.csv"
   options:
     # Custom headers (prefix with "header.")
-    header.User-Agent: "TinyETL/0.12.0"
+    header.User-Agent: "TinyETL/0.12.1"
     header.Accept: "text/csv"
     header.X-API-Version: "v2"
     
