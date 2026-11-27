@@ -1,10 +1,9 @@
 use async_trait::async_trait;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use futures_util::stream::TryStreamExt;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::time::Duration;
-use tiberius::{AuthMethod, Client, Config, EncryptionLevel};
+use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
@@ -25,6 +24,8 @@ pub struct MssqlSource {
     query: Option<String>,
     total_rows: Option<usize>,
     schema: Option<Schema>,
+    /// Each column's SQL Server type (lowercase, without its size), from infer_schema
+    source_types: Vec<(String, String)>,
     /// One streaming `SELECT` for the whole read (no OFFSET paging), on its own connection
     stream: Option<RowStream>,
     consumed: bool,
@@ -43,6 +44,7 @@ impl MssqlSource {
             stream: None,
             consumed: false,
             schema: None,
+            source_types: Vec::new(),
         })
     }
 
@@ -57,6 +59,7 @@ impl MssqlSource {
             stream: None,
             consumed: false,
             schema: None,
+            source_types: Vec::new(),
         })
     }
 
@@ -241,6 +244,7 @@ impl Source for MssqlSource {
         };
 
         let mut columns = Vec::new();
+        let mut source_types = Vec::new();
 
         while let Some(item) = stream.try_next().await.map_err(|e| {
             TinyEtlError::SchemaInference(format!("Failed to fetch schema results: {}", e))
@@ -257,21 +261,27 @@ impl Source for MssqlSource {
                 })?;
 
                 // `decimal(10,2)` / `nvarchar(50)` from a query description: the base name
-                let base_type = data_type.split('(').next().unwrap_or(data_type).trim();
-                let data_type = match base_type.to_uppercase().as_str() {
-                    "INT" | "SMALLINT" | "TINYINT" | "BIGINT" => DataType::Integer,
-                    "FLOAT" | "REAL" | "DECIMAL" | "NUMERIC" | "MONEY" | "SMALLMONEY" => {
+                let base_type = data_type
+                    .split('(')
+                    .next()
+                    .unwrap_or(data_type)
+                    .trim()
+                    .to_lowercase();
+                // `timestamp` is SQL Server's rowversion (8 bytes), not a date; time, binary,
+                // uniqueidentifier and xml are text
+                let data_type = match base_type.as_str() {
+                    "int" | "smallint" | "tinyint" | "bigint" => DataType::Integer,
+                    "float" | "real" | "decimal" | "numeric" | "money" | "smallmoney" => {
                         DataType::Decimal
                     }
-                    "VARCHAR" | "NVARCHAR" | "CHAR" | "NCHAR" | "TEXT" | "NTEXT" => {
-                        DataType::String
+                    "bit" => DataType::Boolean,
+                    "date" => DataType::Date,
+                    "datetime" | "datetime2" | "smalldatetime" | "datetimeoffset" => {
+                        DataType::DateTime
                     }
-                    "BIT" => DataType::Boolean,
-                    "DATE" => DataType::Date,
-                    "DATETIME" | "DATETIME2" | "SMALLDATETIME" | "TIMESTAMP" => DataType::DateTime,
-                    "UNIQUEIDENTIFIER" => DataType::String,
                     _ => DataType::String,
                 };
+                source_types.push((column_name.to_string(), base_type));
 
                 columns.push(Column {
                     name: column_name.to_string(),
@@ -295,6 +305,7 @@ impl Source for MssqlSource {
         };
 
         self.schema = Some(schema.clone());
+        self.source_types = source_types;
         Ok(schema)
     }
 
@@ -345,8 +356,33 @@ impl MssqlSource {
         let connection_string = self.connection_string.clone();
         let sql = match &self.query {
             Some(query) => query.clone(),
+            // tiberius reads money as a float, so a table's money columns are read as DECIMAL
+            None if self.source_types.iter().any(|(_, t)| is_money(t)) => format!(
+                "SELECT {} FROM {}",
+                self.source_types
+                    .iter()
+                    .map(|(name, sql_type)| {
+                        let quoted = format!("[{}]", name.replace(']', "]]"));
+                        match sql_type.as_str() {
+                            "money" => format!("CAST({} AS DECIMAL(19,4)) AS {}", quoted, quoted),
+                            "smallmoney" => {
+                                format!("CAST({} AS DECIMAL(10,4)) AS {}", quoted, quoted)
+                            }
+                            _ => quoted,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.table_name
+            ),
             None => format!("SELECT * FROM {}", self.table_name),
         };
+        let money: Vec<String> = self
+            .source_types
+            .iter()
+            .filter(|(_, t)| is_money(t))
+            .map(|(name, _)| name.clone())
+            .collect();
         RowStream::spawn(move |mut sink| async move {
             let client = Self::create_client(&connection_string)
                 .await
@@ -363,10 +399,11 @@ impl MssqlSource {
                 match stream.try_next().await {
                     Ok(Some(row)) => {
                         let values: Row = row
-                            .columns()
-                            .iter()
-                            .enumerate()
-                            .map(|(i, column)| (column.name().to_string(), value_at(&row, i)))
+                            .cells()
+                            .map(|(column, data)| {
+                                let is_money = money.iter().any(|m| m == column.name());
+                                (column.name().to_string(), cell_value(data, is_money))
+                            })
                             .collect();
                         if !sink.push(values).await {
                             return;
@@ -382,40 +419,107 @@ impl MssqlSource {
     }
 }
 
-/// A SQL Server value as a TinyETL value, trying the column's possible types in turn.
-fn value_at(row: &tiberius::Row, i: usize) -> Value {
-    match row.try_get::<&str, usize>(i) {
-        Ok(Some(s)) => Value::String(s.to_string()),
-        Ok(None) => Value::Null,
-        Err(_) => {
-            if let Ok(Some(v)) = row.try_get::<i64, usize>(i) {
-                Value::Integer(v)
-            } else if let Ok(Some(v)) = row.try_get::<i32, usize>(i) {
-                Value::Integer(v.into())
-            } else if let Ok(Some(v)) = row.try_get::<i16, usize>(i) {
-                Value::Integer(v.into())
-            } else if let Ok(Some(v)) = row.try_get::<u8, usize>(i) {
-                Value::Integer(v.into())
-            } else if let Ok(Some(v)) = row.try_get::<Decimal, usize>(i) {
-                // DECIMAL / NUMERIC / MONEY
-                Value::Decimal(v)
-            } else if let Ok(Some(v)) = row.try_get::<f64, usize>(i) {
-                // Shortest decimal that round-trips (7.1234, not 7.12340000000000017…)
-                Decimal::try_from(v)
-                    .map(Value::Decimal)
-                    .unwrap_or_else(|_| Value::String(v.to_string()))
-            } else if let Ok(Some(v)) = row.try_get::<f32, usize>(i) {
-                Decimal::try_from(v)
-                    .map(Value::Decimal)
-                    .unwrap_or_else(|_| Value::String(v.to_string()))
-            } else if let Ok(Some(v)) = row.try_get::<bool, usize>(i) {
-                Value::Boolean(v)
-            } else if let Ok(Some(v)) = row.try_get::<NaiveDateTime, usize>(i) {
-                Value::Date(Utc.from_utc_datetime(&v))
-            } else {
-                Value::Null
-            }
+/// A decimal's digits with `scale` decimal places (tiberius's Display adds `.0` at scale 0)
+fn numeric_text(value: i128, scale: u8) -> String {
+    let digits = value.unsigned_abs().to_string();
+    let scale = scale as usize;
+    let sign = if value < 0 { "-" } else { "" };
+    if scale == 0 {
+        return format!("{}{}", sign, digits);
+    }
+    let digits = format!("{:0>width$}", digits, width = scale + 1);
+    let (whole, fraction) = digits.split_at(digits.len() - scale);
+    format!("{}{}.{}", sign, whole, fraction)
+}
+
+fn is_money(sql_type: &str) -> bool {
+    sql_type == "money" || sql_type == "smallmoney"
+}
+
+/// A float as its shortest round-trip text, then a Decimal (0.1, not 0.1000000000000000055)
+fn float_value(text: String) -> Value {
+    match text.parse::<Decimal>() {
+        Ok(d) => Value::Decimal(d),
+        Err(_) => Value::String(text),
+    }
+}
+
+/// A SQL Server value as a TinyETL value, by the type SQL Server sent. `money` marks a money
+/// column: its amounts drop the trailing zeros of the 4 decimal places money keeps.
+fn cell_value(data: &ColumnData<'static>, money: bool) -> Value {
+    use tiberius::FromSql;
+    let value = match data {
+        ColumnData::U8(v) => v.map(|v| Value::Integer(v.into())),
+        ColumnData::I16(v) => v.map(|v| Value::Integer(v.into())),
+        ColumnData::I32(v) => v.map(|v| Value::Integer(v.into())),
+        ColumnData::I64(v) => v.map(Value::Integer),
+        // Money from a query arrives as a float of a 4-decimal amount
+        ColumnData::F64(v) if money => {
+            v.map(|f| match Decimal::from_f64_retain((f * 1e4).round()) {
+                Some(units) => Value::Decimal((units / Decimal::from(10_000)).normalize()),
+                None => float_value(f.to_string()),
+            })
         }
+        ColumnData::F32(v) => v.map(|f| float_value(f.to_string())),
+        ColumnData::F64(v) => v.map(|f| float_value(f.to_string())),
+        ColumnData::Bit(v) => v.map(Value::Boolean),
+        ColumnData::String(v) => v.as_ref().map(|s| Value::String(s.to_string())),
+        ColumnData::Guid(v) => v.map(|g| Value::String(g.to_string())),
+        ColumnData::Binary(v) => v
+            .as_ref()
+            .map(|b| Value::String(format!("0x{}", hex::encode(b)))),
+        // An exact Decimal, or the digits as text when they don't fit one (decimal(38) can
+        // hold more than a Decimal's 28 digits)
+        ColumnData::Numeric(v) => {
+            v.map(
+                |n| match Decimal::try_from_i128_with_scale(n.value(), n.scale().into()) {
+                    Ok(d) if money => Value::Decimal(d.normalize()),
+                    Ok(d) => Value::Decimal(d),
+                    Err(_) => Value::String(numeric_text(n.value(), n.scale())),
+                },
+            )
+        }
+        ColumnData::Xml(v) => v.as_ref().map(|x| Value::String(x.to_string())),
+        ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
+            NaiveDateTime::from_sql(data)
+                .ok()
+                .flatten()
+                .map(|dt| Value::Date(Utc.from_utc_datetime(&dt)))
+        }
+        ColumnData::Date(_) => chrono::NaiveDate::from_sql(data)
+            .ok()
+            .flatten()
+            .map(|d| Value::Date(Utc.from_utc_datetime(&d.and_time(chrono::NaiveTime::MIN)))),
+        // No TinyETL time type: text as hh:mm:ss[.fffffff]
+        ColumnData::Time(_) => chrono::NaiveTime::from_sql(data)
+            .ok()
+            .flatten()
+            .map(|t| Value::String(t.format("%H:%M:%S%.f").to_string())),
+        // The instant, in UTC
+        ColumnData::DateTimeOffset(_) => chrono::DateTime::<chrono::FixedOffset>::from_sql(data)
+            .ok()
+            .flatten()
+            .map(|dt| Value::Date(dt.with_timezone(&Utc))),
+    };
+    value.unwrap_or(Value::Null)
+}
+
+/// A date or datetime literal for a column of `expected_type`: `'2024-01-15'` for DATE, else
+/// the UTC time with as many fraction digits as it needs: none, milliseconds (all DATETIME
+/// takes) or DATETIME2's 100 ns
+fn datetime_literal(dt: &chrono::DateTime<Utc>, expected_type: &DataType) -> String {
+    use chrono::Timelike;
+    if *expected_type == DataType::Date {
+        return format!("'{}'", dt.format("%Y-%m-%d"));
+    }
+    let seconds = dt.format("%Y-%m-%d %H:%M:%S");
+    let nanos = dt.nanosecond() % 1_000_000_000;
+    if nanos == 0 {
+        format!("'{}'", seconds)
+    } else if nanos.is_multiple_of(1_000_000) {
+        format!("'{}.{:03}'", seconds, nanos / 1_000_000)
+    } else {
+        format!("'{}.{:07}'", seconds, nanos / 100)
     }
 }
 
@@ -511,7 +615,8 @@ impl MssqlTarget {
     fn sql_type_from_data_type(data_type: &DataType) -> &'static str {
         match data_type {
             DataType::Integer => "BIGINT",
-            DataType::Decimal => "DECIMAL(18,6)",
+            // As in DuckDB: 28 integer digits and 10 decimal places
+            DataType::Decimal => "DECIMAL(38,10)",
             DataType::String => "NVARCHAR(MAX)",
             DataType::Boolean => "BIT",
             DataType::Date => "DATE",
@@ -536,7 +641,7 @@ impl MssqlTarget {
                         }
                     }
                     DataType::Decimal => {
-                        if let Ok(d) = s.parse::<f64>() {
+                        if let Ok(d) = s.trim().parse::<Decimal>() {
                             d.to_string()
                         } else {
                             "NULL".to_string()
@@ -555,26 +660,14 @@ impl MssqlTarget {
                 _ => i.to_string(),
             },
             Value::Decimal(d) => match expected_type {
-                DataType::String => {
-                    if let Some(f) = d.to_f64() {
-                        format!("N'{}'", f)
-                    } else {
-                        "NULL".to_string()
-                    }
-                }
-                _ => {
-                    if let Some(f) = d.to_f64() {
-                        f.to_string()
-                    } else {
-                        "NULL".to_string()
-                    }
-                }
+                DataType::String => format!("N'{}'", d),
+                _ => d.to_string(),
             },
             Value::Boolean(b) => match expected_type {
                 DataType::String => format!("N'{}'", if *b { "true" } else { "false" }),
                 _ => if *b { "1" } else { "0" }.to_string(),
             },
-            Value::Date(dt) => format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S%.3f")),
+            Value::Date(dt) => datetime_literal(dt, expected_type),
             Value::Json(j) => {
                 let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
                 format!("N'{}'", json_str.replace("'", "''"))
@@ -596,7 +689,7 @@ impl MssqlTarget {
                         }
                     }
                     DataType::Decimal => {
-                        if let Ok(d) = s.parse::<f64>() {
+                        if let Ok(d) = s.trim().parse::<Decimal>() {
                             buffer.push_str(&d.to_string());
                         } else {
                             buffer.push_str("NULL");
@@ -632,17 +725,14 @@ impl MssqlTarget {
                     buffer.push_str(&i.to_string());
                 }
             }
+            // The exact digits; a float would round 922337203685477.5808
             Value::Decimal(d) => {
-                if let Some(f) = d.to_f64() {
-                    if matches!(expected_type, DataType::String) {
-                        buffer.push_str("N'");
-                        buffer.push_str(&f.to_string());
-                        buffer.push('\'');
-                    } else {
-                        buffer.push_str(&f.to_string());
-                    }
+                if matches!(expected_type, DataType::String) {
+                    buffer.push_str("N'");
+                    buffer.push_str(&d.to_string());
+                    buffer.push('\'');
                 } else {
-                    buffer.push_str("NULL");
+                    buffer.push_str(&d.to_string());
                 }
             }
             Value::Boolean(b) => {
@@ -652,11 +742,7 @@ impl MssqlTarget {
                     buffer.push(if *b { '1' } else { '0' });
                 }
             }
-            Value::Date(dt) => {
-                buffer.push('\'');
-                buffer.push_str(&dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
-                buffer.push('\'');
-            }
+            Value::Date(dt) => buffer.push_str(&datetime_literal(dt, expected_type)),
             Value::Json(j) => {
                 buffer.push_str("N'");
                 let json_str = serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string());
@@ -1011,7 +1097,7 @@ mod tests {
     fn test_sql_type_from_data_type_decimal() {
         assert_eq!(
             MssqlTarget::sql_type_from_data_type(&DataType::Decimal),
-            "DECIMAL(18,6)"
+            "DECIMAL(38,10)"
         );
     }
 
@@ -1037,6 +1123,66 @@ mod tests {
             MssqlTarget::sql_type_from_data_type(&DataType::Date),
             "DATE"
         );
+    }
+
+    #[test]
+    fn test_datetime_literal() {
+        let at = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let day = at("2024-01-15T00:00:00Z");
+        assert_eq!(datetime_literal(&day, &DataType::Date), "'2024-01-15'");
+        assert_eq!(
+            datetime_literal(&day, &DataType::DateTime),
+            "'2024-01-15 00:00:00'"
+        );
+        // Milliseconds stay three digits, which DATETIME columns take too
+        assert_eq!(
+            datetime_literal(&at("2024-01-15T10:30:00.5Z"), &DataType::DateTime),
+            "'2024-01-15 10:30:00.500'"
+        );
+        // Finer times keep DATETIME2's 100 ns
+        assert_eq!(
+            datetime_literal(&at("2024-01-15T10:30:00.1234567Z"), &DataType::DateTime),
+            "'2024-01-15 10:30:00.1234567'"
+        );
+    }
+
+    #[test]
+    fn test_cell_values() {
+        use tiberius::numeric::Numeric;
+        // Money read as DECIMAL(19,4) loses the trailing zeros, not digits
+        let money =
+            ColumnData::Numeric(Some(Numeric::new_with_scale(-9_223_372_036_854_775_808, 4)));
+        assert_eq!(
+            cell_value(&money, true),
+            Value::Decimal("-922337203685477.5808".parse().unwrap())
+        );
+        assert_eq!(
+            cell_value(&ColumnData::F64(Some(12.34)), true),
+            Value::Decimal("12.34".parse().unwrap())
+        );
+        // decimal(38) wider than a Decimal: the digits as text
+        let wide = ColumnData::Numeric(Some(Numeric::new_with_scale(
+            12_345_678_901_234_567_890_123_456_789_012_345_678,
+            0,
+        )));
+        assert_eq!(
+            cell_value(&wide, false),
+            Value::String("12345678901234567890123456789012345678".to_string())
+        );
+        assert_eq!(
+            cell_value(
+                &ColumnData::Binary(Some(std::borrow::Cow::Owned(vec![0xde, 0xad]))),
+                false
+            ),
+            Value::String("0xdead".to_string())
+        );
+        assert_eq!(cell_value(&ColumnData::I32(None), false), Value::Null);
+        assert_eq!(numeric_text(-5, 3), "-0.005");
+        assert_eq!(numeric_text(12345, 2), "123.45");
     }
 
     #[test]

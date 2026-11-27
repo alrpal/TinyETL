@@ -1,15 +1,19 @@
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use futures_util::StreamExt;
 use rust_decimal::Decimal;
 use serde_json;
-use sqlx::{Column as SqlxColumn, MySqlPool, Row as SqlxRow, TypeInfo};
+use sqlx::{
+    mysql::{types::MySqlTime, MySqlTypeInfo},
+    Column as SqlxColumn, Executor, MySqlPool, Row as SqlxRow, Statement, TypeInfo,
+};
+use std::str::FromStr;
 use std::sync::Mutex;
 use url::Url;
 
 use crate::{
     connectors::{row_stream::RowStream, Source, Target},
-    schema::{DataType, Row, Schema, SchemaInferer, Value},
+    schema::{Column as SchemaColumn, DataType, Row, Schema, Value},
     Result, TinyEtlError,
 };
 
@@ -116,124 +120,141 @@ impl MysqlSource {
         row: &sqlx::mysql::MySqlRow,
         column: &sqlx::mysql::MySqlColumn,
     ) -> Result<Value> {
-        let col_name = column.name();
-        let col_type = column.type_info();
-        let type_name = col_type.name();
-
-        // Debug: Log the column type
-        tracing::debug!("Column '{}' has type '{}'", col_name, type_name);
-
-        // Handle JSON type explicitly using serde_json::Value
-        if type_name.eq_ignore_ascii_case("JSON") {
-            tracing::debug!("Detected JSON column: {}", col_name);
-            if let Ok(Some(json_val)) = row.try_get::<Option<serde_json::Value>, _>(col_name) {
-                // Convert the JSON value to a compact string representation
-                let json_string =
-                    serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
-                tracing::debug!(
-                    "Successfully extracted JSON as string: {} bytes",
-                    json_string.len()
-                );
-                return Ok(Value::String(json_string));
-            } else {
-                tracing::debug!("JSON column '{}' is NULL", col_name);
-                return Ok(Value::Null);
-            }
-        }
-
-        // Try different MySQL types in order of likelihood
-        // Try String (TEXT, VARCHAR, CHAR types)
-        if let Ok(val) = row.try_get::<Option<String>, _>(col_name) {
-            match val {
-                Some(s) => Ok(Value::String(s)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<i64>, _>(col_name) {
-            match val {
-                Some(i) => Ok(Value::Integer(i)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<i32>, _>(col_name) {
-            match val {
-                Some(i) => Ok(Value::Integer(i as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<i16>, _>(col_name) {
-            match val {
-                Some(i) => Ok(Value::Integer(i as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<i8>, _>(col_name) {
-            match val {
-                Some(i) => Ok(Value::Integer(i as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<u64>, _>(col_name) {
-            match val {
-                Some(u) => Ok(Value::Integer(u as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<u32>, _>(col_name) {
-            match val {
-                Some(u) => Ok(Value::Integer(u as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<u16>, _>(col_name) {
-            match val {
-                Some(u) => Ok(Value::Integer(u as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<u8>, _>(col_name) {
-            match val {
-                Some(u) => Ok(Value::Integer(u as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<Decimal>, _>(col_name) {
-            // DECIMAL / NUMERIC
-            Ok(val.map_or(Value::Null, Value::Decimal))
-        } else if let Ok(val) = row.try_get::<Option<f64>, _>(col_name) {
-            match val {
-                Some(f) => match Decimal::try_from(f) {
-                    Ok(d) => Ok(Value::Decimal(d)),
-                    Err(_) => Ok(Value::String(f.to_string())),
+        let i = column.ordinal();
+        let info = column.type_info();
+        let null = |r: std::result::Result<Option<Value>, sqlx::Error>| r.ok().flatten();
+        // Decoded by the declared type; `try_get_unchecked` because several MySQL types share
+        // a Rust type (YEAR and the integers, BLOB and BINARY)
+        let value =
+            match info.name() {
+                "BOOLEAN" => null(
+                    row.try_get_unchecked::<Option<i64>, _>(i)
+                        .map(|v| v.map(|v| Value::Boolean(v != 0))),
+                ),
+                "BIT" => null(row.try_get_unchecked::<Option<u64>, _>(i).map(|v| {
+                    v.map(|bits| match bit_width(info) {
+                        Some(1) => Value::Boolean(bits != 0),
+                        // bit(n) as its n digits
+                        width => Value::String(format!(
+                            "{:0width$b}",
+                            bits,
+                            width = width.unwrap_or(1) as usize
+                        )),
+                    })
+                })),
+                // Past i64::MAX: an exact decimal
+                "BIGINT UNSIGNED" => null(
+                    row.try_get_unchecked::<Option<u64>, _>(i)
+                        .map(|v| v.map(|v| Value::Decimal(Decimal::from(v)))),
+                ),
+                "TINYINT UNSIGNED" | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED"
+                | "INT UNSIGNED" => null(
+                    row.try_get_unchecked::<Option<u64>, _>(i)
+                        .map(|v| v.map(|v| Value::Integer(v as i64))),
+                ),
+                "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" => null(
+                    row.try_get_unchecked::<Option<i64>, _>(i)
+                        .map(|v| v.map(Value::Integer)),
+                ),
+                "YEAR" => null(
+                    row.try_get_unchecked::<Option<u16>, _>(i)
+                        .map(|v| v.map(|v| Value::Integer(v.into()))),
+                ),
+                // DECIMAL arrives as text: an exact Decimal (rounded to 28 places when the scale is
+                // larger), or the text when it's too wide for one
+                "DECIMAL" => null(row.try_get_unchecked::<Option<String>, _>(i).map(|v| {
+                    v.map(|text| match Decimal::from_str(&text) {
+                        Ok(d) => Value::Decimal(d),
+                        Err(_) => Value::String(text),
+                    })
+                })),
+                "FLOAT" => null(
+                    row.try_get_unchecked::<Option<f32>, _>(i)
+                        .map(|v| v.map(|f| float_value(f.to_string()))),
+                ),
+                "DOUBLE" => null(
+                    row.try_get_unchecked::<Option<f64>, _>(i)
+                        .map(|v| v.map(|f| float_value(f.to_string()))),
+                ),
+                "DATE" => null(row.try_get_unchecked::<Option<NaiveDate>, _>(i).map(|v| {
+                    v.map(|date| Value::Date(Utc.from_utc_datetime(&date.and_time(NaiveTime::MIN))))
+                })),
+                "DATETIME" | "TIMESTAMP" => null(
+                    row.try_get_unchecked::<Option<NaiveDateTime>, _>(i)
+                        .map(|v| v.map(|dt| Value::Date(Utc.from_utc_datetime(&dt)))),
+                ),
+                // TIME can be negative or over 24 hours: MySQL's own text
+                "TIME" => null(
+                    row.try_get_unchecked::<Option<MySqlTime>, _>(i)
+                        .map(|v| v.map(|t| Value::String(time_text(&t)))),
+                ),
+                "JSON" => null(
+                    row.try_get_unchecked::<Option<serde_json::Value>, _>(i)
+                        .map(|v| v.map(Value::Json)),
+                ),
+                "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB"
+                | "GEOMETRY" => null(
+                    row.try_get_unchecked::<Option<Vec<u8>>, _>(i)
+                        .map(|v| v.map(|bytes| Value::String(format!("0x{}", hex::encode(bytes))))),
+                ),
+                // CHAR, VARCHAR, the TEXT types, ENUM, SET, ...
+                _ => match row.try_get_unchecked::<Option<String>, _>(i) {
+                    Ok(v) => v.map(Value::String),
+                    // Not UTF-8: keep the bytes
+                    Err(_) => null(row.try_get_unchecked::<Option<Vec<u8>>, _>(i).map(|v| {
+                        v.map(|bytes| Value::String(format!("0x{}", hex::encode(bytes))))
+                    })),
                 },
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<f32>, _>(col_name) {
-            match val {
-                Some(f) => match Decimal::try_from(f as f64) {
-                    Ok(d) => Ok(Value::Decimal(d)),
-                    Err(_) => Ok(Value::String(f.to_string())),
-                },
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<bool>, _>(col_name) {
-            match val {
-                Some(b) => Ok(Value::Boolean(b)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<DateTime<Utc>>, _>(col_name) {
-            match val {
-                Some(dt) => Ok(Value::Date(dt)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<NaiveDateTime>, _>(col_name) {
-            match val {
-                Some(dt) => Ok(Value::Date(Utc.from_utc_datetime(&dt))),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<NaiveDate>, _>(col_name) {
-            match val {
-                Some(date) => {
-                    let datetime = date.and_hms_opt(0, 0, 0).unwrap();
-                    Ok(Value::Date(Utc.from_utc_datetime(&datetime)))
-                }
-                None => Ok(Value::Null),
-            }
-        } else {
-            Ok(Value::Null)
-        }
+            };
+        Ok(value.unwrap_or(Value::Null))
     }
+}
+
+/// The TinyETL type for a MySQL column type
+fn data_type(info: &MySqlTypeInfo) -> DataType {
+    match info.name() {
+        "BOOLEAN" => DataType::Boolean,
+        "BIT" if bit_width(info) == Some(1) => DataType::Boolean,
+        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "BIGINT" | "TINYINT UNSIGNED"
+        | "SMALLINT UNSIGNED" | "MEDIUMINT UNSIGNED" | "INT UNSIGNED" | "YEAR" => DataType::Integer,
+        "BIGINT UNSIGNED" | "DECIMAL" | "FLOAT" | "DOUBLE" => DataType::Decimal,
+        "DATE" => DataType::Date,
+        "DATETIME" | "TIMESTAMP" => DataType::DateTime,
+        "JSON" => DataType::Json,
+        _ => DataType::String,
+    }
+}
+
+/// M in BIT(M). sqlx keeps the column's length private, but its Debug output shows it
+fn bit_width(info: &MySqlTypeInfo) -> Option<u32> {
+    let debug = format!("{:?}", info);
+    let rest = &debug[debug.find("max_size: Some(")? + "max_size: Some(".len()..];
+    rest[..rest.find(')')?].parse().ok()
+}
+
+/// A float as its shortest round-trip text, then a Decimal (0.1, not 0.1000000000000000055)
+fn float_value(text: String) -> Value {
+    match Decimal::from_str(&text) {
+        Ok(d) => Value::Decimal(d),
+        Err(_) => Value::String(text),
+    }
+}
+
+/// TIME as MySQL writes it: `13:45:30`, `-838:59:59`, `01:02:03.5`
+fn time_text(time: &MySqlTime) -> String {
+    let sign = if time.is_negative() { "-" } else { "" };
+    let mut text = format!(
+        "{}{:02}:{:02}:{:02}",
+        sign,
+        time.hours(),
+        time.minutes(),
+        time.seconds()
+    );
+    if time.microseconds() != 0 {
+        text.push('.');
+        text.push_str(format!("{:06}", time.microseconds()).trim_end_matches('0'));
+    }
+    text
 }
 
 #[async_trait]
@@ -256,40 +277,29 @@ impl Source for MysqlSource {
             sample_size
         );
 
-        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
-            .fetch_all(pool)
+        // Column types are the declared ones, from the statement's description, in the result's
+        // column order: a column of NULLs or an empty table still gets its type
+        let described = pool
+            .prepare(sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(
+                query.clone(),
+            )))
             .await
             .map_err(|e| {
                 TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e))
             })?;
-
-        if rows.is_empty() {
-            return Ok(Schema {
-                columns: Vec::new(),
-                estimated_rows: Some(0),
-                primary_key_candidate: None,
-            });
-        }
-
-        // Convert MySQL rows to our Row format
-        let mut schema_rows = Vec::new();
-        for row in &rows {
-            let mut schema_row = Row::new();
-            for column in row.columns() {
-                let col_name = column.name();
-                let value = Self::extract_value(row, column)?;
-                schema_row.insert(col_name.to_string(), value);
-            }
-            schema_rows.push(schema_row);
-        }
-
-        // Keep the result set's column order; rows are hash maps and don't preserve it.
-        let column_order: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|column| column.name().to_string())
-            .collect();
-        let mut schema = SchemaInferer::infer_from_rows_ordered(&schema_rows, &column_order)?;
+        let mut schema = Schema {
+            columns: described
+                .columns()
+                .iter()
+                .map(|column| SchemaColumn {
+                    name: column.name().to_string(),
+                    data_type: data_type(column.type_info()),
+                    nullable: true,
+                })
+                .collect(),
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
 
         // Get estimated row count
         if let Ok(count_result) = self.estimated_row_count().await {
@@ -373,6 +383,8 @@ pub struct MysqlTarget {
     truncate_table: Option<String>,
     /// Column names from create_table; every row is written with all of them
     columns: Vec<String>,
+    /// Their types, so a Date column gets dates (empty when create_table wasn't called)
+    types: Vec<DataType>,
 }
 
 impl MysqlTarget {
@@ -387,6 +399,7 @@ impl MysqlTarget {
             tx: None,
             truncate_table: None,
             columns: Vec::new(),
+            types: Vec::new(),
         })
     }
 
@@ -470,7 +483,8 @@ impl MysqlTarget {
             DataType::String => "TEXT",
             DataType::Boolean => "BOOLEAN",
             DataType::Date => "DATE",
-            DataType::DateTime => "DATETIME",
+            // Microseconds; plain DATETIME drops fractional seconds
+            DataType::DateTime => "DATETIME(6)",
             DataType::Json => "JSON", // MySQL native JSON type
             DataType::Null => "TEXT",
         }
@@ -502,6 +516,7 @@ impl MysqlTarget {
     async fn write_chunk(
         table_name: &str,
         columns: &[String],
+        types: &[DataType],
         conn: &mut sqlx::MySqlConnection,
         rows: &[Row],
     ) -> Result<usize> {
@@ -537,8 +552,9 @@ impl MysqlTarget {
 
         // Bind all values for all rows in the correct order; a missing key is NULL
         for row in rows {
-            for column in columns {
+            for (index, column) in columns.iter().enumerate() {
                 let value = row.get(column).unwrap_or(&Value::Null);
+                let date_column = types.get(index) == Some(&DataType::Date);
                 query = match value {
                     Value::Integer(i) => query.bind(i),
                     Value::Decimal(d) => {
@@ -547,7 +563,9 @@ impl MysqlTarget {
                     }
                     Value::String(s) => query.bind(s),
                     Value::Boolean(b) => query.bind(b),
-                    Value::Date(d) => query.bind(d.to_rfc3339()),
+                    // DATE gets a date; DATETIME the UTC time (MySQL has no zone in it)
+                    Value::Date(d) if date_column => query.bind(d.date_naive()),
+                    Value::Date(d) => query.bind(d.naive_utc()),
                     Value::Json(j) => {
                         query.bind(serde_json::to_string(j).unwrap_or_else(|_| "{}".to_string()))
                     }
@@ -596,6 +614,7 @@ impl Target for MysqlTarget {
 
         // Get pool after updating table name to avoid borrowing conflicts
         self.columns = schema.columns.iter().map(|c| c.name.clone()).collect();
+        self.types = schema.columns.iter().map(|c| c.data_type.clone()).collect();
         let pool = self.get_pool().await?;
 
         let mut columns = Vec::new();
@@ -652,7 +671,8 @@ impl Target for MysqlTarget {
         }
         for chunk in rows.chunks(self.max_batch_size) {
             total_affected +=
-                Self::write_chunk(&self.table_name, &self.columns, &mut tx, chunk).await?;
+                Self::write_chunk(&self.table_name, &self.columns, &self.types, &mut tx, chunk)
+                    .await?;
         }
         self.tx = Some(Mutex::new(tx));
 
@@ -830,7 +850,7 @@ mod tests {
         assert_eq!(target.map_data_type_to_mysql(&DataType::Date), "DATE");
         assert_eq!(
             target.map_data_type_to_mysql(&DataType::DateTime),
-            "DATETIME"
+            "DATETIME(6)"
         );
         assert_eq!(target.map_data_type_to_mysql(&DataType::Null), "TEXT");
     }
@@ -939,7 +959,7 @@ mod tests {
             columns.join(", ")
         );
 
-        let expected = "CREATE TABLE IF NOT EXISTS `test_table` (`id` BIGINT NOT NULL, `name` TEXT, `score` DECIMAL(65,30) NOT NULL, `active` BOOLEAN, `created_at` DATETIME NOT NULL)";
+        let expected = "CREATE TABLE IF NOT EXISTS `test_table` (`id` BIGINT NOT NULL, `name` TEXT, `score` DECIMAL(65,30) NOT NULL, `active` BOOLEAN, `created_at` DATETIME(6) NOT NULL)";
         assert_eq!(create_sql, expected);
     }
 
@@ -1308,7 +1328,7 @@ mod tests {
             (DataType::String, "TEXT"),
             (DataType::Boolean, "BOOLEAN"),
             (DataType::Date, "DATE"),
-            (DataType::DateTime, "DATETIME"),
+            (DataType::DateTime, "DATETIME(6)"),
             (DataType::Null, "TEXT"),
         ];
 

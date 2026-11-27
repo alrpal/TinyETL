@@ -2,13 +2,16 @@ use async_trait::async_trait;
 use chrono::TimeZone;
 use futures_util::StreamExt;
 use rust_decimal::Decimal;
-use sqlx::{postgres::PgConnectOptions, Column, PgPool, Row as SqlxRow};
+use sqlx::{
+    postgres::{PgConnectOptions, PgTypeInfo, PgTypeKind, PgValueFormat, PgValueRef},
+    Column, Executor, PgPool, Row as SqlxRow, Statement, TypeInfo, ValueRef,
+};
 use std::str::FromStr;
 use std::sync::Mutex;
 
 use crate::{
     connectors::{row_stream::RowStream, Source, Target},
-    schema::{DataType, Row, Schema, SchemaInferer, Value},
+    schema::{Column as SchemaColumn, DataType, Row, Schema, Value},
     Result, TinyEtlError,
 };
 
@@ -98,40 +101,30 @@ impl Source for PostgresSource {
             format!("SELECT * FROM {} LIMIT {}", self.table_name, sample_size)
         };
 
-        let rows = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
-            .fetch_all(pool)
+        // Column types are the declared ones, from the statement's description, in the result's
+        // column order: a column of NULLs, a numeric too wide for a Decimal or an empty table
+        // still gets its type
+        let described = pool
+            .prepare(sqlx::SqlSafeStr::into_sql_str(sqlx::AssertSqlSafe(
+                query.clone(),
+            )))
             .await
             .map_err(|e| {
                 TinyEtlError::DataTransfer(format!("Failed to fetch sample data: {}", e))
             })?;
-
-        if rows.is_empty() {
-            return Ok(Schema {
-                columns: Vec::new(),
-                estimated_rows: Some(0),
-                primary_key_candidate: None,
-            });
-        }
-
-        // Convert PostgreSQL rows to our Row format
-        let mut schema_rows = Vec::new();
-        for row in &rows {
-            let mut schema_row = Row::new();
-            for column in row.columns() {
-                let col_name = column.name();
-                let value = Self::extract_value(row, column)?;
-                schema_row.insert(col_name.to_string(), value);
-            }
-            schema_rows.push(schema_row);
-        }
-
-        // Keep the result set's column order; rows are hash maps and don't preserve it.
-        let column_order: Vec<String> = rows[0]
-            .columns()
-            .iter()
-            .map(|column| column.name().to_string())
-            .collect();
-        let mut schema = SchemaInferer::infer_from_rows_ordered(&schema_rows, &column_order)?;
+        let mut schema = Schema {
+            columns: described
+                .columns()
+                .iter()
+                .map(|column| SchemaColumn {
+                    name: column.name().to_string(),
+                    data_type: data_type(column.type_info()),
+                    nullable: true,
+                })
+                .collect(),
+            estimated_rows: None,
+            primary_key_candidate: None,
+        };
 
         // Get estimated row count
         if let Ok(count_result) = self.estimated_row_count().await {
@@ -257,83 +250,384 @@ impl PostgresSource {
         row: &sqlx::postgres::PgRow,
         column: &sqlx::postgres::PgColumn,
     ) -> Result<Value> {
-        let col_name = column.name();
+        let raw = row.try_get_raw(column.ordinal()).map_err(|e| {
+            TinyEtlError::DataTransfer(format!("Failed to read column '{}': {}", column.name(), e))
+        })?;
+        Ok(value(raw, column.type_info()))
+    }
+}
 
-        // Try different PostgreSQL types in order of likelihood
-        if let Ok(val) = row.try_get::<Option<String>, _>(col_name) {
-            match val {
-                Some(s) => Ok(Value::String(s)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<i64>, _>(col_name) {
-            match val {
-                Some(i) => Ok(Value::Integer(i)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<i32>, _>(col_name) {
-            match val {
-                Some(i) => Ok(Value::Integer(i as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<i16>, _>(col_name) {
-            match val {
-                Some(i) => Ok(Value::Integer(i as i64)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<Decimal>, _>(col_name) {
-            // NUMERIC / DECIMAL
-            Ok(val.map_or(Value::Null, Value::Decimal))
-        } else if let Ok(val) = row.try_get::<Option<f64>, _>(col_name) {
-            match val {
-                Some(f) => {
-                    // Convert f64 to Decimal
-                    match Decimal::try_from(f) {
-                        Ok(d) => Ok(Value::Decimal(d)),
-                        Err(_) => Ok(Value::String(f.to_string())),
-                    }
-                }
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<f32>, _>(col_name) {
-            match val {
-                Some(f) => {
-                    // Convert f32 to Decimal via f64
-                    match Decimal::try_from(f as f64) {
-                        Ok(d) => Ok(Value::Decimal(d)),
-                        Err(_) => Ok(Value::String(f.to_string())),
-                    }
-                }
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<bool>, _>(col_name) {
-            match val {
-                Some(b) => Ok(Value::Boolean(b)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(col_name) {
-            match val {
-                Some(dt) => Ok(Value::Date(dt)),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDateTime>, _>(col_name) {
-            match val {
-                Some(dt) => Ok(Value::Date(chrono::Utc.from_utc_datetime(&dt))),
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<chrono::NaiveDate>, _>(col_name) {
-            match val {
-                Some(date) => {
-                    let datetime = date.and_hms_opt(0, 0, 0).unwrap();
-                    Ok(Value::Date(chrono::Utc.from_utc_datetime(&datetime)))
-                }
-                None => Ok(Value::Null),
-            }
-        } else if let Ok(val) = row.try_get::<Option<serde_json::Value>, _>(col_name) {
-            // JSON / JSONB
-            Ok(val.map_or(Value::Null, Value::Json))
-        } else {
-            Ok(Value::Null)
+/// The TinyETL type for a PostgreSQL column type. Types with no TinyETL counterpart (time,
+/// interval, uuid, inet, bytea, enums, bit strings, ...) are text; arrays are JSON.
+fn data_type(info: &PgTypeInfo) -> DataType {
+    match info.kind() {
+        PgTypeKind::Array(_) => return DataType::Json,
+        PgTypeKind::Domain(base) => return data_type(base),
+        PgTypeKind::Enum(_) => return DataType::String,
+        _ => {}
+    }
+    match info.name() {
+        "INT2" | "INT4" | "INT8" | "OID" => DataType::Integer,
+        "NUMERIC" | "FLOAT4" | "FLOAT8" | "MONEY" => DataType::Decimal,
+        "BOOL" => DataType::Boolean,
+        "DATE" => DataType::Date,
+        "TIMESTAMP" | "TIMESTAMPTZ" => DataType::DateTime,
+        "JSON" | "JSONB" => DataType::Json,
+        _ => DataType::String,
+    }
+}
+
+/// One value from a row, decoded by its declared type
+fn value(raw: PgValueRef<'_>, info: &PgTypeInfo) -> Value {
+    if raw.is_null() {
+        return Value::Null;
+    }
+    match raw.format() {
+        PgValueFormat::Binary => match raw.as_bytes() {
+            Ok(bytes) => binary_value(info, bytes),
+            Err(_) => Value::Null,
+        },
+        // Results normally arrive in the binary format; text is PostgreSQL's own output
+        PgValueFormat::Text => match raw.as_str() {
+            Ok(text) => text_value(info, text),
+            Err(_) => Value::Null,
+        },
+    }
+}
+
+fn text_value(info: &PgTypeInfo, text: &str) -> Value {
+    match data_type(info) {
+        DataType::Integer => text
+            .parse()
+            .map(Value::Integer)
+            .unwrap_or_else(|_| Value::String(text.to_string())),
+        DataType::Decimal => decimal_text(text.to_string()),
+        DataType::Boolean => Value::Boolean(text == "t"),
+        DataType::Json => serde_json::from_str(text)
+            .map(Value::Json)
+            .unwrap_or_else(|_| Value::String(text.to_string())),
+        DataType::Date | DataType::DateTime => crate::date_parser::DateParser::try_parse(text)
+            .unwrap_or_else(|| Value::String(text.to_string())),
+        _ => Value::String(text.to_string()),
+    }
+}
+
+/// A number as text: an exact Decimal, or the text itself when no Decimal holds it exactly
+/// (more than 28 digits, NaN, Infinity)
+fn decimal_text(text: String) -> Value {
+    match Decimal::from_str_exact(&text) {
+        Ok(d) => Value::Decimal(d),
+        Err(_) => Value::String(text),
+    }
+}
+
+/// A float as its shortest round-trip text, then a Decimal (0.1, not 0.1000000000000000055)
+fn float_value(text: String) -> Value {
+    match Decimal::from_str(&text) {
+        Ok(d) => Value::Decimal(d),
+        Err(_) => Value::String(text),
+    }
+}
+
+/// `N` bytes at `at`, for the big-endian integers of the binary format
+fn be<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
+    bytes.get(at..at + N)?.try_into().ok()
+}
+
+/// A value in PostgreSQL's binary format, by its type
+fn binary_value(info: &PgTypeInfo, bytes: &[u8]) -> Value {
+    match info.kind() {
+        PgTypeKind::Array(element) => {
+            return array_json(element, bytes)
+                .map(Value::Json)
+                .unwrap_or_else(|| hex_text(bytes));
         }
+        PgTypeKind::Domain(base) => return binary_value(base, bytes),
+        PgTypeKind::Enum(_) => return Value::String(String::from_utf8_lossy(bytes).into_owned()),
+        _ => {}
+    }
+    let decoded = match info.name() {
+        "BOOL" => bytes.first().map(|b| Value::Boolean(*b != 0)),
+        "INT2" => be(bytes, 0).map(|b| Value::Integer(i16::from_be_bytes(b).into())),
+        "INT4" => be(bytes, 0).map(|b| Value::Integer(i32::from_be_bytes(b).into())),
+        "INT8" => be(bytes, 0).map(|b| Value::Integer(i64::from_be_bytes(b))),
+        "OID" => be(bytes, 0).map(|b| Value::Integer(u32::from_be_bytes(b).into())),
+        "FLOAT4" => be(bytes, 0).map(|b| float_value(f32::from_be_bytes(b).to_string())),
+        "FLOAT8" => be(bytes, 0).map(|b| float_value(f64::from_be_bytes(b).to_string())),
+        "NUMERIC" => numeric_text(bytes).map(decimal_text),
+        // Cents: money has the locale's fraction digits, 2 in C and en_US
+        "MONEY" => be(bytes, 0).map(|b| Value::Decimal(Decimal::new(i64::from_be_bytes(b), 2))),
+        "DATE" => be(bytes, 0).map(|b| match i32::from_be_bytes(b) {
+            i32::MAX => Value::String("infinity".to_string()),
+            i32::MIN => Value::String("-infinity".to_string()),
+            days => match epoch().checked_add_signed(chrono::Duration::days(days.into())) {
+                Some(date) => Value::Date(chrono::Utc.from_utc_datetime(&date)),
+                None => Value::String(days.to_string()),
+            },
+        }),
+        "TIMESTAMP" | "TIMESTAMPTZ" => be(bytes, 0).map(|b| match i64::from_be_bytes(b) {
+            i64::MAX => Value::String("infinity".to_string()),
+            i64::MIN => Value::String("-infinity".to_string()),
+            micros => match epoch().checked_add_signed(chrono::Duration::microseconds(micros)) {
+                Some(at) => Value::Date(chrono::Utc.from_utc_datetime(&at)),
+                None => Value::String(micros.to_string()),
+            },
+        }),
+        "TIME" => be(bytes, 0).map(|b| Value::String(time_text(i64::from_be_bytes(b)))),
+        "TIMETZ" => be(bytes, 0)
+            .zip(be(bytes, 8))
+            .map(|(t, z)| Value::String(timetz_text(i64::from_be_bytes(t), i32::from_be_bytes(z)))),
+        "INTERVAL" => be(bytes, 0)
+            .zip(be(bytes, 8))
+            .zip(be(bytes, 12))
+            .map(|((t, d), m)| {
+                Value::String(interval_text(
+                    i32::from_be_bytes(m),
+                    i32::from_be_bytes(d),
+                    i64::from_be_bytes(t),
+                ))
+            }),
+        "UUID" => uuid::Uuid::from_slice(bytes)
+            .ok()
+            .map(|u| Value::String(u.to_string())),
+        "JSON" => std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|t| serde_json::from_str(t).ok())
+            .map(Value::Json),
+        // JSONB: a version byte (1), then the text
+        "JSONB" => bytes
+            .get(1..)
+            .and_then(|t| std::str::from_utf8(t).ok())
+            .and_then(|t| serde_json::from_str(t).ok())
+            .map(Value::Json),
+        "BYTEA" => Some(hex_text(bytes)),
+        "INET" | "CIDR" => inet_text(bytes).map(Value::String),
+        "MACADDR" | "MACADDR8" => Some(Value::String(
+            bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(":"),
+        )),
+        "BIT" | "VARBIT" => bit_text(bytes).map(Value::String),
+        _ => None,
+    };
+    // Text types (TEXT, VARCHAR, CHAR, NAME, XML, citext, ...) send their text; any other
+    // type keeps its bytes as hex rather than becoming NULL
+    decoded.unwrap_or_else(|| match std::str::from_utf8(bytes) {
+        Ok(text) if !text.contains('\0') => Value::String(text.to_string()),
+        _ => hex_text(bytes),
+    })
+}
+
+/// 2000-01-01, PostgreSQL's epoch for dates and timestamps
+fn epoch() -> chrono::NaiveDateTime {
+    chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .expect("a valid date")
+}
+
+/// Binary values as `0x` and lowercase hex
+fn hex_text(bytes: &[u8]) -> Value {
+    Value::String(format!("0x{}", hex::encode(bytes)))
+}
+
+/// NUMERIC's binary form (base-10000 digits) as decimal text with its scale
+fn numeric_text(bytes: &[u8]) -> Option<String> {
+    let ndigits = i16::from_be_bytes(be(bytes, 0)?) as usize;
+    let weight = i16::from_be_bytes(be(bytes, 2)?) as isize;
+    let sign = u16::from_be_bytes(be(bytes, 4)?);
+    let dscale = u16::from_be_bytes(be(bytes, 6)?) as usize;
+    match sign {
+        0xC000 => return Some("NaN".to_string()),
+        0xD000 => return Some("Infinity".to_string()),
+        0xF000 => return Some("-Infinity".to_string()),
+        _ => {}
+    }
+    let digits: Vec<i16> = (0..ndigits)
+        .map(|i| be(bytes, 8 + 2 * i).map(i16::from_be_bytes))
+        .collect::<Option<_>>()?;
+    // The base-10000 digit at position `i` (weight - i); zero outside the stored digits
+    let digit = |i: isize| -> i16 {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| digits.get(i).copied())
+            .unwrap_or(0)
+    };
+    let mut text = String::new();
+    if sign == 0x4000 {
+        text.push('-');
+    }
+    if weight < 0 {
+        text.push('0');
+    } else {
+        text.push_str(&digit(0).to_string());
+        for i in 1..=weight {
+            text.push_str(&format!("{:04}", digit(i)));
+        }
+    }
+    if dscale > 0 {
+        let mut fraction = String::new();
+        for k in 1..=dscale.div_ceil(4) as isize {
+            fraction.push_str(&format!("{:04}", digit(weight + k)));
+        }
+        fraction.truncate(dscale);
+        text.push('.');
+        text.push_str(&fraction);
+    }
+    Some(text)
+}
+
+/// A time of day (or an interval's time part) as `HH:MM:SS[.ffffff]`, without trailing zeros
+fn time_text(micros: i64) -> String {
+    let sign = if micros < 0 { "-" } else { "" };
+    let micros = micros.unsigned_abs();
+    let seconds = micros / 1_000_000;
+    let mut text = format!(
+        "{}{:02}:{:02}:{:02}",
+        sign,
+        seconds / 3600,
+        seconds % 3600 / 60,
+        seconds % 60
+    );
+    let fraction = micros % 1_000_000;
+    if fraction != 0 {
+        text.push('.');
+        text.push_str(format!("{:06}", fraction).trim_end_matches('0'));
+    }
+    text
+}
+
+/// A time with a zone, `13:45:30+02`; the zone is stored as seconds west of UTC
+fn timetz_text(micros: i64, west: i32) -> String {
+    let east = -west;
+    let sign = if east < 0 { '-' } else { '+' };
+    let east = east.unsigned_abs();
+    let mut text = format!("{}{}{:02}", time_text(micros), sign, east / 3600);
+    if !east.is_multiple_of(3600) {
+        text.push_str(&format!(":{:02}", east % 3600 / 60));
+        if !east.is_multiple_of(60) {
+            text.push_str(&format!(":{:02}", east % 60));
+        }
+    }
+    text
+}
+
+/// An interval in PostgreSQL's default output style: `1 year 2 mons 3 days 04:05:06`
+fn interval_text(months: i32, days: i32, micros: i64) -> String {
+    let mut parts = Vec::new();
+    // As in PostgreSQL, a positive field after a negative one gets a `+`
+    let mut is_before = false;
+    for (n, unit) in [
+        (i64::from(months / 12), "year"),
+        (i64::from(months % 12), "mon"),
+        (i64::from(days), "day"),
+    ] {
+        if n != 0 {
+            let plus = if is_before && n > 0 { "+" } else { "" };
+            let plural = if n == 1 { "" } else { "s" };
+            parts.push(format!("{}{} {}{}", plus, n, unit, plural));
+            is_before = n < 0;
+        }
+    }
+    if micros != 0 || parts.is_empty() {
+        let plus = if micros >= 0 && is_before { "+" } else { "" };
+        parts.push(format!("{}{}", plus, time_text(micros)));
+    }
+    parts.join(" ")
+}
+
+/// inet / cidr as PostgreSQL writes them: `192.168.0.1`, `10.0.0.0/8`, `::1`
+fn inet_text(bytes: &[u8]) -> Option<String> {
+    let (family, bits, is_cidr, length) = (
+        *bytes.first()?,
+        *bytes.get(1)?,
+        *bytes.get(2)? != 0,
+        *bytes.get(3)? as usize,
+    );
+    let address = bytes.get(4..4 + length)?;
+    let (text, max) = match family {
+        2 => (
+            std::net::Ipv4Addr::from(<[u8; 4]>::try_from(address).ok()?).to_string(),
+            32,
+        ),
+        3 => (
+            std::net::Ipv6Addr::from(<[u8; 16]>::try_from(address).ok()?).to_string(),
+            128,
+        ),
+        _ => return None,
+    };
+    Some(if is_cidr || bits != max {
+        format!("{}/{}", text, bits)
+    } else {
+        text
+    })
+}
+
+/// bit(n) / varbit as its digits
+fn bit_text(bytes: &[u8]) -> Option<String> {
+    let length = i32::from_be_bytes(be(bytes, 0)?) as usize;
+    let data = bytes.get(4..)?;
+    (0..length)
+        .map(|i| {
+            data.get(i / 8).map(|byte| {
+                if (byte >> (7 - i % 8)) & 1 == 1 {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
+        })
+        .collect()
+}
+
+/// An array's binary form as a JSON array, nested for multi-dimensional arrays
+fn array_json(element: &PgTypeInfo, bytes: &[u8]) -> Option<serde_json::Value> {
+    let dimensions = i32::from_be_bytes(be(bytes, 0)?) as usize;
+    if dimensions == 0 {
+        return Some(serde_json::Value::Array(Vec::new()));
+    }
+    // Header: dimensions, has-nulls flag, element type, then (length, lower bound) per dimension
+    let lengths: Vec<usize> = (0..dimensions)
+        .map(|d| be(bytes, 12 + 8 * d).map(|b| i32::from_be_bytes(b).max(0) as usize))
+        .collect::<Option<_>>()?;
+    let mut at = 12 + 8 * dimensions;
+    let mut elements = Vec::new();
+    for _ in 0..lengths.iter().product::<usize>() {
+        let length = i32::from_be_bytes(be(bytes, at)?);
+        at += 4;
+        if length < 0 {
+            elements.push(serde_json::Value::Null);
+            continue;
+        }
+        let data = bytes.get(at..at + length as usize)?;
+        at += length as usize;
+        elements.push(json_of(binary_value(element, data), element));
+    }
+    // Group the flat elements by dimension, innermost first
+    for &length in lengths[1..].iter().rev() {
+        elements = elements
+            .chunks(length.max(1))
+            .map(|chunk| serde_json::Value::Array(chunk.to_vec()))
+            .collect();
+    }
+    Some(serde_json::Value::Array(elements))
+}
+
+/// An array element as JSON
+fn json_of(value: Value, info: &PgTypeInfo) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::String(s) => serde_json::Value::String(s),
+        Value::Integer(i) => i.into(),
+        Value::Decimal(d) => serde_json::from_str(&d.to_string())
+            .unwrap_or_else(|_| serde_json::Value::String(d.to_string())),
+        Value::Boolean(b) => b.into(),
+        Value::Date(dt) if info.name() == "DATE" => {
+            serde_json::Value::String(dt.format("%Y-%m-%d").to_string())
+        }
+        Value::Date(dt) => serde_json::Value::String(dt.to_rfc3339()),
+        Value::Json(j) => j,
     }
 }
 
@@ -404,6 +698,8 @@ impl PostgresTarget {
             DataType::Decimal if cratedb => "NUMERIC(38,10)",
             DataType::Decimal => "NUMERIC",
             DataType::Boolean => "BOOLEAN",
+            // CrateDB can't store DATE columns
+            DataType::Date if !cratedb => "DATE",
             DataType::Date | DataType::DateTime => "TIMESTAMP WITH TIME ZONE",
             DataType::Json => "JSONB", // PostgreSQL native JSON type
             DataType::Null => "TEXT",  // Default to TEXT for null columns
@@ -579,10 +875,16 @@ impl Target for PostgresTarget {
             // prepared statement by its SQL text, so if a parameter's type changed between
             // chunks, a binary integer could be sent where the cached statement expects text
             // (Postgres: "invalid byte sequence for encoding UTF8: 0x00").
+            // A Date column is DATE (TIMESTAMPTZ on CrateDB) and gets dates
+            let dates = !self.cratedb;
             for (offset, row) in chunk.iter().enumerate() {
                 for col in &schema.columns {
                     let value = row.get(&col.name).unwrap_or(&Value::Null);
                     query = match (&col.data_type, value) {
+                        (DataType::Date, Value::Null) if dates => {
+                            query.bind(None::<chrono::NaiveDate>)
+                        }
+                        (DataType::Date, Value::Date(d)) if dates => query.bind(d.date_naive()),
                         (DataType::Integer, Value::Null) => query.bind(None::<i64>),
                         (DataType::Boolean, Value::Null) => query.bind(None::<bool>),
                         (DataType::Date | DataType::DateTime, Value::Null) => {
@@ -928,6 +1230,96 @@ mod tests {
             "BIGINT"
         );
         assert_eq!(PostgresTarget::column_type(&DataType::Json, false), "JSONB");
+        // CrateDB can't store DATE columns
+        assert_eq!(PostgresTarget::column_type(&DataType::Date, false), "DATE");
+        assert_eq!(
+            PostgresTarget::column_type(&DataType::Date, true),
+            "TIMESTAMP WITH TIME ZONE"
+        );
+    }
+
+    /// NUMERIC's binary form: (ndigits, weight, sign, dscale) then base-10000 digits
+    fn numeric_bytes(weight: i16, sign: u16, dscale: u16, digits: &[i16]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend((digits.len() as i16).to_be_bytes());
+        bytes.extend(weight.to_be_bytes());
+        bytes.extend(sign.to_be_bytes());
+        bytes.extend(dscale.to_be_bytes());
+        for d in digits {
+            bytes.extend(d.to_be_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn test_numeric_text() {
+        // 12.50
+        assert_eq!(
+            numeric_text(&numeric_bytes(0, 0, 2, &[12, 5000])).as_deref(),
+            Some("12.50")
+        );
+        // -99999999.99
+        assert_eq!(
+            numeric_text(&numeric_bytes(1, 0x4000, 2, &[9999, 9999, 9900])).as_deref(),
+            Some("-99999999.99")
+        );
+        // 0.0000000000000000000000000001 (weight -7: the digit 1 is 10000^-7)
+        assert_eq!(
+            numeric_text(&numeric_bytes(-7, 0, 28, &[1])).as_deref(),
+            Some("0.0000000000000000000000000001")
+        );
+        // 123456789012345678901234567890: too wide for a Decimal, kept as text
+        let huge = numeric_bytes(7, 0, 0, &[12, 3456, 7890, 1234, 5678, 9012, 3456, 7890]);
+        assert_eq!(
+            numeric_text(&huge).as_deref(),
+            Some("123456789012345678901234567890")
+        );
+        assert_eq!(
+            decimal_text(numeric_text(&huge).unwrap()),
+            Value::String("123456789012345678901234567890".to_string())
+        );
+        assert_eq!(
+            numeric_text(&numeric_bytes(0, 0, 0, &[])).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            numeric_text(&numeric_bytes(0, 0xC000, 0, &[])).as_deref(),
+            Some("NaN")
+        );
+    }
+
+    #[test]
+    fn test_time_and_interval_text() {
+        assert_eq!(time_text(49_530_000_000), "13:45:30");
+        assert_eq!(time_text(1_500_000), "00:00:01.5");
+        assert_eq!(
+            interval_text(14, 3, 14_706_000_000),
+            "1 year 2 mons 3 days 04:05:06"
+        );
+        assert_eq!(interval_text(0, -1, 0), "-1 days");
+        assert_eq!(interval_text(0, -1, 7_200_000_000), "-1 days +02:00:00");
+        assert_eq!(interval_text(0, 0, 0), "00:00:00");
+        assert_eq!(interval_text(-12, 0, 0), "-1 years");
+        assert_eq!(timetz_text(49_530_000_000, -7200), "13:45:30+02");
+        assert_eq!(timetz_text(0, 19_800), "00:00:00-05:30");
+    }
+
+    #[test]
+    fn test_inet_and_bit_text() {
+        assert_eq!(
+            inet_text(&[2, 32, 0, 4, 192, 168, 0, 1]).as_deref(),
+            Some("192.168.0.1")
+        );
+        assert_eq!(
+            inet_text(&[2, 8, 1, 4, 10, 0, 0, 0]).as_deref(),
+            Some("10.0.0.0/8")
+        );
+        let mut v6 = vec![3, 128, 0, 16];
+        v6.extend([0; 15]);
+        v6.push(1);
+        assert_eq!(inet_text(&v6).as_deref(), Some("::1"));
+        // bit(3) '101': length 3, then the bits left-aligned in a byte
+        assert_eq!(bit_text(&[0, 0, 0, 3, 0b1010_0000]).as_deref(), Some("101"));
     }
 
     #[test]
