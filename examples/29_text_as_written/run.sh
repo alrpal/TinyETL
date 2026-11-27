@@ -77,16 +77,16 @@ columns:
   - name: Day
     type: String
 EOF
-EXPECTED='ZipCode,Phone,Lic,Flag,Amount,Day,Note|01826,9195550102,012345,true,0012.50,3/4/2021,2024-01-01T00:00:00+00:00|28801,+15550104,7,false,3.25,3/5/2021,'
+EXPECTED='ZipCode,Phone,Lic,Flag,Amount,Day,Note|01826,9195550102,012345,true,0012.50,3/4/2021,2024-01-01|28801,+15550104,7,false,3.25,3/5/2021,'
 for target in "$WORK/out.duckdb#t" "$WORK/out.db#t" "$WORK/out.parquet"; do
     run "$WORK/p.csv" "$target" --schema-file "$WORK/schema.yaml"
     got=$(readback "$target")
     [ "$got" = "$EXPECTED" ] || fail "$target: $got"
 done
 pass "DuckDB, SQLite and Parquet: every listed value exactly as in the file"
-[ "$(types "$WORK/out.duckdb#t")" = "ZipCode:TEXT,Phone:TEXT,Lic:TEXT,Flag:TEXT,Amount:TEXT,Day:TEXT,Note:TIMESTAMP" ] \
+[ "$(types "$WORK/out.duckdb#t")" = "ZipCode:TEXT,Phone:TEXT,Lic:TEXT,Flag:TEXT,Amount:TEXT,Day:TEXT,Note:DATE" ] \
     || fail "DuckDB types: $(types "$WORK/out.duckdb#t")"
-[ "$(types "$WORK/out.parquet")" = "ZipCode:TEXT,Phone:TEXT,Lic:TEXT,Flag:TEXT,Amount:TEXT,Day:TEXT,Note:TIMESTAMP" ] \
+[ "$(types "$WORK/out.parquet")" = "ZipCode:TEXT,Phone:TEXT,Lic:TEXT,Flag:TEXT,Amount:TEXT,Day:TEXT,Note:DATE" ] \
     || fail "Parquet types: $(types "$WORK/out.parquet")"
 pass "the listed columns are text; Note, which the schema doesn't list, is still inferred"
 

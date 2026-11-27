@@ -40,7 +40,7 @@ Most data movement doesn't need a platform. TinyETL keeps it to one command.
 ## Contents
 
 - [Quick Install](#quick-install) · [Get Started in 30 Seconds](#get-started-in-30-seconds) · [Usage](#usage)
-- [Sources and targets](#supported-data-sources-and-targets): [Files and protocols](#file-based-sources-multiple-protocols) · [Endpoint options](#endpoint-options) · [CSV delimiters](#csv-delimiters) · [Text that looks like a number](#text-that-looks-like-a-number) · [Excel](#excel)
+- [Sources and targets](#supported-data-sources-and-targets): [Files and protocols](#file-based-sources-multiple-protocols) · [Endpoint options](#endpoint-options) · [CSV delimiters](#csv-delimiters) · [Type detection](#type-detection) · [Excel](#excel)
 - [Databases](#database-connection-strings): [PostgreSQL](#postgresql) · [MySQL](#mysql) · [SQLite](#sqlite) · [SQL Server](#sql-server-native) · [CrateDB](#cratedb) · [DuckDB](#duckdb) · [ODBC](#odbc) · [Snowflake](#snowflake)
 - [Source queries](#source-queries) · [Passwords and secrets](#secure-password-management)
 - [Transforms](#data-transformations) ([SQL](#sql-transforms), [Lua](#lua-inline-transformations)) · [Schema files](#schema-files) · [YAML job files](#yaml-job-files) ([HTTP options](#http-source-options), [S3 options](#s3-options), [environment variables](#environment-variables))
@@ -356,15 +356,33 @@ tinyetl export.csv out.json --source-option "delimiter=;"       # skip detection
 tinyetl data.parquet out.csv --target-option "delimiter=|"      # write pipes
 ```
 
-#### Text That Looks Like a Number
+#### Type Detection
 
-CSV values are read as the text in the file. Types come from inference or a schema file, and a value is converted only when that keeps it as written: `01826`, `007` and `+15551234` are codes, so a column holding them stays text, and `01826` is never loaded as `1826`. To read every column as text with no inference ("land raw, type later"), set `infer_types=false`:
+CSV values (and JSON strings) are read as the text in the file, and each column's type comes from its first 1,000 values. A value is converted only when that keeps what it says:
+
+| Text | Detected as |
+|---|---|
+| `42`, `-7`, ` 42 ` | Integer (padding is ignored) |
+| `3.14`, `1.50`, `1.5e3`, `12345678901234567890` | Decimal, exactly: `1.50` keeps its scale, and a decimal with more digits than fit exactly (28 places) stays text |
+| `1,234`, `12,345.67` | Integer / Decimal, when every group has three digits (US separators); `1.234,5` stays text |
+| `01826`, `007`, `+15551234` | Text: codes, not quantities, so `01826` is never loaded as `1826` |
+| `true`, `FALSE`, `True` | Boolean |
+| `2024-01-15`, `1/15/2024`, `15.01.2024`, `Jan 15, 2024` | Date |
+| `2024-01-15 10:30:00.123456`, `2024-01-15T10:30:00+02:00`, `1/15/2024 10:30 AM` | DateTime (in UTC) |
+| `$1,234.50`, `45%`, `(123)`, `NaN`, `13:45`, `yes`, `N/A`, `NULL` | Text, as written |
+| empty | NULL |
+
+A column of values with one type gets that type; whole and fractional numbers together make a Decimal column, and dates with datetimes a DateTime column; any other mix is text. Numeric dates like `03/04/2024` read month first (4 March) unless a value in the same column only reads day first (`13/04/2024`): then the whole column is day first. A column that needs both orders is text.
+
+Files: repeated header names get a suffix (`id`, `id_2`), an empty one becomes `column_N`; a row with fewer fields than the header gets NULLs, one with more is an error naming the line; a file that isn't UTF-8 is read as Windows-1252 (with a warning). Typed sources (Parquet, Avro, Excel, databases) keep their own types; `tests/type_detection` checks every source against a fixture of awkward values.
+
+To read every CSV column as text with no detection ("land raw, type later"), set `infer_types=false`:
 
 ```bash
 tinyetl export.csv raw.parquet --source-option infer_types=false
 ```
 
-To type some columns and keep others as text, list the text ones as `String` in a [schema file](#schema-files); the other columns are still inferred.
+To type some columns and keep others as text, list the text ones as `String` in a [schema file](#schema-files); the other columns are still detected.
 
 ### Excel
 
@@ -826,7 +844,7 @@ Create a YAML file defining your expected schema. Here's the complete format:
 
 > **📝 Note on Schema Inference:** When TinyETL automatically infers schema from your data, all columns are marked as `nullable: true` by default. This is a safety measure for ETL operations—sample data may not represent all possible values in your dataset. If you need `NOT NULL` constraints or other strict validation, you must provide an explicit schema file.
 >
-> **How types are inferred:** column types come from the first 1,000 rows. A column whose values all have one type gets that type; whole and fractional numbers together (`84`, `29.85`) make a decimal column; any other mix makes a text column. Blank values (empty or whitespace only) don't count. Numbers with leading zeros or a leading `+` (`01826`, `+15551234`) count as text, not numbers. While copying, every value is converted to its column's type: numbers in a text column become text, text that parses in a numeric, boolean, date or JSON column is converted, and blank values in non-text columns become NULL. A later value that can't be converted (`abc` in an integer column) is written unchanged where the target allows it (files, SQLite) and fails with the column name on typed databases such as PostgreSQL. Use a schema file to fix the types up front.
+> **How types are inferred:** see [Type Detection](#type-detection). While copying, every value is converted to its column's type: numbers in a text column become text, text that parses in a numeric, boolean, date or JSON column is converted, and blank values in non-text columns become NULL. A later value that can't be converted (`abc` in an integer column) is written unchanged where the target allows it (files, SQLite) and fails with the column name on typed databases such as PostgreSQL. Use a schema file to fix the types up front.
 
 **schema.yaml:**
 ```yaml

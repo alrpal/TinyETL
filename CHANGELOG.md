@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Type detection test for every source** (`tests/type_detection`): about 300 column checks of awkward values (codes with leading zeros, thousands separators, dates in many layouts, booleans in mixed case, nested values, every database type's extremes) across CSV, TSV, gzip, JSON, Excel, Parquet, Avro, SQLite, DuckDB, PostgreSQL, MySQL and SQL Server. The database checks run against `test_env` and are skipped when it isn't running
+- **Detection of more text values** (README, Type Detection): scientific notation (`1.5e3`), US thousands separators (`1,234`, when every group has three digits), padded numbers (` 42 `), `TRUE`/`False`, datetimes with any number of fractional digits or a UTC offset (`2024-01-15 10:30:00.123456`, `2024-01-15 10:30:00+02:00`)
+
+### Changed
+- **Date columns are dates.** A column of dates (`2024-01-15`, `1/15/2024`, Excel date cells, database `DATE` columns) is a Date column, created as `DATE` in PostgreSQL, MySQL, SQL Server, DuckDB and Snowflake, as a date in Parquet and Avro, and written as `2024-01-15` in CSV and JSON. Before, every date became a timestamp (`2024-01-15T00:00:00+00:00`). Dates and datetimes together make a DateTime column
+- **Numeric dates are read one way per column**: month first (`03/04/2024` is 4 March) unless a value in the column only reads day first (`13/04/2024`), and then every date in it is day first. A column that needs both is text. Before, each value was read on its own, so one column could mix the two
+- SQLite targets declare `BOOLEAN`, `DATE` and `DATETIME` columns and write dates as `YYYY-MM-DD` (were TEXT / INTEGER and RFC 3339 text), so they read back with their types; MySQL datetime columns are `DATETIME(6)` (fractional seconds were dropped); SQL Server decimal columns are `DECIMAL(38,10)` (were `DECIMAL(18,6)`) and decimals are written exactly (they went through a float)
+- Binary values (PostgreSQL `bytea`, MySQL `blob`/`binary`, SQL Server `varbinary`, SQLite and DuckDB `BLOB`, Parquet and Avro bytes) are read as `0x` followed by lowercase hex, everywhere (DuckDB used base64, Avro a list of numbers)
+- CSV: repeated header names get a suffix (`id`, `id_2`) and an empty one becomes `column_N`; a row with fewer fields than the header gets NULLs (was an error); a file that isn't UTF-8 is read as Windows-1252, with a warning (was an error)
+- JSON targets write a decimal as a string when a JSON number would lose digits
+- Library: `Source::day_first_columns`, `schema::coerce_row_with`, `SchemaFile::validate_and_transform_row_with`, and the `detect` module
+
+### Fixed
+- **Database columns read as NULL in every row**: PostgreSQL `money`, `time`, `interval`, `uuid`, `bytea`, arrays, `inet`/`cidr`, `macaddr`, enums, `bit`/`varbit` and numerics too wide for a decimal; MySQL `time`, `blob` and `binary`; SQL Server **`date`**, `datetimeoffset`, `time`, `uniqueidentifier`, `varbinary` and `xml`. Every column is now read by its declared type, and the source schema comes from the declared types, so an empty table or a column of NULLs gets its real type
+- **Wrong numbers**: MySQL `bigint unsigned` above the signed range read as negative (18446744073709551615 as -1); SQL Server `money` lost digits through a float; JSON integers past 64 bits and CSV decimals past 28 digits were rounded; Parquet `uint64`, DuckDB `HUGEINT`/`UBIGINT` were typed as integers and came out as text. Large values are exact decimals now, and a value too wide for one is kept as text
+- **A CSV file with a repeated header name lost a column**: the later `id` overwrote the earlier one
+- MySQL `tinyint(1)`, `bool` and `bit(1)`, and SQLite `BOOLEAN`, read as 0/1 integers; they're booleans. MySQL `JSON` read as text; it's JSON
+- Nested values read as text: Parquet lists and structs, Avro arrays, maps and records, PostgreSQL arrays are JSON now
+- Avro decimals read as Rust debug text (`Decimal { value: 12345, len: 2 }`), bytes as `[222, 173]` and times as `37800123ms`
+- SQLite columns with no declared type were always text; they're typed from their values
+
 ## [0.12.1] - 2026-11-27
 
 ### Added
