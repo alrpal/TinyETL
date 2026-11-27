@@ -547,23 +547,19 @@ impl Value {
                 Value::String(value.to_string_for_arrow().unwrap_or_default())
             }
             (Value::String(s), _) if s.trim().is_empty() => Value::Null,
-            (Value::String(s), DataType::Integer | DataType::Decimal)
-                if !number_keeps_text(s.trim()) =>
-            {
-                Value::String(s)
-            }
-            (Value::String(s), DataType::Integer) => match s.trim().parse::<i64>() {
-                Ok(i) => Value::Integer(i),
-                Err(_) => Value::String(s),
-            },
-            (Value::String(s), DataType::Decimal) => match s.trim().parse::<Decimal>() {
-                Ok(d) => Value::Decimal(d),
-                Err(_) => Value::String(s),
-            },
-            (Value::String(s), DataType::Boolean) => match s.trim().to_ascii_lowercase().as_str() {
-                "true" => Value::Boolean(true),
-                "false" => Value::Boolean(false),
+            // Numbers as crate::detect reads them: exact, no leading zeros
+            (Value::String(s), DataType::Integer) => match crate::detect::parse_number(&s) {
+                Some(Value::Integer(i)) => Value::Integer(i),
                 _ => Value::String(s),
+            },
+            (Value::String(s), DataType::Decimal) => match crate::detect::parse_number(&s) {
+                Some(Value::Integer(i)) => Value::Decimal(Decimal::from(i)),
+                Some(decimal @ Value::Decimal(_)) => decimal,
+                _ => Value::String(s),
+            },
+            (Value::String(s), DataType::Boolean) => match crate::detect::parse_boolean(&s) {
+                Some(b) => Value::Boolean(b),
+                None => Value::String(s),
             },
             (Value::String(s), DataType::Date | DataType::DateTime) => {
                 match crate::date_parser::DateParser::try_parse(&s) {

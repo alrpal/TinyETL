@@ -14,8 +14,8 @@ use std::sync::Mutex;
 
 use crate::{
     connectors::{output_file::OutputFile, Source, Target},
-    date_parser::DateParser,
-    schema::{Row, Schema, SchemaInferer, Value},
+    detect::ColumnTally,
+    schema::{Column, DataType, Row, Schema, Value},
     Result, TinyEtlError,
 };
 
@@ -280,27 +280,23 @@ fn count_array_elements(mut file: File, sequence: bool) -> Result<usize> {
     })
 }
 
-/// A JSON value as a row value. Strings stay strings exactly as written; when `detect_dates`
-/// (schema inference only), a string that reads as a date counts as one, so the column can get
-/// a date type and `schema::coerce_row` converts its values.
-fn json_value_to_value(json_val: &serde_json::Value, detect_dates: bool) -> Value {
+/// A JSON value as a row value. Strings stay strings exactly as written; their column's type
+/// (a date, say) comes from inference, and `schema::coerce_row` converts them.
+fn json_value_to_value(json_val: &serde_json::Value) -> Value {
     match json_val {
-        serde_json::Value::String(s) if detect_dates => {
-            DateParser::try_parse(s).unwrap_or_else(|| Value::String(s.clone()))
-        }
         serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Integer(i)
-            } else if let Some(f) = n.as_f64() {
-                match Decimal::try_from(f) {
-                    Ok(d) => Value::Decimal(d),
-                    Err(_) => Value::String(n.to_string()),
-                }
-            } else {
-                Value::String(n.to_string())
-            }
-        }
+        // Exact: integers past i64 and decimals come from the number's text, not an f64
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => Value::Integer(i),
+            None => crate::detect::parse_number(&n.to_string())
+                .map(|v| match v {
+                    Value::Integer(i) => Value::Decimal(Decimal::from(i)),
+                    // JSON numbers have no scale: 1e3 is 1000, not 1000.0
+                    Value::Decimal(d) => Value::Decimal(d.normalize()),
+                    other => other,
+                })
+                .unwrap_or_else(|| Value::String(n.to_string())),
+        },
         serde_json::Value::Bool(b) => Value::Boolean(*b),
         serde_json::Value::Null => Value::Null,
         // Nested objects and arrays stay JSON (a JSON/JSONB column, nested in JSON output)
@@ -309,11 +305,11 @@ fn json_value_to_value(json_val: &serde_json::Value, detect_dates: bool) -> Valu
 }
 
 /// A row for each JSON object; other values (numbers, arrays at the top level) are skipped.
-fn object_to_row(value: &serde_json::Value, detect_dates: bool) -> Option<Row> {
+fn object_to_row(value: &serde_json::Value) -> Option<Row> {
     value.as_object().map(|object| {
         object
             .iter()
-            .map(|(key, value)| (key.clone(), json_value_to_value(value, detect_dates)))
+            .map(|(key, value)| (key.clone(), json_value_to_value(value)))
             .collect()
     })
 }
@@ -386,13 +382,34 @@ impl Source for JsonSource {
                     }
                 }
             }
-            if let Some(row) = object_to_row(&value, true) {
+            if let Some(row) = object_to_row(&value) {
                 rows.push(row);
             }
         }
-        let mut schema = SchemaInferer::infer_from_rows_ordered(&rows, &key_order)?;
-        schema.estimated_rows = None;
-        Ok(schema)
+        // JSON numbers, booleans and nesting are typed already; strings are text unless they
+        // read as dates
+        let columns = key_order
+            .iter()
+            .map(|key| {
+                let mut tally = ColumnTally::default();
+                for row in &rows {
+                    match row.get(key) {
+                        Some(Value::Null) | None => tally.add_text(""),
+                        Some(value) => tally.add_value(value),
+                    }
+                }
+                Column {
+                    name: key.clone(),
+                    data_type: tally.data_type(),
+                    nullable: true,
+                }
+            })
+            .collect();
+        Ok(Schema {
+            columns,
+            estimated_rows: None,
+            primary_key_candidate: None,
+        })
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
@@ -404,7 +421,7 @@ impl Source for JsonSource {
             let Some(value) = values.next_value()? else {
                 break;
             };
-            if let Some(row) = object_to_row(&value, false) {
+            if let Some(row) = object_to_row(&value) {
                 rows.push(row);
             }
         }
@@ -465,18 +482,23 @@ impl JsonTarget {
         match value {
             Value::String(s) => serde_json::Value::String(s.clone()),
             Value::Integer(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+            // A JSON number when that's exact; otherwise the digits as a string, so that
+            // 0.1234567890123456789 doesn't lose precision
             Value::Decimal(d) => {
-                // Convert Decimal to f64 for JSON representation
-                match (*d).try_into() {
-                    Ok(f) => {
-                        if let Some(n) = serde_json::Number::from_f64(f) {
-                            serde_json::Value::Number(n)
-                        } else {
-                            serde_json::Value::String(d.to_string())
-                        }
+                if d.fract().is_zero() {
+                    if let Ok(i) = i64::try_from(*d) {
+                        return serde_json::Value::Number(i.into());
                     }
-                    Err(_) => serde_json::Value::String(d.to_string()),
+                    if let Ok(u) = u64::try_from(*d) {
+                        return serde_json::Value::Number(u.into());
+                    }
                 }
+                f64::try_from(*d)
+                    .ok()
+                    .filter(|f| Decimal::try_from(*f).is_ok_and(|back| back == *d))
+                    .and_then(serde_json::Number::from_f64)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or_else(|| serde_json::Value::String(d.to_string()))
             }
             Value::Boolean(b) => serde_json::Value::Bool(*b),
             Value::Date(dt) => serde_json::Value::String(dt.to_rfc3339()),
@@ -490,10 +512,14 @@ impl JsonTarget {
         match &self.schema {
             Some(schema) => {
                 for column in &schema.columns {
-                    let value = row
-                        .get(&column.name)
-                        .map(|v| self.value_to_json(v))
-                        .unwrap_or(serde_json::Value::Null);
+                    let value = match row.get(&column.name) {
+                        // A Date column holds dates: 2024-01-15
+                        Some(Value::Date(dt)) if column.data_type == DataType::Date => {
+                            serde_json::Value::String(dt.format("%Y-%m-%d").to_string())
+                        }
+                        Some(v) => self.value_to_json(v),
+                        None => serde_json::Value::Null,
+                    };
                     object.insert(column.name.clone(), value);
                 }
             }

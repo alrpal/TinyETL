@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use csv::{ReaderBuilder, WriterBuilder};
-use rust_decimal::Decimal;
 use serde_json;
 use std::collections::HashMap;
 use std::io::Read;
@@ -8,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     connectors::{Source, Target},
-    date_parser::DateParser,
-    schema::{Row, Schema, Value},
+    detect::ColumnTally,
+    schema::{Column, DataType, Row, Schema, Value},
     Result, TinyEtlError,
 };
 
@@ -114,6 +113,8 @@ pub struct CsvSource {
     infer_types: bool,
     reader: Option<csv::Reader<std::fs::File>>,
     headers: Vec<String>,
+    /// Whether the not-UTF-8 warning has been shown
+    warned_encoding: bool,
     current_position: u64,
     has_more_data: bool,
 }
@@ -132,6 +133,7 @@ impl CsvSource {
             infer_types: infer_types_option(options)?,
             reader: None,
             headers: Vec::new(),
+            warned_encoding: false,
             current_position: 0,
             has_more_data: true,
         })
@@ -141,6 +143,7 @@ impl CsvSource {
         let file = std::fs::File::open(&self.file_path)?;
         Ok(ReaderBuilder::new()
             .has_headers(true)
+            .flexible(true) // short rows are allowed; `record_row` rejects long ones
             .delimiter(self.delimiter)
             .from_reader(file))
     }
@@ -155,43 +158,92 @@ impl CsvSource {
 
     /// A field as read: the text exactly as written, or NULL for an empty field. Values get
     /// their column's type later (`schema::coerce_row`), so a text column keeps `01826`.
-    fn raw_value(field: &str) -> Value {
+    fn raw_value(field: String) -> Value {
         if field.is_empty() {
             Value::Null
         } else {
-            Value::String(field.to_string())
+            Value::String(field)
         }
     }
 
-    /// The type a field suggests, for schema inference
-    fn parse_value(value: &str) -> Value {
-        // Numbers, unless that would change the text (leading zeros, a leading +)
-        if crate::schema::number_keeps_text(value) {
-            if let Ok(int_val) = value.parse::<i64>() {
-                return Value::Integer(int_val);
+    /// A field's text: UTF-8, or else Windows-1252 (the usual encoding of exports that aren't
+    /// UTF-8), with a warning the first time
+    fn decode(&mut self, field: &[u8]) -> String {
+        match std::str::from_utf8(field) {
+            Ok(text) => text.to_string(),
+            Err(_) => {
+                if !self.warned_encoding {
+                    self.warned_encoding = true;
+                    tracing::warn!(
+                        "{} isn't valid UTF-8; reading it as Windows-1252",
+                        self.file_path.display()
+                    );
+                }
+                windows_1252(field)
             }
-            if let Ok(decimal_val) = value.parse::<Decimal>() {
-                return Value::Decimal(decimal_val);
-            }
-        }
-
-        // Try boolean
-        if let Ok(bool_val) = value.parse::<bool>() {
-            return Value::Boolean(bool_val);
-        }
-
-        // Try date/datetime using the shared parser
-        if let Some(date_value) = DateParser::try_parse(value) {
-            return date_value;
-        }
-
-        // Default to string
-        if value.is_empty() {
-            Value::Null
-        } else {
-            Value::String(value.to_string())
         }
     }
+
+    /// A record as a row; a record with more fields than the header is an error, one with
+    /// fewer leaves the rest NULL
+    fn record_row(&mut self, record: &csv::ByteRecord) -> Result<Row> {
+        if record.len() > self.headers.len() {
+            let line = record.position().map_or(0, |p| p.line());
+            return Err(TinyEtlError::DataTransfer(format!(
+                "{} line {} has {} fields, but the header has {}",
+                self.file_path.display(),
+                line,
+                record.len(),
+                self.headers.len()
+            )));
+        }
+        let mut row = Row::with_capacity(self.headers.len());
+        for (i, field) in record.iter().enumerate() {
+            let text = self.decode(field);
+            row.insert(self.headers[i].clone(), Self::raw_value(text));
+        }
+        Ok(row)
+    }
+}
+
+/// Header names made usable as column names: an empty name becomes `column_N`, a repeated
+/// one gets `_2`, `_3`... (as in Excel sources)
+fn unique_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let base = if text.trim().is_empty() {
+                format!("column_{}", i + 1)
+            } else {
+                text
+            };
+            let mut name = base.clone();
+            let mut n = 2;
+            while !seen.insert(name.clone()) {
+                name = format!("{}_{}", base, n);
+                n += 1;
+            }
+            name
+        })
+        .collect()
+}
+
+/// Windows-1252 text: Latin-1, with printable characters in 0x80-0x9F
+fn windows_1252(bytes: &[u8]) -> String {
+    const HIGH: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
+        'ž', 'Ÿ',
+    ];
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9f => HIGH[(b - 0x80) as usize],
+            _ => b as char,
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -215,7 +267,9 @@ impl Source for CsvSource {
         let mut reader = self.open_reader()?;
 
         // Read and store headers
-        self.headers = reader.headers()?.iter().map(|h| h.to_string()).collect();
+        let raw: Vec<Vec<u8>> = reader.byte_headers()?.iter().map(|h| h.to_vec()).collect();
+        let names = raw.iter().map(|h| self.decode(h)).collect();
+        self.headers = unique_names(names);
 
         // Reset file for actual reading
         self.reader = Some(self.open_reader()?);
@@ -227,77 +281,71 @@ impl Source for CsvSource {
         if self.reader.is_none() {
             self.connect().await?;
         }
-
-        let mut sample_rows = Vec::new();
+        let mut tallies: Vec<ColumnTally> = self
+            .headers
+            .iter()
+            .map(|_| ColumnTally::default())
+            .collect();
+        let mut record = csv::ByteRecord::new();
         let mut count = 0;
-
-        if let Some(ref mut reader) = self.reader {
-            for result in reader.records() {
-                if count >= sample_size {
-                    break;
-                }
-
-                let record = result?;
-                let mut row = Row::new();
-
-                for (i, field) in record.iter().enumerate() {
-                    if let Some(header) = self.headers.get(i) {
-                        let value = if self.infer_types {
-                            Self::parse_value(field)
-                        } else {
-                            Self::raw_value(field)
-                        };
-                        row.insert(header.clone(), value);
-                    }
-                }
-
-                sample_rows.push(row);
-                count += 1;
+        while count < sample_size {
+            let Some(reader) = self.reader.as_mut() else {
+                break;
+            };
+            if !reader.read_byte_record(&mut record)? {
+                break;
             }
+            let row = self.record_row(&record)?;
+            for (header, tally) in self.headers.iter().zip(&mut tallies) {
+                match row.get(header) {
+                    Some(Value::String(text)) if self.infer_types => tally.add_text(text),
+                    Some(Value::String(text)) => tally.add_string(text),
+                    _ => tally.add_text(""),
+                }
+            }
+            count += 1;
         }
 
         // Reset for future reading
         self.reset().await?;
 
-        // Custom schema inference that preserves column order from CSV headers
-        crate::schema::SchemaInferer::infer_from_rows_ordered(&sample_rows, &self.headers)
+        let columns = self
+            .headers
+            .iter()
+            .zip(&tallies)
+            .map(|(name, tally)| Column {
+                name: name.clone(),
+                data_type: if self.infer_types {
+                    tally.data_type()
+                } else {
+                    DataType::String
+                },
+                nullable: true,
+            })
+            .collect();
+        Ok(Schema {
+            columns,
+            estimated_rows: Some(count),
+            primary_key_candidate: None,
+        })
     }
 
     async fn read_batch(&mut self, batch_size: usize) -> Result<Vec<Row>> {
         if self.reader.is_none() {
             self.connect().await?;
         }
-
-        let mut rows = Vec::new();
-        let mut count = 0;
-
-        if let Some(ref mut reader) = self.reader {
-            let mut records_iter = reader.records();
-
-            while count < batch_size {
-                match records_iter.next() {
-                    Some(Ok(record)) => {
-                        let mut row = Row::new();
-
-                        for (i, field) in record.iter().enumerate() {
-                            if let Some(header) = self.headers.get(i) {
-                                row.insert(header.clone(), Self::raw_value(field));
-                            }
-                        }
-
-                        rows.push(row);
-                        count += 1;
-                    }
-                    Some(Err(e)) => return Err(e.into()),
-                    None => {
-                        // No more records available
-                        self.has_more_data = false;
-                        break;
-                    }
-                }
+        let mut rows = Vec::with_capacity(batch_size.min(10_000));
+        let mut record = csv::ByteRecord::new();
+        while rows.len() < batch_size {
+            let Some(reader) = self.reader.as_mut() else {
+                break;
+            };
+            if !reader.read_byte_record(&mut record)? {
+                self.has_more_data = false;
+                break;
             }
+            rows.push(self.record_row(&record)?);
         }
-
         Ok(rows)
     }
 
@@ -340,6 +388,8 @@ pub struct CsvTarget {
     writer: Option<csv::Writer<std::fs::File>>,
     headers_written: bool,
     column_order: Vec<String>,
+    /// Columns of type Date, written as `2024-01-15`
+    date_columns: std::collections::HashSet<String>,
 }
 
 impl CsvTarget {
@@ -357,6 +407,7 @@ impl CsvTarget {
             writer: None,
             headers_written: false,
             column_order: Vec::new(),
+            date_columns: Default::default(),
         })
     }
 
@@ -399,6 +450,12 @@ impl Target for CsvTarget {
 
         // Store column order from schema
         self.column_order = schema.columns.iter().map(|c| c.name.clone()).collect();
+        self.date_columns = schema
+            .columns
+            .iter()
+            .filter(|c| c.data_type == DataType::Date)
+            .map(|c| c.name.clone())
+            .collect();
 
         // Write headers
         if let Some(ref mut writer) = self.writer {
@@ -423,10 +480,12 @@ impl Target for CsvTarget {
                     // Use schema-defined column order
                     self.column_order
                         .iter()
-                        .map(|key| {
-                            row.get(key)
-                                .map(CsvTarget::value_to_string)
-                                .unwrap_or_default()
+                        .map(|key| match row.get(key) {
+                            Some(Value::Date(dt)) if self.date_columns.contains(key) => {
+                                dt.format("%Y-%m-%d").to_string()
+                            }
+                            Some(value) => CsvTarget::value_to_string(value),
+                            None => String::new(),
                         })
                         .collect()
                 } else {
@@ -478,6 +537,7 @@ impl Target for CsvTarget {
 mod tests {
     use super::*;
     use crate::schema::DataType;
+    use rust_decimal::Decimal;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -538,38 +598,6 @@ mod tests {
 
         let result = target.connect().await;
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_parse_value_types() {
-        // Test integer parsing
-        assert!(matches!(CsvSource::parse_value("42"), Value::Integer(42)));
-
-        // Test decimal parsing
-        let decimal_result = CsvSource::parse_value("3.14");
-        assert!(matches!(decimal_result, Value::Decimal(d) if d == Decimal::new(314, 2)));
-
-        // Test boolean parsing
-        assert!(matches!(
-            CsvSource::parse_value("true"),
-            Value::Boolean(true)
-        ));
-        assert!(matches!(
-            CsvSource::parse_value("false"),
-            Value::Boolean(false)
-        ));
-
-        // Test datetime parsing
-        assert!(matches!(
-            CsvSource::parse_value("2023-01-01T12:00:00Z"),
-            Value::Date(_)
-        ));
-
-        // Test empty string to null
-        assert!(matches!(CsvSource::parse_value(""), Value::Null));
-
-        // Test string fallback
-        assert!(matches!(CsvSource::parse_value("hello"), Value::String(s) if s == "hello"));
     }
 
     #[tokio::test]

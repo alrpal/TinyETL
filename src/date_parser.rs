@@ -1,117 +1,151 @@
 use crate::schema::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
+/// Which reading of a numeric date like `03/04/2024` to prefer: 4 March (month first, the
+/// default) or 3 April (day first). A column is day first when one of its values only reads
+/// that way (`13/04/2024`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DateOrder {
+    #[default]
+    MonthFirst,
+    DayFirst,
+}
+
+/// Which orders a layout belongs to
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// Unambiguous: ISO, month names, `25.12.2023`
+    Any,
+    MonthFirst,
+    DayFirst,
+}
+
+/// What a text value is, as a date
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DateMatch {
+    /// The text has a time of day (`2024-01-15 00:00` counts); otherwise it's a date
+    pub has_time: bool,
+    /// It reads as a date month first / day first (both, for unambiguous layouts)
+    pub month_first: bool,
+    pub day_first: bool,
+}
+
+/// Date-only layouts (midnight UTC)
+const DATES: &[(&str, Layout)] = &[
+    ("%Y-%m-%d", Layout::Any),
+    ("%Y/%m/%d", Layout::Any),
+    ("%Y.%m.%d", Layout::Any),
+    ("%m/%d/%Y", Layout::MonthFirst),
+    ("%d/%m/%Y", Layout::DayFirst),
+    ("%m-%d-%Y", Layout::MonthFirst),
+    ("%d-%m-%Y", Layout::DayFirst),
+    ("%d.%m.%Y", Layout::Any),
+    ("%b %d, %Y", Layout::Any),
+    ("%B %d, %Y", Layout::Any),
+    ("%d %b %Y", Layout::Any),
+    ("%d %B %Y", Layout::Any),
+];
+
+/// Date and time layouts without a zone (UTC). `%.f` takes any number of fractional digits.
+const DATETIMES: &[(&str, Layout)] = &[
+    ("%Y-%m-%dT%H:%M:%S%.f", Layout::Any),
+    ("%Y-%m-%dT%H:%M:%S", Layout::Any),
+    ("%Y-%m-%dT%H:%M", Layout::Any),
+    ("%Y-%m-%d %H:%M:%S%.f", Layout::Any),
+    ("%Y-%m-%d %H:%M:%S", Layout::Any),
+    ("%Y-%m-%d %H:%M", Layout::Any),
+    ("%Y-%m-%d %I:%M:%S %p", Layout::Any),
+    ("%Y-%m-%d %I:%M %p", Layout::Any),
+    ("%m/%d/%Y %H:%M:%S%.f", Layout::MonthFirst),
+    ("%m/%d/%Y %H:%M:%S", Layout::MonthFirst),
+    ("%m/%d/%Y %H:%M", Layout::MonthFirst),
+    ("%m/%d/%Y %I:%M:%S %p", Layout::MonthFirst),
+    ("%m/%d/%Y %I:%M %p", Layout::MonthFirst),
+    ("%d/%m/%Y %H:%M:%S%.f", Layout::DayFirst),
+    ("%d/%m/%Y %H:%M:%S", Layout::DayFirst),
+    ("%d/%m/%Y %H:%M", Layout::DayFirst),
+    ("%d/%m/%Y %I:%M:%S %p", Layout::DayFirst),
+    ("%d/%m/%Y %I:%M %p", Layout::DayFirst),
+];
+
+/// Layouts with a UTC offset, besides RFC 3339 (`2024-01-15 10:30:00+02:00`)
+const ZONED: &[&str] = &[
+    "%Y-%m-%d %H:%M:%S%.f%:z",
+    "%Y-%m-%d %H:%M:%S%:z",
+    "%Y-%m-%d %H:%M:%S%#z",
+];
+
 /// A reusable date parser that attempts to parse common date/datetime formats
 /// and returns a standardized DateTime<Utc> value
 pub struct DateParser;
 
 impl DateParser {
-    /// Attempts to parse a string value as a date/datetime in various common formats
-    /// Returns Some(Value::Date) if successful, None otherwise
+    /// Parse a date or date and time, month first for numeric dates like `03/04/2024`.
+    /// Returns `Value::Date` (UTC; dates are at midnight).
     pub fn try_parse(value: &str) -> Option<Value> {
-        let trimmed = value.trim();
+        Self::try_parse_ordered(value, DateOrder::MonthFirst)
+    }
 
-        if trimmed.is_empty() {
+    /// [`DateParser::try_parse`], reading ambiguous numeric dates in `order`
+    pub fn try_parse_ordered(value: &str, order: DateOrder) -> Option<Value> {
+        Self::parse(value.trim(), order).map(|(dt, _)| Value::Date(dt))
+    }
+
+    /// What `value` is as a date, if it is one
+    pub fn classify(value: &str) -> Option<DateMatch> {
+        let text = value.trim();
+        let (_, layout_month) = Self::parse(text, DateOrder::MonthFirst)?;
+        let (_, layout_day) = Self::parse(text, DateOrder::DayFirst)?;
+        let has_time = layout_month.1;
+        let fits = |order: DateOrder| {
+            [layout_month, layout_day]
+                .iter()
+                .any(|(layout, _)| match layout {
+                    Layout::Any => true,
+                    Layout::MonthFirst => order == DateOrder::MonthFirst,
+                    Layout::DayFirst => order == DateOrder::DayFirst,
+                })
+        };
+        Some(DateMatch {
+            has_time,
+            month_first: fits(DateOrder::MonthFirst),
+            day_first: fits(DateOrder::DayFirst),
+        })
+    }
+
+    /// The parsed value and the layout it matched (with whether it has a time). Layouts of the
+    /// preferred order are tried before the other order's.
+    fn parse(text: &str, order: DateOrder) -> Option<(DateTime<Utc>, (Layout, bool))> {
+        if text.is_empty() {
             return None;
         }
-
-        // Try various formats in order of likelihood/specificity
-
-        // 1. RFC 3339 / ISO 8601 with timezone (most specific)
-        if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
-            return Some(Value::Date(dt.with_timezone(&Utc)));
+        if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
+            return Some((dt.with_timezone(&Utc), (Layout::Any, true)));
         }
-
-        // 2. ISO 8601 without timezone (assume UTC)
-        if let Some(dt) = Self::try_iso_formats(trimmed) {
-            return Some(Value::Date(dt));
+        for format in ZONED {
+            if let Ok(dt) = DateTime::parse_from_str(text, format) {
+                return Some((dt.with_timezone(&Utc), (Layout::Any, true)));
+            }
         }
-
-        // 3. Common date formats (YYYY-MM-DD, MM/DD/YYYY, DD/MM/YYYY, etc.)
-        if let Some(dt) = Self::try_date_formats(trimmed) {
-            return Some(Value::Date(dt));
-        }
-
-        // 4. Common datetime formats without timezone
-        if let Some(dt) = Self::try_datetime_formats(trimmed) {
-            return Some(Value::Date(dt));
-        }
-
-        None
-    }
-
-    /// Try ISO 8601 formats without explicit timezone
-    fn try_iso_formats(value: &str) -> Option<DateTime<Utc>> {
-        // ISO 8601 datetime without timezone: 2023-12-25T10:30:00
-        if let Ok(ndt) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S") {
-            return Some(Utc.from_utc_datetime(&ndt));
-        }
-
-        // ISO 8601 datetime with milliseconds: 2023-12-25T10:30:00.123
-        if let Ok(ndt) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.3f") {
-            return Some(Utc.from_utc_datetime(&ndt));
-        }
-
-        // ISO 8601 datetime with microseconds: 2023-12-25T10:30:00.123456
-        if let Ok(ndt) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.6f") {
-            return Some(Utc.from_utc_datetime(&ndt));
-        }
-
-        None
-    }
-
-    /// Try common date-only formats (assume midnight UTC)
-    fn try_date_formats(value: &str) -> Option<DateTime<Utc>> {
-        let date_formats = vec![
-            "%Y-%m-%d",  // 2023-12-25
-            "%m/%d/%Y",  // 12/25/2023
-            "%d/%m/%Y",  // 25/12/2023
-            "%m-%d-%Y",  // 12-25-2023
-            "%d-%m-%Y",  // 25-12-2023
-            "%Y/%m/%d",  // 2023/12/25
-            "%d.%m.%Y",  // 25.12.2023
-            "%Y.%m.%d",  // 2023.12.25
-            "%b %d, %Y", // Dec 25, 2023
-            "%B %d, %Y", // December 25, 2023
-            "%d %b %Y",  // 25 Dec 2023
-            "%d %B %Y",  // 25 December 2023
-        ];
-
-        for format in date_formats {
-            if let Ok(date) = NaiveDate::parse_from_str(value, format) {
-                if let Some(datetime) = date.and_hms_opt(0, 0, 0) {
-                    return Some(Utc.from_utc_datetime(&datetime));
+        let preferred = match order {
+            DateOrder::MonthFirst => Layout::MonthFirst,
+            DateOrder::DayFirst => Layout::DayFirst,
+        };
+        // Unambiguous and preferred layouts first, then the other order
+        for pass in [true, false] {
+            let wanted = |layout: Layout| (layout == Layout::Any || layout == preferred) == pass;
+            for (format, layout) in DATES.iter().filter(|(_, l)| wanted(*l)) {
+                if let Ok(date) = NaiveDate::parse_from_str(text, format) {
+                    let midnight = date.and_hms_opt(0, 0, 0)?;
+                    return Some((Utc.from_utc_datetime(&midnight), (*layout, false)));
+                }
+            }
+            for (format, layout) in DATETIMES.iter().filter(|(_, l)| wanted(*l)) {
+                if let Ok(ndt) = NaiveDateTime::parse_from_str(text, format) {
+                    return Some((Utc.from_utc_datetime(&ndt), (*layout, true)));
                 }
             }
         }
-
-        None
-    }
-
-    /// Try common datetime formats without timezone (assume UTC)
-    fn try_datetime_formats(value: &str) -> Option<DateTime<Utc>> {
-        let datetime_formats = vec![
-            "%Y-%m-%d %H:%M:%S",     // 2023-12-25 10:30:00
-            "%Y-%m-%d %H:%M:%S%.3f", // 2023-12-25 10:30:00.123
-            "%m/%d/%Y %H:%M:%S",     // 12/25/2023 10:30:00
-            "%d/%m/%Y %H:%M:%S",     // 25/12/2023 10:30:00
-            "%Y-%m-%d %H:%M",        // 2023-12-25 10:30
-            "%m/%d/%Y %H:%M",        // 12/25/2023 10:30
-            "%d/%m/%Y %H:%M",        // 25/12/2023 10:30
-            "%Y-%m-%d %I:%M:%S %p",  // 2023-12-25 10:30:00 AM
-            "%m/%d/%Y %I:%M:%S %p",  // 12/25/2023 10:30:00 AM
-            "%d/%m/%Y %I:%M:%S %p",  // 25/12/2023 10:30:00 AM
-            "%Y-%m-%d %I:%M %p",     // 2023-12-25 10:30 AM
-            "%m/%d/%Y %I:%M %p",     // 12/25/2023 10:30 AM
-            "%d/%m/%Y %I:%M %p",     // 25/12/2023 10:30 AM
-        ];
-
-        for format in datetime_formats {
-            if let Ok(ndt) = NaiveDateTime::parse_from_str(value, format) {
-                return Some(Utc.from_utc_datetime(&ndt));
-            }
-        }
-
         None
     }
 
